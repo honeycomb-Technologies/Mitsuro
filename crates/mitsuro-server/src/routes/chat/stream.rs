@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{Event, Sse};
 use tokio::sync::mpsc::WeakSender;
 use tokio::sync::{mpsc, Mutex, OwnedMutexGuard, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
@@ -24,15 +24,13 @@ use mitsuro_core::SessionManager;
 use super::stream_notify::ChatStreamRunOutcome;
 use super::{ChatSessionContext, SSE_CHANNEL_BUFFER};
 use crate::error::AppError;
+use crate::routes::sse::event_to_sse;
 use crate::types::{
     AgenticEvent, DelegatedAgentStateResponse, DelegatedRunStage, DelegatedToolStateResponse,
 };
 use crate::AppState;
 
-const SSE_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(15);
-const SSE_REQUIRED_DELIVERY_TIMEOUT: Duration = Duration::from_millis(250);
 const DELEGATION_EVENT_LIVE_PAGE_LIMIT: usize = 128;
-
 // ── Orchestrator → SSE bridge ────────────────────────────────────────
 
 fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
@@ -55,10 +53,6 @@ fn loop_event_requires_delivery(event: &LoopEvent) -> bool {
     )
 }
 
-fn event_to_sse(event: &AgenticEvent) -> Option<Event> {
-    Event::default().json_data(event).ok()
-}
-
 pub(super) async fn forward_loop_event(
     sse_tx: &mpsc::Sender<Result<Event, Infallible>>,
     session_id: &str,
@@ -66,60 +60,15 @@ pub(super) async fn forward_loop_event(
     skipped_events: &mut usize,
 ) -> bool {
     let requires_delivery = loop_event_requires_delivery(&loop_event);
-
-    if *skipped_events > 0 {
-        let lagged_event = AgenticEvent::Lagged {
-            skipped: *skipped_events,
-        };
-
-        if let Some(sse_event) = event_to_sse(&lagged_event) {
-            if requires_delivery {
-                if sse_tx.send(Ok(sse_event)).await.is_err() {
-                    return false;
-                }
-                *skipped_events = 0;
-            } else {
-                match sse_tx.try_send(Ok(sse_event)) {
-                    Ok(()) => *skipped_events = 0,
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        *skipped_events = skipped_events.saturating_add(1);
-                        tracing::warn!(
-                            session_id,
-                            skipped = *skipped_events,
-                            "Dropping SSE event because client queue is full"
-                        );
-                        return true;
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => return false,
-                }
-            }
-        } else {
-            *skipped_events = 0;
-        }
-    }
-
-    let agentic_event: AgenticEvent = loop_event.into();
-    let Some(sse_event) = event_to_sse(&agentic_event) else {
-        return true;
-    };
-
-    if requires_delivery {
-        sse_tx.send(Ok(sse_event)).await.is_ok()
-    } else {
-        match sse_tx.try_send(Ok(sse_event)) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                *skipped_events = skipped_events.saturating_add(1);
-                tracing::warn!(
-                    session_id,
-                    skipped = *skipped_events,
-                    "Dropping SSE event because client queue is full"
-                );
-                true
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
-        }
-    }
+    crate::routes::sse::forward_sse_event(
+        sse_tx,
+        session_id,
+        loop_event.into(),
+        requires_delivery,
+        skipped_events,
+        "Dropping SSE event because client queue is full",
+    )
+    .await
 }
 
 pub(super) async fn start_orchestrator_sse(
@@ -133,8 +82,7 @@ pub(super) async fn start_orchestrator_sse(
     let run = start_chat_run(state, ctx, work_mode, permission_mode, generate_title)?;
     launch_chat_run_bridge(state, run, sse_tx).await;
 
-    let stream = ReceiverStream::new(sse_rx);
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEP_ALIVE_INTERVAL)))
+    Ok(crate::routes::sse::sse_response(sse_rx))
 }
 
 /// Resume an idle Chat/Code session without an attached SSE client while
@@ -281,6 +229,12 @@ async fn launch_chat_run_bridge(
     let delegated_db_path = Arc::clone(&state.db_path);
     let delegated_sse_tx = sse_tx.downgrade();
     let delegated_sse_open = Arc::new(Mutex::new(true));
+    let agent_stream_generation = state
+        .agent_streams
+        .write()
+        .await
+        .begin_generation(&session_id);
+    let agent_streams = Arc::clone(&state.agent_streams);
 
     tokio::spawn(run_delegated_progress_bridge(
         delegated_progress_rx,
@@ -304,6 +258,7 @@ async fn launch_chat_run_bridge(
             apns_service,
             user_id,
             db_path,
+            Some((agent_streams, agent_stream_generation)),
             delegated_sse_open,
         )
         .await;
@@ -608,6 +563,8 @@ async fn forward_delegated_progress(
     event: DelegatedProgressEvent,
     skipped_events: &mut usize,
 ) -> bool {
+    // The gate is held across forwarding: delegated progress that acquires it
+    // first is delivered before a concurrent Finish closes the boundary.
     let sse_open = sse_open.lock().await;
     if !*sse_open {
         return false;
@@ -616,59 +573,16 @@ async fn forward_delegated_progress(
         return false;
     };
     let requires_delivery = delegated_stage_is_terminal(event.stage);
-
-    if *skipped_events > 0 {
-        let lagged_event = AgenticEvent::Lagged {
-            skipped: *skipped_events,
-        };
-        if let Some(sse_event) = event_to_sse(&lagged_event) {
-            if requires_delivery {
-                if !send_required_sse_event(&sse_tx, sse_event).await {
-                    return false;
-                }
-                *skipped_events = 0;
-            } else {
-                match sse_tx.try_send(Ok(sse_event)) {
-                    Ok(()) => *skipped_events = 0,
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        *skipped_events = skipped_events.saturating_add(1);
-                        return true;
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => return false,
-                }
-            }
-        }
-    }
-
-    let Some(sse_event) = event_to_sse(&AgenticEvent::delegated_progress(event)) else {
-        return true;
-    };
-    if requires_delivery {
-        return send_required_sse_event(&sse_tx, sse_event).await;
-    }
-    match sse_tx.try_send(Ok(sse_event)) {
-        Ok(()) => true,
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            *skipped_events = skipped_events.saturating_add(1);
-            tracing::warn!(
-                session_id,
-                skipped = *skipped_events,
-                "Dropping delegated SSE progress because client queue is full"
-            );
-            true
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => false,
-    }
-}
-
-async fn send_required_sse_event(
-    sse_tx: &mpsc::Sender<Result<Event, Infallible>>,
-    event: Event,
-) -> bool {
-    matches!(
-        tokio::time::timeout(SSE_REQUIRED_DELIVERY_TIMEOUT, sse_tx.send(Ok(event))).await,
-        Ok(Ok(()))
+    let agentic_event = AgenticEvent::delegated_progress(event);
+    crate::routes::sse::forward_sse_event(
+        &sse_tx,
+        session_id,
+        agentic_event,
+        requires_delivery,
+        skipped_events,
+        "Dropping delegated SSE progress because client queue is full",
     )
+    .await
 }
 
 /// Forward a bounded page from the canonical append-only event stream.
@@ -904,6 +818,7 @@ pub(super) async fn run_orchestrator_event_bridge(
     apns_service: Option<Arc<crate::apns::ApnsService>>,
     user_id: Option<String>,
     db_path: Arc<std::path::PathBuf>,
+    agent_stream: Option<(Arc<RwLock<crate::agent_streams::AgentStreamHub>>, u64)>,
     delegated_sse_open: Arc<Mutex<bool>>,
 ) {
     let mut outcome = ChatStreamRunOutcome::default();
@@ -919,7 +834,13 @@ pub(super) async fn run_orchestrator_event_bridge(
             &loop_event,
         );
         let is_finished = matches!(loop_event, LoopEvent::Finished { .. });
-        let requires_delivery = loop_event_requires_delivery(&loop_event);
+        if let Some((stream, generation)) = agent_stream.as_ref() {
+            stream.write().await.publish(
+                &session_id,
+                *generation,
+                AgenticEvent::from(loop_event.clone()),
+            );
+        }
 
         if is_finished {
             // Serialize the final foreground boundary against delegated sends:
@@ -930,15 +851,6 @@ pub(super) async fn run_orchestrator_event_bridge(
 
         let delivered = if !sse_connected {
             true
-        } else if requires_delivery {
-            matches!(
-                tokio::time::timeout(
-                    SSE_REQUIRED_DELIVERY_TIMEOUT,
-                    forward_loop_event(&sse_tx, &session_id, loop_event, &mut skipped_events),
-                )
-                .await,
-                Ok(true)
-            )
         } else {
             forward_loop_event(&sse_tx, &session_id, loop_event, &mut skipped_events).await
         };

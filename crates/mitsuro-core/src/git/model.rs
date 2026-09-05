@@ -65,6 +65,7 @@ pub struct GitChangedFileSummary {
 pub struct GitChangesSummary {
     pub repo_root: PathBuf,
     pub files: Vec<GitChangedFileSummary>,
+    pub truncated: bool,
 }
 
 /// A bounded patch for a single changed file.

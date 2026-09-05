@@ -375,21 +375,15 @@ fn parent_context_brief_extracts_last_turns() {
     let conversation = vec![
         ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "First question".to_string(),
-            }],
+            content: vec![Content::text("First question".to_string())],
         },
         ModelMessage {
             role: Role::Assistant,
-            content: vec![Content::Text {
-                text: "First answer".to_string(),
-            }],
+            content: vec![Content::text("First answer".to_string())],
         },
         ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "Second question".to_string(),
-            }],
+            content: vec![Content::text("Second question".to_string())],
         },
     ];
 
@@ -405,9 +399,7 @@ fn parent_context_brief_truncates_long_messages() {
     let long_text = "x".repeat(300);
     let conversation = vec![ModelMessage {
         role: Role::Assistant,
-        content: vec![Content::Text {
-            text: long_text.clone(),
-        }],
+        content: vec![Content::text(long_text.clone())],
     }];
 
     let brief = build_parent_context_brief(&conversation, 10);
@@ -636,7 +628,7 @@ async fn degraded_child_completion_preserves_partial_outcome_for_parent_integrat
     assert_eq!(event.outcome, "partial");
     assert_eq!(event.usable_agents, 1);
     assert!(!event.success);
-    let Content::Text { text } = &event.content[0] else {
+    let Content::Text { text, .. } = &event.content[0] else {
         panic!("completion wake should be text");
     };
     assert!(text.contains("terminal_stage: degraded"));

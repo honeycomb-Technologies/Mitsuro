@@ -65,9 +65,7 @@ pub fn accept_worker_conversation_input_in_transaction(
     validate_current_dm_binding(tx, input)?;
     let accepted_at = canonical_timestamp(input.accepted_at);
     let message_key = canonical_input_message_key(&input.request_id);
-    let content_json = serde_json::to_string(&vec![Content::Text {
-        text: input.body.clone(),
-    }])?;
+    let content_json = serde_json::to_string(&vec![Content::text(input.body.clone())])?;
     ensure!(
         content_json.len() <= MAX_STAGED_CONTENT_JSON_BYTES,
         "encoded Worker message exceeds the staged-input byte limit"

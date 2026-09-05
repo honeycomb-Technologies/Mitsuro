@@ -1036,9 +1036,10 @@ fn execution_host_revalidates_exact_claim_and_immutable_inputs() {
         "crew_slug": "release",
     });
     let objective_db = Database::new(&temp.path().join("runs.db")).unwrap();
-    let objective_content = serde_json::to_string(&vec![crate::ai::types::Content::Text {
-        text: format!("Hive scheduled objective:\n{}", scheduled.objective),
-    }])
+    let objective_content = serde_json::to_string(&vec![crate::ai::types::Content::text(format!(
+        "Hive scheduled objective:\n{}",
+        scheduled.objective
+    ))])
     .unwrap();
     objective_db
         .conn()

@@ -6,6 +6,11 @@ use crate::{auth, AppState};
 
 mod apns;
 pub(crate) mod browser;
+mod canvas_files;
+mod canvas_git;
+pub(crate) mod canvas_presence;
+mod canvas_resources;
+mod canvases;
 pub(crate) mod chat;
 mod credentials;
 mod extensions;
@@ -22,12 +27,17 @@ pub(crate) mod plugins;
 mod ports;
 mod preview_settings;
 mod processes;
+mod projects;
 mod push;
 mod reports;
 mod server;
 mod session_access;
 mod sessions;
 mod skills;
+mod sse;
+mod terminals;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod tools;
 
 /// Build the API router with all endpoints
@@ -43,6 +53,13 @@ pub fn api_router() -> Router<AppState> {
 
     Router::new()
         .nest("/browser", browser::router())
+        .nest(
+            "/canvases",
+            canvases::router()
+                .merge(canvas_files::router())
+                .merge(canvas_git::router())
+                .merge(canvas_resources::router()),
+        )
         .nest("/sessions", sessions::router())
         .nest("/chat", chat::router())
         .nest("/models", models::router())
@@ -59,12 +76,14 @@ pub fn api_router() -> Router<AppState> {
         .nest("/mobile-diagnostics", mobile_diagnostics::router())
         .nest("/processes", processes::router())
         .nest("/ports", ports::router())
+        .nest("/projects", projects::router())
         .nest("/settings/preview", preview_settings::router())
         .nest("/hooks", hooks::router())
         .nest("/push", push::router())
         .nest("/apns", apns::router())
         .nest("/reports", reports::router())
         .nest("/server", server::router())
+        .nest("/terminals", terminals::router())
         .nest("/auth/oauth", oauth::router())
         .merge(shared_extensibility)
 }

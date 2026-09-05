@@ -102,7 +102,14 @@ fn project_assistant_content(
     let mut attachment_ordinal = 0;
     for content in contents {
         match content {
-            Content::Text { text } => projection.append_agent_text(text, Vec::new()),
+            Content::Text { text, citations } => projection.append_agent_text(
+                text,
+                citations
+                    .iter()
+                    .cloned()
+                    .map(super::live::map_citation)
+                    .collect(),
+            ),
             Content::Thinking {
                 thinking,
                 signature,
@@ -195,7 +202,7 @@ fn user_content(contents: &[Content], message_index: usize) -> (String, Vec<Atta
 
     for content in contents {
         match content {
-            Content::Text { text: value } => {
+            Content::Text { text: value, .. } => {
                 if !text.is_empty() {
                     text.push('\n');
                 }
@@ -247,9 +254,7 @@ mod tests {
             &[
                 ModelMessage {
                     role: Role::User,
-                    content: vec![Content::Text {
-                        text: "inspect".to_owned(),
-                    }],
+                    content: vec![Content::text("inspect".to_owned())],
                 },
                 ModelMessage {
                     role: Role::Assistant,

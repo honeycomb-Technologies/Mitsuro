@@ -140,6 +140,7 @@ fn test_recovery_state_round_trip() {
         Some(LoopStopReason::StreamIdleTimeout),
         Some("stream timeout".to_string()),
         PartialAssistantState {
+            citations: Vec::new(),
             text: "partial answer".to_string(),
             thinking: String::new(),
             tool_calls: vec![RecoveryToolCall::summary("call-1", "read")],

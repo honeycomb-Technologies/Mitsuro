@@ -3,9 +3,7 @@ use std::collections::HashSet;
 use crate::ai::client::{AiClient, CallOptions};
 use crate::ai::types::AiTool;
 use crate::storage::WorkMode;
-use crate::tools::registry::{
-    MutationToolSurface, PermissionMode, ToolRegistry, ToolRequestPolicy,
-};
+use crate::tools::registry::{PermissionMode, ToolRegistry};
 
 use super::super::run_spec::apply_execution_tool_allowlist;
 
@@ -18,6 +16,7 @@ use super::super::run_spec::apply_execution_tool_allowlist;
 pub(super) struct ModeAwareToolSurface {
     catalog: Option<Vec<AiTool>>,
     parallel_tool_calls: bool,
+    parallel_tool_calls_override: Option<bool>,
 }
 
 impl ModeAwareToolSurface {
@@ -34,6 +33,7 @@ impl ModeAwareToolSurface {
         Self {
             catalog,
             parallel_tool_calls: options.codex_parallel_tool_calls,
+            parallel_tool_calls_override: options.parallel_tool_calls,
         }
     }
 
@@ -54,21 +54,24 @@ impl ModeAwareToolSurface {
             return;
         };
 
-        let tools = ToolRequestPolicy::code(
+        let tools = crate::tools::registry::filter_code_tools_for_mode(
+            catalog.clone(),
             permission_mode,
-            work_mode == WorkMode::Plan,
+            work_mode,
             has_active_plan,
-            true,
             disabled_tools,
-        )
-        .with_mutation_surface(MutationToolSurface::for_model(
             ai_client.provider_id(),
             &ai_client.config().model,
-        ))
-        .filter(catalog.clone());
+        );
         options.tools = (!tools.is_empty()).then_some(tools);
         options.codex_parallel_tool_calls =
             self.parallel_tool_calls && options.tools.as_ref().is_some_and(|tools| tools.len() > 1);
+        options.parallel_tool_calls = if options.tools.as_ref().is_some_and(|tools| tools.len() > 1)
+        {
+            self.parallel_tool_calls_override
+        } else {
+            Some(false)
+        };
         apply_execution_tool_allowlist(options, execution_tool_allowlist);
         *options = ai_client.canonical_call_options(&ai_client.config().model, options);
         *advertised_tool_names = advertised_names(options);
@@ -107,6 +110,7 @@ mod tests {
         ModeAwareToolSurface {
             catalog: Some(names.iter().map(|name| tool(name)).collect()),
             parallel_tool_calls: true,
+            parallel_tool_calls_override: None,
         }
     }
 
@@ -210,6 +214,7 @@ mod tests {
         let surface = ModeAwareToolSurface {
             catalog: None,
             parallel_tool_calls: true,
+            parallel_tool_calls_override: None,
         };
         let client = client(ProviderId::Grok, "grok-4.5");
         let mut options = CallOptions {
@@ -231,5 +236,32 @@ mod tests {
 
         assert_eq!(advertised, HashSet::from(["read".to_string()]));
         assert_eq!(names(&options), HashSet::from(["read".to_string()]));
+    }
+
+    #[test]
+    fn parallel_override_survives_mode_refresh_with_multiple_tools() {
+        let mut surface = surface(&["read", "grep", "edit", "write"]);
+        surface.parallel_tool_calls_override = Some(false);
+        let client = client(ProviderId::Grok, "grok-4.6");
+        let mut options = CallOptions {
+            codex_parallel_tool_calls: true,
+            parallel_tool_calls: Some(false),
+            ..Default::default()
+        };
+        let mut advertised = HashSet::new();
+        for permission in [PermissionMode::Supervised, PermissionMode::Autonomous] {
+            surface.refresh(
+                &mut options,
+                &mut advertised,
+                &client,
+                permission,
+                WorkMode::Build,
+                false,
+                &[],
+                None,
+            );
+            assert!(options.tools.as_ref().is_some_and(|tools| tools.len() > 1));
+            assert_eq!(options.parallel_tool_calls, Some(false));
+        }
     }
 }

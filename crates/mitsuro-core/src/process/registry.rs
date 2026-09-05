@@ -647,18 +647,6 @@ impl ProcessRegistry {
         })
     }
 
-    pub fn try_oldest_running_elapsed(&self) -> Option<std::time::Duration> {
-        self.processes.try_read().ok().and_then(|guard| {
-            guard
-                .get(DEFAULT_USER)
-                .into_iter()
-                .flat_map(|user_map| user_map.values())
-                .filter(|e| e.info.is_running())
-                .map(|e| e.info.started_at.elapsed())
-                .max()
-        })
-    }
-
     pub fn try_list(&self) -> Option<Vec<ProcessInfo>> {
         self.processes.try_read().ok().map(|guard| {
             guard

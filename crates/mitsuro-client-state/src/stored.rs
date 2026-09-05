@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use mitsuro_client::{
-    MessageResponse, PendingInteractionSnapshot, SessionStateResponse, SessionWithMessages,
+    citations_from_value, MessageResponse, PendingInteractionSnapshot, SessionStateResponse,
+    SessionWithMessages,
 };
 use serde_json::Value;
 
@@ -71,6 +72,7 @@ fn append_message_nodes(
     };
     let content_array = message.content.as_array();
     let mut text = String::new();
+    let mut citations = Vec::new();
     let mut attachments = Vec::new();
     let mut image_index = 0usize;
 
@@ -81,7 +83,14 @@ fn append_message_nodes(
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             match block_type {
-                "text" => append_text(&mut text, block.get("text")),
+                "text" => {
+                    append_text(&mut text, block.get("text"));
+                    for citation in citations_from_value(block.get("citations")) {
+                        if !citations.contains(&citation) {
+                            citations.push(citation);
+                        }
+                    }
+                }
                 "image" => {
                     if let Some(attachment) = image_attachment(block, image_index) {
                         attachments.push(attachment);
@@ -131,11 +140,12 @@ fn append_message_nodes(
         text.push_str(raw);
     }
 
-    if !text.trim().is_empty() || !attachments.is_empty() {
+    if !text.trim().is_empty() || !attachments.is_empty() || !citations.is_empty() {
         nodes.push(TranscriptNode::Message(ChatMessage {
             id: format!("stored-message-{message_index}"),
             role,
             content: text,
+            citations,
             streaming: false,
             attachments,
         }));
@@ -146,9 +156,6 @@ fn append_text(text: &mut String, value: Option<&Value>) {
     let Some(value) = value.and_then(Value::as_str) else {
         return;
     };
-    if !text.is_empty() {
-        text.push('\n');
-    }
     text.push_str(value);
 }
 
@@ -309,5 +316,25 @@ mod tests {
             results.get("t1").map(|result| result.output.as_str()),
             Some("ok")
         );
+    }
+
+    #[test]
+    fn stored_citations_preserve_plain_text_spacing_and_distinct_quotes() {
+        let message = MessageResponse {
+            role: "assistant".to_owned(),
+            content: json!([
+                { "type": "text", "text": "Sourced ", "citations": [{ "url": "https://example.test/source", "title": "Source", "cited_text": "Sourced" }] },
+                { "type": "text", "text": "answer", "citations": [{ "url": "https://example.test/source", "title": "Source", "cited_text": "answer" }] }
+            ]),
+        };
+        let mut nodes = Vec::new();
+        append_message_nodes(0, &message, &HashMap::new(), &mut nodes);
+        let Some(TranscriptNode::Message(assistant)) = nodes.first() else {
+            panic!("expected stored assistant");
+        };
+        assert_eq!(assistant.content, "Sourced answer");
+        assert_eq!(assistant.citations.len(), 2);
+        assert_eq!(assistant.citations[0].cited_text, "Sourced");
+        assert_eq!(assistant.citations[1].cited_text, "answer");
     }
 }

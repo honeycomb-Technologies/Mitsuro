@@ -1598,7 +1598,7 @@ impl RuntimeServices {
                 message.role == Role::User
                     && matches!(
                         message.content.as_slice(),
-                        [Content::Text { text: existing }] if existing == text
+                        [Content::Text { text: existing, .. }] if existing == text
                     )
             });
         if already_persisted {
@@ -1609,9 +1609,7 @@ impl RuntimeServices {
             session_id,
             &ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: text.to_owned(),
-                }],
+                content: vec![Content::text(text.to_owned())],
             },
         )
     }
@@ -1693,9 +1691,7 @@ fn prepare_user_input(
 ) -> Result<PreparedInput> {
     if !has_image_references(text) {
         return Ok(PreparedInput {
-            content: vec![Content::Text {
-                text: text.to_owned(),
-            }],
+            content: vec![Content::text(text.to_owned())],
             display_text: text.to_owned(),
             attachments: Vec::new(),
             consumed_clipboard_ids: Vec::new(),
@@ -1712,7 +1708,7 @@ fn prepare_user_input(
             InputSegment::Text(value) => {
                 if !value.is_empty() {
                     text_parts.push(value.clone());
-                    content.push(Content::Text { text: value });
+                    content.push(Content::text(value));
                 }
             }
             InputSegment::ImagePath(path) => {
@@ -1760,7 +1756,7 @@ fn prepare_user_input(
                 } else {
                     let value = format!("[{reference}]");
                     text_parts.push(value.clone());
-                    content.push(Content::Text { text: value });
+                    content.push(Content::text(value));
                 }
             }
         }

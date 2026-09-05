@@ -5,11 +5,11 @@ use crate::ai::types::{Content, ImageContent};
 pub(super) fn collect_message_text(content: &[Content], separator: &str) -> String {
     let mut combined = String::new();
     for block in content {
-        if let Content::Text { text } = block {
+        if let Content::Text { text, citations } = block {
             if !combined.is_empty() {
                 combined.push_str(separator);
             }
-            combined.push_str(text);
+            combined.push_str(&crate::ai::format::provider_text(text, citations));
         }
     }
     combined
@@ -31,10 +31,10 @@ pub(super) fn build_codex_user_content(content: &[Content]) -> Vec<Value> {
 
     for block in content {
         match block {
-            Content::Text { text } if !text.is_empty() => {
+            Content::Text { text, citations } if !text.is_empty() || !citations.is_empty() => {
                 items.push(serde_json::json!({
                     "type": "input_text",
-                    "text": text
+                    "text": crate::ai::format::provider_text(text, citations)
                 }));
             }
             Content::Image { image, detail } => {

@@ -1710,9 +1710,7 @@ mod tests {
             &sender,
             LoopInput::Steer {
                 pending_id: Some("pending-a".into()),
-                content: vec![Content::Text {
-                    text: "Response to question-a:\nyes".into(),
-                }],
+                content: vec![Content::text("Response to question-a:\nyes".into())],
             },
         )
         .expect_err("run A response must not be delivered to replacement run B");

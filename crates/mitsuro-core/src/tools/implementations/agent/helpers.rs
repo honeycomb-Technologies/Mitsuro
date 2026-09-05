@@ -747,7 +747,7 @@ pub(super) fn build_parent_context_brief(
             .content
             .iter()
             .filter_map(|c| match c {
-                Content::Text { text } => Some(text.as_str()),
+                Content::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()

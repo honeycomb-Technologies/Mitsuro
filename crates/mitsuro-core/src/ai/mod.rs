@@ -26,7 +26,7 @@ pub mod parsers;
 pub mod providers;
 pub mod reasoning;
 pub mod sse;
-pub mod stream_buffer;
+pub mod stream_smoothing;
 pub mod streaming;
 pub mod title;
 pub mod transform;

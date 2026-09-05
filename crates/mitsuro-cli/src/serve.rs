@@ -19,7 +19,7 @@ const DEFAULT_SERVER_PORT: u16 = 3000;
 const DEFAULT_PORT_SEARCH_SPAN: u16 = 100;
 
 /// Run the serve command.
-pub async fn run(port: u16) -> Result<()> {
+pub async fn run(port: u16, desktop_managed: bool) -> Result<()> {
     // Check for existing running server
     if let Some(instance) = server_instance::detect_running_server().await {
         print_banner(instance.port, false);
@@ -28,39 +28,39 @@ pub async fn run(port: u16) -> Result<()> {
             instance.pid
         );
         // Don't start a new server — just print the URLs and exit
-        print_tailscale_status(tailscale::setup_tailscale_serve(instance.port));
+        if !desktop_managed {
+            print_tailscale_status(tailscale::setup_tailscale_serve(instance.port));
+        }
         return Ok(());
     }
 
     // First-run setup: check if credentials are configured
     let store = CredentialStore::load().unwrap_or_default();
-    if store.providers_with_auth().is_empty() {
+    if !desktop_managed && store.providers_with_auth().is_empty() {
         run_setup_wizard()?;
     }
 
-    let (port, listener) = reserve_server_listener(port)?;
+    let requested_port = port;
+    let (port, listener) = reserve_server_listener(port, desktop_managed)?;
 
-    if port != DEFAULT_SERVER_PORT {
+    if port != requested_port {
         println!(
             "  Port {} is already in use. Using {} instead.",
-            DEFAULT_SERVER_PORT, port
+            requested_port, port
         );
     }
 
-    // Write PID file
-    server_instance::write_pid_file(port)?;
-
-    // Setup shutdown handler to clean PID file
-    let shutdown_signal = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for ctrl+c");
-    };
+    // Hold singleton authority for the full server lifetime. The guard writes
+    // the PID record atomically and only removes the exact record it owns.
+    let _instance_guard = server_instance::ServerInstanceGuard::acquire(port)?;
+    let shutdown_signal = shutdown_signal()?;
 
     print_banner(port, true);
 
     // Setup Tailscale serve (non-blocking, best-effort)
-    print_tailscale_status(tailscale::setup_tailscale_serve(port));
+    if !desktop_managed {
+        print_tailscale_status(tailscale::setup_tailscale_serve(port));
+    }
 
     init_server_tracing();
 
@@ -69,21 +69,49 @@ pub async fn run(port: u16) -> Result<()> {
         ..Default::default()
     };
 
-    // Start server with graceful shutdown
-    let server = mitsuro_server::start_server_with_listener(config, listener);
-
-    tokio::select! {
-        result = server => {
-            server_instance::remove_pid_file_if_matches(std::process::id(), port);
-            result?;
-        }
-        _ = shutdown_signal => {
-            server_instance::remove_pid_file_if_matches(std::process::id(), port);
-            println!("\n  Shutting down...");
-        }
+    // Start server with graceful shutdown. Dropping the guard afterward removes
+    // the PID record while preserving any newer process's replacement record.
+    if desktop_managed {
+        mitsuro_server::start_desktop_managed_server_with_listener_and_shutdown(
+            config,
+            listener,
+            shutdown_signal,
+        )
+        .await?;
+    } else {
+        mitsuro_server::start_server_with_listener_and_shutdown(config, listener, shutdown_signal)
+            .await?;
     }
 
     Ok(())
+}
+
+#[cfg(unix)]
+fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminate = signal(SignalKind::terminate()).context("listening for SIGTERM")?;
+    Ok(async move {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::error!(%error, "Failed to listen for Ctrl-C");
+                }
+            }
+            _ = terminate.recv() => {}
+        }
+        tracing::info!("Shutdown signal received");
+    })
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> Result<impl std::future::Future<Output = ()>> {
+    Ok(async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "Failed to listen for Ctrl-C");
+        }
+        tracing::info!("Shutdown signal received");
+    })
 }
 
 fn init_server_tracing() {
@@ -125,14 +153,36 @@ fn init_server_tracing() {
     }
 }
 
-fn reserve_server_listener(port: u16) -> Result<(u16, tokio::net::TcpListener)> {
-    if port == DEFAULT_SERVER_PORT {
+fn reserve_server_listener(
+    port: u16,
+    desktop_managed: bool,
+) -> Result<(u16, tokio::net::TcpListener)> {
+    let address = server_bind_address(desktop_managed);
+    if desktop_managed {
+        let listener = bind_listener(address, port)
+            .with_context(|| format!("Failed to bind desktop server to 127.0.0.1:{port}."))?;
+        return Ok((port, listener));
+    }
+
+    if allows_port_fallback(port, desktop_managed) {
         return reserve_listener_with_fallback(port, DEFAULT_PORT_SEARCH_SPAN);
     }
 
-    let listener =
-        bind_listener(port).with_context(|| format!("Failed to bind server port {}.", port))?;
+    let listener = bind_listener(address, port)
+        .with_context(|| format!("Failed to bind server port {}.", port))?;
     Ok((port, listener))
+}
+
+fn server_bind_address(desktop_managed: bool) -> Ipv4Addr {
+    if desktop_managed {
+        Ipv4Addr::LOCALHOST
+    } else {
+        Ipv4Addr::UNSPECIFIED
+    }
+}
+
+fn allows_port_fallback(port: u16, desktop_managed: bool) -> bool {
+    !desktop_managed && port == DEFAULT_SERVER_PORT
 }
 
 fn reserve_listener_with_fallback(
@@ -142,7 +192,7 @@ fn reserve_listener_with_fallback(
     let mut reserved_listener = None;
     let selected_port =
         find_available_port(start_port, search_span, |candidate| {
-            match bind_listener(candidate) {
+            match bind_listener(Ipv4Addr::UNSPECIFIED, candidate) {
                 Ok(listener) => {
                     reserved_listener = Some(listener);
                     Ok(true)
@@ -157,8 +207,8 @@ fn reserve_listener_with_fallback(
     Ok((selected_port, listener))
 }
 
-fn bind_listener(port: u16) -> io::Result<tokio::net::TcpListener> {
-    let listener = StdTcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?;
+fn bind_listener(address: Ipv4Addr, port: u16) -> io::Result<tokio::net::TcpListener> {
+    let listener = StdTcpListener::bind((address, port))?;
     listener.set_nonblocking(true)?;
     tokio::net::TcpListener::from_std(listener)
 }
@@ -278,7 +328,7 @@ fn run_setup_wizard() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::find_available_port;
+    use super::{allows_port_fallback, find_available_port, server_bind_address};
 
     #[test]
     fn falls_forward_when_preferred_port_is_busy() {
@@ -294,5 +344,19 @@ mod tests {
             .expect_err("non-default explicit port should fail when occupied");
 
         assert!(err.to_string().contains("4242-4242"));
+    }
+
+    #[test]
+    fn desktop_managed_bind_policy_is_loopback_only() {
+        assert!(server_bind_address(true).is_loopback());
+        assert!(server_bind_address(false).is_unspecified());
+    }
+
+    #[test]
+    fn desktop_managed_bind_policy_never_falls_forward() {
+        assert!(!allows_port_fallback(3000, true));
+        assert!(!allows_port_fallback(4242, true));
+        assert!(allows_port_fallback(3000, false));
+        assert!(!allows_port_fallback(4242, false));
     }
 }

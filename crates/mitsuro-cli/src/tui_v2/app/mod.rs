@@ -4,11 +4,14 @@ pub mod effect;
 pub mod reducer;
 pub mod route;
 pub mod state;
+#[cfg(test)]
+mod stream_burst;
 
 use anyhow::{bail, Result};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use mitsuro_core::agent::{DelegatedProgressEvent, LoopEvent, LoopInput};
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::UnboundedReceiverStream, StreamMap};
 
@@ -63,6 +66,9 @@ enum Redraw {
 }
 
 type DelegatedProgressReceivers = StreamMap<u64, UnboundedReceiverStream<DelegatedProgressEvent>>;
+
+const LOOP_BATCH_MAX_EVENTS: usize = 64;
+const LOOP_BATCH_MAX_DURATION: Duration = Duration::from_millis(2);
 
 impl Redraw {
     fn handled(self) -> bool {
@@ -2631,6 +2637,52 @@ impl PreviewApp {
         sent
     }
 
+    /// Apply a bounded burst before rendering and returning to terminal-first
+    /// selection. The time limit is checked between handlers, not within one.
+    fn handle_loop_event_batch(
+        &mut self,
+        first: LoopEvent,
+        mut before_event: impl FnMut(),
+    ) -> usize {
+        let started = Instant::now();
+        let mut event = first;
+        let mut processed = 0;
+        loop {
+            let boundary = matches!(
+                &event,
+                LoopEvent::Finished { .. }
+                    | LoopEvent::Error { .. }
+                    | LoopEvent::AwaitingInput { .. }
+            );
+            before_event();
+            self.handle_loop_event(event);
+            processed += 1;
+            // Some tool calls create an interaction before AwaitingInput arrives.
+            // Publish that state before consuming any following loop event.
+            if boundary
+                || !self
+                    .conversation
+                    .presentation()
+                    .pending_interactions
+                    .is_empty()
+                || processed >= LOOP_BATCH_MAX_EVENTS
+                || started.elapsed() >= LOOP_BATCH_MAX_DURATION
+            {
+                break;
+            }
+            let Some(next) = self
+                .loop_events
+                .as_mut()
+                .and_then(|receiver| receiver.try_recv().ok())
+            else {
+                // Leave disconnection cleanup to the main loop's Loop(None).
+                break;
+            };
+            event = next;
+        }
+        processed
+    }
+
     fn handle_loop_event(&mut self, event: LoopEvent) {
         let prior_parts = part_count(self.conversation.presentation());
         let updates_visible_content = matches!(
@@ -3573,7 +3625,7 @@ pub async fn run() -> Result<crate::tui_v2::TuiOutcome> {
             NextEvent::Terminal(Some(event)) => app.handle_event(event?),
             NextEvent::Terminal(None) => bail!("terminal event stream ended unexpectedly"),
             NextEvent::Loop(Some(event)) => {
-                app.handle_loop_event(event);
+                app.handle_loop_event_batch(event, || {});
                 Redraw::Full
             }
             NextEvent::Loop(None) => {

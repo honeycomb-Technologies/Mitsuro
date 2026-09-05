@@ -30,9 +30,7 @@ impl AiClient {
     ) -> Result<SimpleCallResult> {
         let messages = [ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: user_message.to_string(),
-            }],
+            content: vec![Content::text(user_message.to_string())],
         }];
         let body = self.build_simple_codex_body(system_prompt, &messages, max_tokens, options);
         self.send_simple_codex_body(model, body, attempt_policy)
@@ -80,9 +78,7 @@ impl AiClient {
         let mut messages = conversation.to_vec();
         messages.push(ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: appended_user_message.to_string(),
-            }],
+            content: vec![Content::text(appended_user_message.to_string())],
         });
         let body = self.build_conversation_codex_body(
             model,
@@ -323,22 +319,16 @@ mod tests {
         let mut messages = vec![
             ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: "original request".to_string(),
-                }],
+                content: vec![Content::text("original request".to_string())],
             },
             ModelMessage {
                 role: Role::Assistant,
-                content: vec![Content::Text {
-                    text: "prior response".to_string(),
-                }],
+                content: vec![Content::text("prior response".to_string())],
             },
         ];
         messages.push(ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "summarize now".to_string(),
-            }],
+            content: vec![Content::text("summarize now".to_string())],
         });
 
         let body = client.build_simple_codex_body(
@@ -373,27 +363,23 @@ mod tests {
         let messages = vec![
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: "[HIVE SOUL - HIVE_SOUL.md]\nidentity-layer".into(),
-                }],
+                content: vec![Content::text(
+                    "[HIVE SOUL - HIVE_SOUL.md]\nidentity-layer".into(),
+                )],
             },
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: "[PROJECT INSTRUCTIONS - AGENTS.md]\nproject-layer".into(),
-                }],
+                content: vec![Content::text(
+                    "[PROJECT INSTRUCTIONS - AGENTS.md]\nproject-layer".into(),
+                )],
             },
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: "[HIVE HEARTBEAT]\nsession-layer".into(),
-                }],
+                content: vec![Content::text("[HIVE HEARTBEAT]\nsession-layer".into())],
             },
             ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: "continue".into(),
-                }],
+                content: vec![Content::text("continue".into())],
             },
         ];
 

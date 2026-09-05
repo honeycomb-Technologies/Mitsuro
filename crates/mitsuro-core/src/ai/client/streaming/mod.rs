@@ -163,9 +163,82 @@ mod tests {
     fn user_message() -> ModelMessage {
         ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "reply with ok".to_string(),
-            }],
+            content: vec![Content::text("reply with ok".to_string())],
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_parallel_policy_matches_dispatched_request_and_diagnostics() {
+        for (provider, model) in [
+            (ProviderId::Grok, "grok-4.6"),
+            (ProviderId::OpenAI, "gpt-5.5"),
+        ] {
+            for requested in [None, Some(false), Some(true)] {
+                let server = Server::http("127.0.0.1:0").unwrap();
+                let url = format!("http://{}", server.server_addr());
+                let (body_tx, body_rx) = std_mpsc::channel();
+                let server_thread = thread::spawn(move || {
+                    let mut request = server
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap()
+                        .unwrap();
+                    let mut body = String::new();
+                    request.as_reader().read_to_string(&mut body).unwrap();
+                    body_tx
+                        .send(serde_json::from_str::<serde_json::Value>(&body).unwrap())
+                        .unwrap();
+                    let payload = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n";
+                    request
+                        .respond(Response::from_string(payload).with_header(
+                            Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
+                        ))
+                        .unwrap();
+                });
+                let client = AiClient::new(
+                    AiClientConfig {
+                        model: model.into(),
+                        provider_id: provider,
+                        api_format: ApiFormat::OpenAIResponses,
+                        base_url: Some(url),
+                        ..Default::default()
+                    },
+                    "fixture-key".into(),
+                );
+                let options = CallOptions {
+                    parallel_tool_calls: requested,
+                    tools: Some(vec![crate::ai::types::AiTool {
+                        name: "read".into(),
+                        description: "Read a fixture".into(),
+                        input_schema: serde_json::json!({"type":"object","properties":{}}),
+                        prompt: None,
+                    }]),
+                    ..Default::default()
+                };
+                let messages = vec![user_message()];
+                let diagnostic = client.request_diagnostics(&messages, &options);
+                let mut stream = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    client.call_streaming_with_attempt_policy(
+                        messages,
+                        &options,
+                        RemoteAttemptPolicy::GovernedSingleAttempt,
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                while tokio::time::timeout(Duration::from_secs(5), stream.recv())
+                    .await
+                    .unwrap()
+                    .is_some()
+                {}
+                let body = body_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                let expected = requested.unwrap_or(true);
+                assert_eq!(body["parallel_tool_calls"], expected);
+                assert_eq!(diagnostic.effective_request.parallel_tool_calls, expected);
+                assert!(body.get("tool_choice").is_none());
+                server_thread.join().unwrap();
+            }
         }
     }
 

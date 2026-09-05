@@ -25,6 +25,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::warn;
 
+use crate::ai::model_profile::ContextKind;
 use crate::ai::types::{Content, ModelMessage, Role};
 use crate::skills::SkillsManager;
 use crate::storage::{
@@ -34,11 +35,10 @@ use crate::storage::{
 use super::run_spec::WorkerGoalExecutionContext;
 
 pub use plan::build_plan_context;
-pub use project::build_project_context;
+pub use project::{build_project_context, build_subagent_project_instructions};
 pub use skills::build_skills_context;
 pub use workspace::build_subagent_project_context;
 
-const MAX_PROJECT_SETTINGS_APPEND_BYTES: usize = 8 * 1024;
 /// Aggregate ceiling for request-time system context assembled by this module.
 /// Individual sources also have smaller limits, but the aggregate guard keeps
 /// several simultaneously-large sources from bypassing those local budgets.
@@ -164,38 +164,38 @@ pub(crate) fn inject_worker_conversation_context(
     let mut injected = Vec::with_capacity(conversation.len() + persona.sections.len() + 4);
     injected.push(ModelMessage {
         role: Role::System,
-        content: vec![Content::Text {
-            text: WORKER_CONVERSATION_CAPABILITY_CONTEXT.to_string(),
-        }],
+        content: vec![Content::text(
+            WORKER_CONVERSATION_CAPABILITY_CONTEXT.to_string(),
+        )],
     });
     for text in persona.sections {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text }],
+            content: vec![Content::text(text)],
         });
     }
     if !knowledge.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: knowledge }],
+            content: vec![Content::text(knowledge)],
         });
     }
     if !episodes.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: episodes }],
+            content: vec![Content::text(episodes)],
         });
     }
     if let Some(text) = group_room {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text }],
+            content: vec![Content::text(text)],
         });
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text {
-                text: WORKER_GROUP_RESPONSE_CAPABILITY_CONTEXT.to_string(),
-            }],
+            content: vec![Content::text(
+                WORKER_GROUP_RESPONSE_CAPABILITY_CONTEXT.to_string(),
+            )],
         });
     }
     bound_dynamic_context_messages(&mut injected);
@@ -271,19 +271,19 @@ pub(crate) fn inject_worker_goal_context(
     for text in [capability, workspace, workflow] {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text }],
+            content: vec![Content::text(text)],
         });
     }
     for text in persona.sections {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text }],
+            content: vec![Content::text(text)],
         });
     }
     if !knowledge.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: knowledge }],
+            content: vec![Content::text(knowledge)],
         });
     }
     bound_dynamic_context_messages(&mut injected);
@@ -469,7 +469,7 @@ pub fn inject_context_with_hive_profile_and_group(
         if !memory_ctx.is_empty() {
             injected.push(ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text { text: memory_ctx }],
+                content: vec![Content::text(memory_ctx)],
             });
         }
         injected.extend_from_slice(conversation);
@@ -565,7 +565,9 @@ pub fn inject_context_with_hive_profile_and_group(
         String::new()
     };
     let skills_ctx = build_skills_context(skills_manager, project_dir.is_some());
-    let project_ctx = project_dir.map(build_project_context).unwrap_or_default();
+    let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
+    let project_context =
+        project::ProjectContext::load(working_dir, project_dir, &project_settings);
     let mut hive_ctx_sections = if is_hive {
         if let Some(profile) = hive_profile {
             hive::build_hive_context_sections_with_profile(
@@ -600,56 +602,48 @@ pub fn inject_context_with_hive_profile_and_group(
             }
         }
     }
-    let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
-
     let mut injected = Vec::with_capacity(conversation.len() + 7);
 
     if !workspace_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text {
-                text: workspace_ctx,
-            }],
+            content: vec![Content::text(workspace_ctx)],
         });
     }
     if !env_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: env_ctx }],
+            content: vec![Content::text(env_ctx)],
         });
     }
     if !memory_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: memory_ctx }],
+            content: vec![Content::text(memory_ctx)],
         });
     }
     if !hive_knowledge_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text {
-                text: hive_knowledge_ctx,
-            }],
+            content: vec![Content::text(hive_knowledge_ctx)],
         });
     }
     if !hive_episode_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text {
-                text: hive_episode_ctx,
-            }],
+            content: vec![Content::text(hive_episode_ctx)],
         });
     }
-    if !project_ctx.is_empty() {
+    if !project_context.instructions.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: project_ctx }],
+            content: vec![Content::text(project_context.instructions)],
         });
     }
     for text in hive_ctx_sections {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text }],
+            content: vec![Content::text(text)],
         });
     }
     let delegation_mode = project_settings.delegation_mode.unwrap_or(if is_hive {
@@ -663,53 +657,42 @@ pub fn inject_context_with_hive_profile_and_group(
     });
     injected.push(ModelMessage {
         role: Role::System,
-        content: vec![Content::Text {
-            text: delegation_mode.prompt_contract(),
-        }],
+        content: vec![Content::text(delegation_mode.prompt_contract())],
     });
-    if let Some(ref append) = project_settings.system_prompt_append {
-        if !append.is_empty() {
-            injected.push(ModelMessage {
-                role: Role::System,
-                content: vec![Content::Text {
-                    text: format!(
-                        "[PROJECT SETTINGS]\n{}",
-                        truncate_utf8_bytes(append, MAX_PROJECT_SETTINGS_APPEND_BYTES)
-                    ),
-                }],
-            });
-        }
+    if !project_context.settings.is_empty() {
+        injected.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::text(project_context.settings)],
+        });
     }
     if !plan_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: plan_ctx }],
+            content: vec![Content::text(plan_ctx)],
         });
     }
     if !delegated_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text {
-                text: delegated_ctx,
-            }],
+            content: vec![Content::text(delegated_ctx)],
         });
     }
     if !task_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: task_ctx }],
+            content: vec![Content::text(task_ctx)],
         });
     }
     if !report_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: report_ctx }],
+            content: vec![Content::text(report_ctx)],
         });
     }
     if !skills_ctx.is_empty() {
         injected.push(ModelMessage {
             role: Role::System,
-            content: vec![Content::Text { text: skills_ctx }],
+            content: vec![Content::text(skills_ctx)],
         });
     }
 
@@ -773,7 +756,7 @@ fn bound_dynamic_context_messages(messages: &mut Vec<ModelMessage>) {
         let Some(text) = retained[index].take() else {
             continue;
         };
-        message.content = vec![Content::Text { text }];
+        message.content = vec![Content::text(text)];
         bounded_messages.push(message);
     }
     *messages = bounded_messages;
@@ -793,67 +776,13 @@ fn context_message_text(message: &ModelMessage) -> Option<&str> {
         return None;
     }
     match &message.content[0] {
-        Content::Text { text } => Some(text),
+        Content::Text { text, .. } => Some(text),
         _ => None,
     }
 }
 
 fn dynamic_context_priority(text: &str) -> u8 {
-    // Hive's coordinator and frozen identity are the behavioral continuity
-    // contract. They must survive aggregate request pressure before project,
-    // retrieval, skills, or current-work context. The profile renderer keeps
-    // this tier independently bounded, so reserving it first cannot make the
-    // overall request unbounded.
-    if text.starts_with("[WORKER GOAL CAPABILITY]")
-        || text.starts_with("[WORKER GOAL WORKSPACE]")
-        || text.starts_with("[CANONICAL WORKER GOAL ATTEMPT]")
-    {
-        220
-    } else if text.starts_with("[WORKER CONVERSATION CAPABILITY]")
-        || text.starts_with("[WORKER GROUP RESPONSE CAPABILITY]")
-        || is_stable_hive_identity_context(text)
-    {
-        200
-    } else if text.starts_with("[PLAN MODE ACTIVE")
-        || text.starts_with("[ACTIVE PLAN")
-        || text.starts_with("[AUTONOMOUS TASKS]")
-        || text.starts_with("[WORKSPACE MODE:")
-        || text.starts_with("[ENVIRONMENT]")
-        || text.starts_with("[DELEGATION MODE:")
-        // The room block is the behavioral contract of a group turn: without
-        // it a member cannot know who is speaking or how to post.
-        || text.starts_with("[GROUP ROOM")
-    {
-        120
-    } else if text.starts_with("[PROJECT INSTRUCTIONS")
-        || text.starts_with("[PROJECT SETTINGS]")
-        || text.starts_with("[HIVE PROJECT OVERLAY")
-    {
-        100
-    } else if text.starts_with("[HIVE HEARTBEAT") || text.starts_with("[HIVE CHANNELS") {
-        // Heartbeat and channel guidance is intentionally volatile. It keeps
-        // developer authority, but it cannot displace the frozen persona.
-        90
-    } else if text.starts_with("[AVAILABLE SKILLS]") || text.starts_with("[RECENT DELEGATED RUNS]")
-    {
-        80
-    } else {
-        60
-    }
-}
-
-fn is_stable_hive_identity_context(text: &str) -> bool {
-    [
-        "[HIVE COORDINATOR]",
-        "[HIVE SOUL",
-        "[HIVE IDENTITY",
-        "[HIVE USER",
-        "[HIVE CREW IDENTITY",
-        "[HIVE CREW SOUL",
-        "[HIVE WORKER",
-    ]
-    .iter()
-    .any(|prefix| text.starts_with(prefix))
+    ContextKind::from_text(text).budget_priority()
 }
 
 fn context_section_label(text: &str) -> String {

@@ -47,10 +47,6 @@ pub(super) fn loop_event_type(event: &LoopEvent) -> &'static str {
         LoopEvent::AgentBackgroundCompleted { .. } => "agent_background_completed",
         LoopEvent::UserMessage { .. } => "user_message",
         LoopEvent::ClassifierDecision { .. } => "classifier_decision",
-        LoopEvent::TeammateSpawned { .. } => "teammate_spawned",
-        LoopEvent::TeammateTaskCompleted { .. } => "teammate_task_completed",
-        LoopEvent::TeammateTaskFailed { .. } => "teammate_task_failed",
-        LoopEvent::TeammateCancelled { .. } => "teammate_cancelled",
     }
 }
 
@@ -280,18 +276,6 @@ pub(super) fn summarize_loop_event(event: &LoopEvent) -> Value {
         } => {
             json!({ "tool_name": tool_name, "decision": decision, "reason": reason, "stage": stage })
         }
-        LoopEvent::TeammateSpawned { name, role } => json!({ "name": name, "role": role }),
-        LoopEvent::TeammateTaskCompleted {
-            name,
-            task_id,
-            result,
-        } => json!({ "name": name, "task_id": task_id, "result_len": result.len() }),
-        LoopEvent::TeammateTaskFailed {
-            name,
-            task_id,
-            error,
-        } => json!({ "name": name, "task_id": task_id, "error": error }),
-        LoopEvent::TeammateCancelled { name } => json!({ "name": name }),
     }
 }
 

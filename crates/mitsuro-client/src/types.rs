@@ -25,6 +25,322 @@ pub struct FileTreeResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GitChangedFile {
+    pub path: String,
+    pub status: String,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GitChangesResponse {
+    pub in_repo: bool,
+    pub repo_root: Option<String>,
+    #[serde(default)]
+    pub files: Vec<GitChangedFile>,
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GitFileDiffResponse {
+    pub path: String,
+    pub patch: String,
+    pub truncated: bool,
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BrowseEntry {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct BrowseResponse {
+    pub current: String,
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub directories: Vec<BrowseEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SpatialCanvasSurface {
+    Code,
+    Hive,
+}
+
+impl SpatialCanvasSurface {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::Hive => "hive",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WorldRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CanvasNodeBinding {
+    Agent {
+        session_id: String,
+    },
+    Terminal {
+        terminal_id: String,
+    },
+    Browser {
+        browser_session_id: String,
+        #[serde(default)]
+        last_url: Option<String>,
+    },
+    Files {
+        #[serde(default)]
+        path: Option<String>,
+    },
+    Changes,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CanvasNode {
+    pub id: String,
+    pub title: String,
+    pub rect: WorldRect,
+    pub z_index: i64,
+    pub binding: CanvasNodeBinding,
+    #[serde(default)]
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CanvasState {
+    pub schema_version: u32,
+    #[serde(default)]
+    pub nodes: Vec<CanvasNode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpatialCanvas {
+    pub id: String,
+    pub owner_user_id: Option<String>,
+    pub project_dir: String,
+    pub surface: SpatialCanvasSurface,
+    pub name: String,
+    pub schema_version: u32,
+    pub revision: u64,
+    pub shared_theme_id: String,
+    pub state: CanvasState,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub archived_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CanvasOperation {
+    UpsertNode {
+        node: CanvasNode,
+    },
+    RemoveNode {
+        node_id: String,
+    },
+    SetGeometry {
+        node_id: String,
+        rect: WorldRect,
+        z_index: i64,
+    },
+    SetTitle {
+        node_id: String,
+        title: String,
+    },
+    RenameCanvas {
+        name: String,
+    },
+    SetSharedTheme {
+        theme_id: String,
+    },
+    SetArchived {
+        archived: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CreateCanvasRequest {
+    pub create_op_id: String,
+    pub project_dir: String,
+    pub surface: SpatialCanvasSurface,
+    pub name: String,
+    pub shared_theme_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CreateCanvasResponse {
+    pub canvas: SpatialCanvas,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct PatchCanvasRequest {
+    pub op_id: String,
+    pub client_id: String,
+    pub expected_revision: u64,
+    pub operations: Vec<CanvasOperation>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct PatchCanvasResponse {
+    pub canvas: SpatialCanvas,
+    pub applied: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ListCanvasesResponse {
+    #[serde(default)]
+    pub canvases: Vec<SpatialCanvas>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CanvasResourceNodeRequest {
+    pub id: String,
+    pub title: String,
+    pub rect: WorldRect,
+    pub z_index: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CanvasResourceSpec {
+    Agent,
+    Terminal {
+        size: crate::terminal::TerminalSize,
+    },
+    Browser {
+        #[serde(default)]
+        url: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateCanvasResourceRequest {
+    pub create_op_id: String,
+    pub client_id: String,
+    pub node: CanvasResourceNodeRequest,
+    pub resource: CanvasResourceSpec,
+    #[serde(default)]
+    pub initial_prompt: Option<String>,
+    #[serde(default)]
+    pub retry_ambiguous: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CreateCanvasResourceResponse {
+    pub canvas: SpatialCanvas,
+    pub node: CanvasNode,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CanvasResourceIntentResponse {
+    pub request: CreateCanvasResourceRequest,
+    pub status: String,
+    pub last_error: Option<String>,
+    pub retry_requires_confirmation: bool,
+    #[serde(default)]
+    pub initial_prompt_completed: bool,
+    #[serde(default)]
+    pub detach_generation: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct ListCanvasResourceIntentsResponse {
+    pub intents: Vec<CanvasResourceIntentResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct CleanupCanvasResourceResponse {
+    pub create_op_id: String,
+    pub node_id: String,
+    pub status: String,
+    pub canvas: SpatialCanvas,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DetachCanvasResourceRequest {
+    pub request: CreateCanvasResourceRequest,
+    pub expected_detach_generation: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct DetachCanvasResourceResponse {
+    pub create_op_id: String,
+    pub node_id: String,
+    pub status: String,
+    pub canvas: SpatialCanvas,
+    pub binding_absent: bool,
+    pub detach_committed: bool,
+    pub detach_generation: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ProjectSummary {
+    pub name: String,
+    pub project_dir: String,
+    pub updated_at: String,
+    pub canvas_count: u64,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ListProjectsResponse {
+    #[serde(default)]
+    pub projects: Vec<ProjectSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CanvasEvent {
+    pub canvas_id: String,
+    pub sequence: u64,
+    pub op_id: String,
+    pub client_id: String,
+    pub operations: Vec<CanvasOperation>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CanvasEventPage {
+    pub events: Vec<CanvasEvent>,
+    pub earliest_sequence: Option<u64>,
+    pub latest_sequence: u64,
+    pub gap: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CanvasStreamEnvelope {
+    Snapshot {
+        canvas: SpatialCanvas,
+    },
+    Events {
+        page: CanvasEventPage,
+    },
+    CollaborationSnapshot {
+        collaboration: crate::CanvasCollaborationSnapshot,
+    },
+    CollaborationEvents {
+        page: crate::CanvasCollaborationEventPage,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct SkillInfo {
     pub name: String,
     pub description: String,
@@ -415,9 +731,31 @@ pub struct HiveScheduleMutationResponse {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct HealthResponse {
     pub status: String,
+    #[serde(default)]
+    pub identity: String,
+    #[serde(default)]
+    pub pid: u32,
     pub version: String,
     #[serde(default)]
+    pub api_protocol: u16,
+    #[serde(default)]
+    pub capabilities: std::collections::HashMap<String, u16>,
+    #[serde(default)]
     pub features: std::collections::HashMap<String, bool>,
+}
+
+impl HealthResponse {
+    /// Return the advertised version of a named contract. Missing
+    /// capabilities from older servers are version 0.
+    pub fn capability_version(&self, name: &str) -> u16 {
+        self.capabilities.get(name).copied().unwrap_or_default()
+    }
+
+    /// Return whether the server advertises at least `minimum_version` of a
+    /// named contract.
+    pub fn supports_capability(&self, name: &str, minimum_version: u16) -> bool {
+        self.capability_version(name) >= minimum_version
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -941,6 +1279,10 @@ pub struct SessionStateResponse {
     pub delegation_event_cursor: Option<i64>,
     #[serde(default)]
     pub last_event_sequence: Option<i64>,
+    #[serde(default)]
+    pub agent_stream_generation: u64,
+    #[serde(default)]
+    pub agent_stream_sequence: u64,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -1224,6 +1566,8 @@ pub struct PartialAssistantState {
     #[serde(default)]
     pub text: String,
     #[serde(default)]
+    pub citations: Vec<Citation>,
+    #[serde(default)]
     pub thinking: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<RecoveryToolCall>,
@@ -1408,6 +1752,34 @@ pub struct PlanItem {
     pub completed: bool,
 }
 
+/// Source metadata attached to the assistant prose it supports.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct Citation {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub cited_text: String,
+}
+
+pub fn citations_from_value(value: Option<&Value>) -> Vec<Citation> {
+    let Some(entries) = value.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut citations = Vec::new();
+    for entry in entries {
+        if let Ok(citation) = serde_json::from_value::<Citation>(entry.clone()) {
+            if (!citation.url.is_empty() || !citation.title.is_empty())
+                && !citations.contains(&citation)
+            {
+                citations.push(citation);
+            }
+        }
+    }
+    citations
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChatStreamEvent {
     TextDelta {
@@ -1415,7 +1787,7 @@ pub enum ChatStreamEvent {
     },
     TextDeltaWithCitations {
         delta: String,
-        citations: Value,
+        citations: Vec<Citation>,
     },
     ThinkingDelta {
         thinking: String,
@@ -1565,23 +1937,6 @@ pub enum ChatStreamEvent {
         reason: String,
         stage: u8,
     },
-    TeammateSpawned {
-        name: String,
-        role: String,
-    },
-    TeammateTaskCompleted {
-        name: String,
-        task_id: String,
-        result: String,
-    },
-    TeammateTaskFailed {
-        name: String,
-        task_id: String,
-        error: String,
-    },
-    TeammateCancelled {
-        name: String,
-    },
     Other {
         event_type: String,
         payload: Value,
@@ -1601,7 +1956,7 @@ impl ChatStreamEvent {
             },
             "text_delta_with_citations" => Self::TextDeltaWithCitations {
                 delta: string_field(&value, "delta"),
-                citations: value.get("citations").cloned().unwrap_or(Value::Null),
+                citations: citations_from_value(value.get("citations")),
             },
             "thinking_delta" => Self::ThinkingDelta {
                 thinking: string_field(&value, "thinking"),
@@ -1775,23 +2130,6 @@ impl ChatStreamEvent {
                 reason: string_field(&value, "reason"),
                 stage: usize_field(&value, "stage") as u8,
             },
-            "teammate_spawned" => Self::TeammateSpawned {
-                name: string_field(&value, "name"),
-                role: string_field(&value, "role"),
-            },
-            "teammate_task_completed" => Self::TeammateTaskCompleted {
-                name: string_field(&value, "name"),
-                task_id: string_field(&value, "task_id"),
-                result: string_field(&value, "result"),
-            },
-            "teammate_task_failed" => Self::TeammateTaskFailed {
-                name: string_field(&value, "name"),
-                task_id: string_field(&value, "task_id"),
-                error: string_field(&value, "error"),
-            },
-            "teammate_cancelled" => Self::TeammateCancelled {
-                name: string_field(&value, "name"),
-            },
             _ => Self::Other {
                 event_type,
                 payload: value,
@@ -1828,11 +2166,52 @@ mod tests {
     use super::{
         ChatStreamEvent, ContentBlock, DelegatedProgressStatus, DelegatedRunRole,
         DelegationEventKind, DelegationExecutionMode, DelegationParentContinuationState, FastMode,
-        HiveCurrentResponse, HiveRunPriority, HiveScheduleRecurrence, HiveScheduleSummary,
-        ModelInfo, ReasoningControl, ReasoningEffort, SessionStateResponse, SessionType,
-        SteerRequest, ThinkingLevel,
+        HealthResponse, HiveCurrentResponse, HiveRunPriority, HiveScheduleRecurrence,
+        HiveScheduleSummary, ModelInfo, ReasoningControl, ReasoningEffort, SessionStateResponse,
+        SessionType, SteerRequest, ThinkingLevel,
     };
     use serde_json::json;
+
+    #[test]
+    fn health_response_reads_versioned_desktop_capabilities() {
+        let response: HealthResponse = serde_json::from_value(json!({
+            "status": "ok",
+            "identity": "mitsuro-server",
+            "pid": 42,
+            "version": "0.10.1",
+            "api_protocol": 1,
+            "capabilities": {
+                "desktop_canvases": 1,
+                "terminal_sessions": 2
+            },
+            "features": {"chat": false}
+        }))
+        .expect("current health payload");
+
+        assert_eq!(response.identity, "mitsuro-server");
+        assert_eq!(response.pid, 42);
+        assert_eq!(response.api_protocol, 1);
+        assert!(response.supports_capability("desktop_canvases", 1));
+        assert!(response.supports_capability("terminal_sessions", 2));
+        assert!(!response.supports_capability("terminal_sessions", 3));
+        assert!(!response.supports_capability("unknown", 1));
+    }
+
+    #[test]
+    fn health_response_remains_compatible_with_legacy_servers() {
+        let response: HealthResponse = serde_json::from_value(json!({
+            "status": "ok",
+            "version": "0.9.0",
+            "features": {"chat": true}
+        }))
+        .expect("legacy health payload");
+
+        assert!(response.identity.is_empty());
+        assert_eq!(response.pid, 0);
+        assert_eq!(response.api_protocol, 0);
+        assert!(response.capabilities.is_empty());
+        assert!(response.features["chat"]);
+    }
 
     #[test]
     fn steer_request_uses_the_chat_steering_contract() {

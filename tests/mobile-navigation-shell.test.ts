@@ -200,6 +200,20 @@ function createStreamingHarness() {
     async cancelSession() {
       cancelCalls += 1;
     },
+    async getSession(id: string) {
+      return {
+        session: { id, title: "Running", session_type: "chat", mode: "build", model: null, token_count: 0 },
+        messages: [],
+      };
+    },
+    async getSessionState() {
+      return {
+        id: "session-running", agent_state: "idle", mode: "build",
+        permission_mode: "autonomous", recovery: null,
+        pending_interactions: [], delegated_tools: [], recent_delegated_runs: [],
+        last_event_sequence: null, live_partial_assistant: null,
+      };
+    },
     async setSessionPresence() {
       return undefined;
     },
@@ -263,7 +277,12 @@ test("explicit Stop still cancels server work", async () => {
   await Promise.resolve();
 
   harness.store.getState().stopStreaming();
+  assert.equal(harness.store.getState().isStreaming, true);
   await send;
+
+  for (let attempt = 0; attempt < 100 && harness.store.getState().isStreaming; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 
   assert.equal(harness.cancelCalls(), 1);
   assert.equal(harness.store.getState().isStreaming, false);

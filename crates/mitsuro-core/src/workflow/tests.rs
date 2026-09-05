@@ -53,8 +53,16 @@ fn plan_input() -> PlanProposalInput {
 }
 
 fn activate_fixture(manager: &WorkflowManager, session_id: &str) -> (String, String, u64) {
+    activate_fixture_with_goal(manager, session_id, goal_input())
+}
+
+fn activate_fixture_with_goal(
+    manager: &WorkflowManager,
+    session_id: &str,
+    goal: CreateGoalInput,
+) -> (String, String, u64) {
     let created = manager
-        .create_goal(session_id, goal_input(), "create", "user")
+        .create_goal(session_id, goal, "create", "user")
         .expect("create goal");
     let goal_id = created.snapshot.goal.id.clone();
     let proposed = manager
@@ -711,5 +719,266 @@ fn optional_goal_token_budget_is_accounted_and_pauses_at_boundary() {
     assert_eq!(
         exhausted.snapshot.goal.status_reason.as_deref(),
         Some("token_budget_exhausted")
+    );
+}
+
+#[test]
+fn admitted_token_usage_settles_after_stop_without_changing_lifecycle() {
+    for status in [
+        GoalStatus::Paused,
+        GoalStatus::Blocked,
+        GoalStatus::Cancelled,
+    ] {
+        let (_temp, session_id, manager) = setup();
+        let mut goal = goal_input();
+        goal.token_budget = Some(100);
+        let (goal_id, _, revision) = activate_fixture_with_goal(&manager, &session_id, goal);
+        let stopped = match status {
+            GoalStatus::Paused => manager.pause_goal(
+                &session_id,
+                &goal_id,
+                revision,
+                Some("user control"),
+                "stop",
+                "user",
+            ),
+            GoalStatus::Blocked => manager.block_goal(
+                &session_id,
+                &goal_id,
+                revision,
+                "user control",
+                "stop",
+                "user",
+            ),
+            GoalStatus::Cancelled => manager.cancel_goal(
+                &session_id,
+                &goal_id,
+                revision,
+                Some("user control"),
+                "stop",
+                "user",
+            ),
+            _ => unreachable!(),
+        }
+        .unwrap()
+        .snapshot;
+
+        assert!(manager
+            .record_token_usage(&session_id, 132)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            manager
+                .get_snapshot(&session_id)
+                .unwrap()
+                .unwrap()
+                .goal
+                .tokens_used,
+            0
+        );
+        assert!(manager
+            .record_token_usage_for_goal(&session_id, &goal_id, 132)
+            .unwrap()
+            .is_none());
+        let settled = manager.get_snapshot(&session_id).unwrap().unwrap();
+        assert_eq!(settled.goal.tokens_used, 132);
+        assert_eq!(settled.goal.status, status);
+        assert_eq!(settled.goal.status_reason, stopped.goal.status_reason);
+        assert_eq!(settled.aggregate_revision, stopped.aggregate_revision);
+        assert_eq!(settled.latest_attempt, stopped.latest_attempt);
+        assert_eq!(settled.steps, stopped.steps);
+        assert!(matches!(
+            manager.record_token_usage_for_goal(&session_id, "different-goal", 132),
+            Err(WorkflowError::Conflict(_))
+        ));
+        assert_eq!(manager.get_snapshot(&session_id).unwrap().unwrap(), settled);
+    }
+}
+
+#[test]
+fn terminal_attempt_usage_is_monotonic_idempotent_and_cannot_reopen_paused_work() {
+    let (_temp, session_id, manager) = setup();
+    let (goal_id, _, revision) = activate_fixture(&manager, &session_id);
+    let step_id = manager.get_snapshot(&session_id).unwrap().unwrap().steps[0]
+        .id
+        .clone();
+    let started = manager
+        .start_attempt(
+            &session_id,
+            &goal_id,
+            revision,
+            StartAttemptInput {
+                step_id: Some(step_id),
+                permission_mode: "supervised".into(),
+                max_turns: 1,
+                max_tool_calls: 1,
+                max_wall_time_secs: 1,
+                max_research_actions: 1,
+            },
+            "terminal-start",
+            "runtime",
+        )
+        .unwrap();
+    let attempt_id = started.snapshot.latest_attempt.unwrap().id;
+    let paused = manager
+        .pause_goal(
+            &session_id,
+            &goal_id,
+            started.snapshot.aggregate_revision,
+            Some("user pause"),
+            "terminal-pause",
+            "user",
+        )
+        .unwrap();
+    let progress = AttemptProgressInput {
+        turn_count: 2,
+        tool_call_count: 3,
+        research_action_count: 2,
+        material_progress: true,
+        blocker_fingerprint: Some("old tool failure".into()),
+    };
+    let settled = manager
+        .record_attempt_progress(
+            &session_id,
+            &goal_id,
+            &attempt_id,
+            paused.snapshot.aggregate_revision,
+            progress.clone(),
+            "terminal-usage",
+            "runtime",
+        )
+        .unwrap();
+    assert_eq!(settled.snapshot.goal.status, GoalStatus::Paused);
+    assert_eq!(
+        settled.snapshot.steps[0].status,
+        WorkflowStepStatus::Pending
+    );
+    let attempt = settled.snapshot.latest_attempt.as_ref().unwrap();
+    assert_eq!(attempt.status, AttemptStatus::Paused);
+    assert_eq!(
+        (
+            attempt.turn_count,
+            attempt.tool_call_count,
+            attempt.research_action_count
+        ),
+        (2, 3, 2)
+    );
+    assert_eq!(attempt.blocker_streak, 0);
+    assert_eq!(attempt.progress_revision, 0);
+    let replay = manager
+        .record_attempt_progress(
+            &session_id,
+            &goal_id,
+            &attempt_id,
+            paused.snapshot.aggregate_revision,
+            progress,
+            "terminal-usage",
+            "runtime",
+        )
+        .unwrap();
+    assert_eq!(replay, settled);
+    assert!(manager
+        .record_attempt_progress(
+            &session_id,
+            &goal_id,
+            &attempt_id,
+            settled.snapshot.aggregate_revision,
+            AttemptProgressInput {
+                turn_count: 1,
+                tool_call_count: 2,
+                research_action_count: 1,
+                material_progress: false,
+                blocker_fingerprint: None
+            },
+            "terminal-regression",
+            "runtime"
+        )
+        .is_err());
+    assert_eq!(
+        manager.get_snapshot(&session_id).unwrap().unwrap(),
+        settled.snapshot
+    );
+}
+
+#[test]
+fn idempotency_receipts_are_scoped_to_session_and_command_action() {
+    let (temp, session_id, manager) = setup();
+    let first = manager
+        .create_goal(&session_id, goal_input(), "scoped-operation", "user")
+        .unwrap();
+    let sessions = SessionManager::new(Database::new(&temp.path().join("workflow.db")).unwrap());
+    let second_session = sessions
+        .create_session("Second session", None, None)
+        .unwrap();
+    assert!(matches!(
+        manager.create_goal(&second_session, goal_input(), "scoped-operation", "user"),
+        Err(WorkflowError::Conflict(_))
+    ));
+    assert!(manager.get_snapshot(&second_session).unwrap().is_none());
+    assert!(matches!(
+        manager.cancel_goal(
+            &session_id,
+            &first.snapshot.goal.id,
+            first.snapshot.aggregate_revision,
+            None,
+            "scoped-operation",
+            "user"
+        ),
+        Err(WorkflowError::Conflict(_))
+    ));
+    assert_eq!(
+        manager
+            .get_snapshot(&session_id)
+            .unwrap()
+            .unwrap()
+            .goal
+            .status,
+        GoalStatus::Draft
+    );
+    let replayed = manager
+        .create_goal(&session_id, goal_input(), "scoped-operation", "user")
+        .unwrap();
+    assert_eq!(replayed.snapshot.goal.id, first.snapshot.goal.id);
+    assert_eq!(
+        replayed.snapshot.aggregate_revision,
+        first.snapshot.aggregate_revision
+    );
+    let db = Database::new(&temp.path().join("workflow.db")).unwrap();
+    db.conn().execute("UPDATE workflow_idempotency SET action = 'goal_created' WHERE operation_id = 'scoped-operation'", []).unwrap();
+    assert!(
+        manager
+            .create_goal(&session_id, goal_input(), "scoped-operation", "user")
+            .is_ok(),
+        "unambiguous historical receipts remain readable"
+    );
+    db.conn().execute("UPDATE workflow_idempotency SET action = 'goal_blocked' WHERE operation_id = 'scoped-operation'", []).unwrap();
+    assert!(
+        matches!(
+            manager.block_goal(
+                &session_id,
+                &first.snapshot.goal.id,
+                first.snapshot.aggregate_revision,
+                "blocked",
+                "scoped-operation",
+                "user"
+            ),
+            Err(WorkflowError::Conflict(_))
+        ),
+        "ambiguous historical event labels cannot authorize another command"
+    );
+    db.conn().execute("UPDATE workflow_idempotency SET action = 'goal_paused' WHERE operation_id = 'scoped-operation'", []).unwrap();
+    assert!(
+        matches!(
+            manager.pause_goal(
+                &session_id,
+                &first.snapshot.goal.id,
+                first.snapshot.aggregate_revision,
+                Some("paused"),
+                "scoped-operation",
+                "user"
+            ),
+            Err(WorkflowError::Conflict(_))
+        ),
+        "legacy archive receipts cannot authorize pause_goal replay"
     );
 }

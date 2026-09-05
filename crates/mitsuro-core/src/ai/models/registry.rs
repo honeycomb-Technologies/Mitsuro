@@ -149,14 +149,6 @@ impl ModelRegistry {
         recent.truncate(self.max_recent);
     }
 
-    pub async fn has_models(&self, provider: ProviderId) -> bool {
-        self.models
-            .read()
-            .await
-            .get(&provider)
-            .is_some_and(|models| !models.is_empty())
-    }
-
     /// Resolve one exact provider/auth/transport identity.
     pub async fn get_model_by_key(&self, key: &ModelKey) -> Option<ModelMetadata> {
         let index = self.model_index.read().await;
@@ -237,12 +229,6 @@ impl ModelRegistry {
         self.get_model_by_key(&key).await
     }
 
-    /// Non-blocking legacy accessor. Ambiguous IDs intentionally return None.
-    pub fn try_get_model(&self, model_id: &str) -> Option<ModelMetadata> {
-        let key = self.try_resolve_legacy_key(model_id).ok()?;
-        self.try_get_model_by_key(&key)
-    }
-
     pub async fn mark_recent_key(&self, key: &ModelKey) -> bool {
         if !self.model_index.read().await.contains_key(key) {
             return false;
@@ -252,13 +238,6 @@ impl ModelRegistry {
         recent.insert(0, key.clone());
         recent.truncate(self.max_recent);
         true
-    }
-
-    /// Legacy recent tracking. Ambiguous IDs are ignored rather than guessed.
-    pub async fn mark_recent(&self, model_id: &str) {
-        if let Ok(key) = self.resolve_legacy_key(model_id).await {
-            self.mark_recent_key(&key).await;
-        }
     }
 
     pub async fn set_recent_keys(&self, keys: Vec<ModelKey>) {
@@ -319,48 +298,6 @@ impl ModelRegistry {
             .collect();
 
         (recent_models, by_provider)
-    }
-
-    pub fn try_get_organized_models(
-        &self,
-        configured_providers: &[ProviderId],
-    ) -> Option<OrganizedModels> {
-        let index = self.model_index.try_read().ok()?;
-        let models = self.models.try_read().ok()?;
-        let recent_keys = self.recent_keys.try_read().ok()?;
-
-        let recent_models = recent_keys
-            .iter()
-            .filter_map(|key| {
-                let row = index.get(key)?;
-                let model = models.get(&key.provider)?.get(*row)?;
-                configured_providers
-                    .contains(&model.provider)
-                    .then(|| model.clone())
-            })
-            .collect();
-
-        let by_provider = configured_providers
-            .iter()
-            .filter_map(|provider| {
-                models
-                    .get(provider)
-                    .filter(|provider_models| !provider_models.is_empty())
-                    .map(|provider_models| (*provider, provider_models.clone()))
-            })
-            .collect();
-
-        Some((recent_models, by_provider))
-    }
-
-    pub fn try_has_models(&self, provider: ProviderId) -> Option<bool> {
-        Some(
-            self.models
-                .try_read()
-                .ok()?
-                .get(&provider)
-                .is_some_and(|models| !models.is_empty()),
-        )
     }
 }
 

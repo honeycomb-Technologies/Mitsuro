@@ -30,6 +30,7 @@ pub(super) fn build_partial_assistant_state(
 ) -> PartialAssistantState {
     PartialAssistantState {
         text: checkpoint.text.clone(),
+        citations: checkpoint.citations.clone(),
         thinking: checkpoint.thinking.clone(),
         tool_calls: checkpoint
             .tool_calls
@@ -123,9 +124,7 @@ mod tests {
     fn ledger_with_objective(objective: &str) -> ContextLedger {
         ContextLedger::from_conversation(&[ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: objective.to_string(),
-            }],
+            content: vec![Content::text(objective.to_string())],
         }])
     }
 
@@ -143,6 +142,7 @@ mod tests {
             }]
         });
         let partial = PartialAssistantState {
+            citations: Vec::new(),
             text: "I need one decision.".to_string(),
             thinking: String::new(),
             tool_calls: vec![RecoveryToolCall::from_call_parts(
@@ -214,6 +214,7 @@ mod tests {
             None,
             None,
             PartialAssistantState {
+                citations: Vec::new(),
                 text: String::new(),
                 thinking: String::new(),
                 tool_calls: vec![RecoveryToolCall::summary("partial-1", "bash")],

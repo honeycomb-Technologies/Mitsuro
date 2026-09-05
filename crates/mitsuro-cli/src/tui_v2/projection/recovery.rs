@@ -22,7 +22,16 @@ impl ConversationProjection {
         };
         self.current_turn_mut().state = turn_state;
 
-        self.merge_partial_text(&recovery.partial_assistant.text);
+        self.merge_partial_text(
+            &recovery.partial_assistant.text,
+            recovery
+                .partial_assistant
+                .citations
+                .iter()
+                .cloned()
+                .map(super::live::map_citation)
+                .collect(),
+        );
         self.merge_partial_thinking(&recovery.partial_assistant.thinking);
 
         let tool_status = match recovery.status {
@@ -49,8 +58,12 @@ impl ConversationProjection {
         self.presentation.live_turn_id = Some(self.current_turn_mut().id.clone());
     }
 
-    fn merge_partial_text(&mut self, partial: &str) {
-        if partial.trim().is_empty() {
+    fn merge_partial_text(
+        &mut self,
+        partial: &str,
+        citations: Vec<crate::tui_v2::model::conversation::CitationModel>,
+    ) {
+        if partial.trim().is_empty() && citations.is_empty() {
             return;
         }
         let turn_index = self.ensure_turn();
@@ -72,11 +85,12 @@ impl ConversationProjection {
                 part.text = partial.to_owned();
             }
             part.streaming = true;
+            super::merge_citations(&mut part.citations, citations);
             self.active_text = Some((turn_index, part_index));
             return;
         }
 
-        self.append_agent_text(partial, Vec::new());
+        self.append_agent_text(partial, citations);
     }
 
     fn merge_partial_thinking(&mut self, partial: &str) {
@@ -225,6 +239,7 @@ mod tests {
             Some(LoopStopReason::AwaitingInput),
             None,
             PartialAssistantState {
+                citations: Vec::new(),
                 text: "I inspected it.".to_owned(),
                 thinking: String::new(),
                 tool_calls: vec![RecoveryToolCall {
@@ -250,16 +265,12 @@ mod tests {
             &[
                 ModelMessage {
                     role: Role::User,
-                    content: vec![Content::Text {
-                        text: "inspect".to_owned(),
-                    }],
+                    content: vec![Content::text("inspect".to_owned())],
                 },
                 ModelMessage {
                     role: Role::Assistant,
                     content: vec![
-                        Content::Text {
-                            text: "I inspected".to_owned(),
-                        },
+                        Content::text("I inspected".to_owned()),
                         Content::ToolUse {
                             id: "read-1".to_owned(),
                             name: "read".to_owned(),

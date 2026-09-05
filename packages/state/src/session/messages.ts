@@ -1,4 +1,4 @@
-import type { ContentBlock } from '@mitsuro/api';
+import { mergeCitations, normalizeCitations, type Citation, type ContentBlock } from '@mitsuro/api';
 
 import {
   MAX_MESSAGE_CONTENT_LENGTH,
@@ -98,8 +98,8 @@ function joinAdjacentText(existing: string, next: string): string {
   return existing + next;
 }
 
-function appendTextRenderPart(message: ChatMessage, content: string): void {
-  if (!content) return;
+function appendTextRenderPart(message: ChatMessage, content: string, citations?: Citation[]): void {
+  if (!content && !citations?.length) return;
 
   const parts = message.renderParts ?? (message.renderParts = []);
   const lastPart = parts[parts.length - 1];
@@ -107,12 +107,14 @@ function appendTextRenderPart(message: ChatMessage, content: string): void {
     parts[parts.length - 1] = {
       ...lastPart,
       content: joinAdjacentText(lastPart.content, content),
+      ...(citations?.length ? { citations: mergeCitations(lastPart.citations, citations) } : {}),
     };
   } else {
     parts.push({
       type: 'text',
       id: `text-${parts.length}`,
       content,
+      ...(citations?.length ? { citations } : {}),
     });
   }
 }
@@ -180,11 +182,14 @@ function applyStoredContentBlock(
   toolResults?: Map<string, StoredToolResult>,
 ): number {
   if (block.type === 'text' || ('text' in block && !block.type)) {
-    const text = block.text || '';
+    const text = typeof block.text === 'string' ? block.text : '';
     if (parsed.content.length < MAX_MESSAGE_CONTENT_LENGTH) {
-      parsed.content += (parsed.content ? '\n' : '') + text;
+      parsed.content += text.slice(
+        0,
+        MAX_MESSAGE_CONTENT_LENGTH - parsed.content.length,
+      );
     }
-    appendTextRenderPart(parsed, text);
+    appendTextRenderPart(parsed, text, normalizeCitations(block.citations));
   } else if (block.type === 'thinking' || 'thinking' in block) {
     const thinkingContent = block.thinking || '';
     parsed.thinking = parsed.thinking
@@ -318,7 +323,8 @@ function appendParsedStoredMessage(
   const hasThinking = (parsed.thinking?.trim().length ?? 0) > 0;
   const hasToolCalls = (parsed.toolCalls?.length ?? 0) > 0;
   const hasAttachments = (parsed.attachments?.length ?? 0) > 0;
-  if (!hasContent && !hasThinking && !hasToolCalls && !hasAttachments) return;
+  const hasCitations = parsed.renderParts?.some((part) => part.type === 'text' && part.citations?.length);
+  if (!hasContent && !hasThinking && !hasToolCalls && !hasAttachments && !hasCitations) return;
 
   if (previousByFingerprint.size > 0) {
     const fingerprint = messageStabilityFingerprint(parsed);

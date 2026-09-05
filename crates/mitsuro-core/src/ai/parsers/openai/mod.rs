@@ -91,21 +91,33 @@ impl SseParser for OpenAIParser {
     }
 
     async fn parse_events(&self, json: &Value) -> Result<Vec<SseEvent>> {
+        if json.get("type").and_then(Value::as_str).is_none() && json.get("error").is_none() {
+            return self.parse_chat_completions_events(json);
+        }
         let is_responses_finish = matches!(
             json.get("type").and_then(Value::as_str),
             Some("response.done" | "response.completed")
         );
-        let finish = self.parse_event(json).await?;
+        let event = self.parse_event(json).await?;
+        let citations = Self::responses_snapshot_citations(json);
+        let annotation = (!citations.is_empty()).then_some(SseEvent::TextDeltaWithCitations {
+            text: String::new(),
+            citations,
+        });
 
         if !is_responses_finish {
-            return Ok(vec![finish]);
+            let mut events = vec![event];
+            events.extend(annotation);
+            return Ok(events);
         }
 
+        let mut events = Vec::new();
         if let Some(delta) = self.final_response_snapshot_delta(json)? {
-            return Ok(vec![SseEvent::TextDelta(delta), finish]);
+            events.push(SseEvent::TextDelta(delta));
         }
-
-        Ok(vec![finish])
+        events.extend(annotation);
+        events.push(event);
+        Ok(events)
     }
 }
 
@@ -737,5 +749,125 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].arguments["pattern"], "**/*prompt*");
         assert_eq!(tool_calls[0].arguments["path"], ".");
+    }
+}
+
+#[cfg(test)]
+mod mixed_chat_tests {
+    use super::*;
+    use crate::ai::sse::SseStreamProcessor;
+    use crate::ai::streaming::StreamPart;
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn chat_mixed_text_reasoning_and_multiple_tools_preserve_all_updates() {
+        let parser = OpenAIParser::new();
+        let events = parser
+            .parse_events(&json!({"choices":[{"delta":{
+                "content":"Inspecting.", "reasoning_content":"Two independent reads.",
+                "tool_calls":[
+                    {"index":0,"id":"first","function":{"name":"read","arguments":"{\"path\":"}},
+                    {"index":1,"id":"second","function":{"name":"grep","arguments":"{\"pattern\":"}}
+                ]
+            }}]}))
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 6);
+        assert!(matches!(&events[0], SseEvent::TextDelta(text) if text == "Inspecting."));
+        assert!(
+            matches!(&events[1], SseEvent::ThinkingDelta { thinking, .. } if thinking == "Two independent reads.")
+        );
+        assert!(matches!(&events[2], SseEvent::ToolCallStart { id, .. } if id == "first"));
+        assert!(matches!(&events[3], SseEvent::ToolCallDelta { id, .. } if id == "first"));
+        assert!(matches!(&events[4], SseEvent::ToolCallStart { id, .. } if id == "second"));
+        assert!(matches!(&events[5], SseEvent::ToolCallDelta { id, .. } if id == "second"));
+        let finished = parser
+            .parse_events(&json!({"choices":[{"delta":{
+            "content":" Ready.", "tool_calls":[
+                {"index":0,"function":{"arguments":"\"a.rs\"}"}},
+                {"index":1,"function":{"arguments":"\"needle\"}"}}
+            ]
+        },"finish_reason":"tool_calls"}]}))
+            .await
+            .unwrap();
+        assert!(matches!(&finished[0], SseEvent::TextDelta(text) if text == " Ready."));
+        let Some(SseEvent::FinishWithToolCalls { tool_calls, .. }) = finished.last() else {
+            panic!("missing tools");
+        };
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].id, "first");
+        assert_eq!(tool_calls[0].arguments["path"], "a.rs");
+        assert_eq!(tool_calls[1].id, "second");
+        assert_eq!(tool_calls[1].arguments["pattern"], "needle");
+        let repeated_finish = parser
+            .parse_events(&json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}))
+            .await
+            .unwrap();
+        assert!(repeated_finish.iter().all(|event| !matches!(
+            event,
+            SseEvent::FinishWithToolCalls { .. } | SseEvent::ToolCallComplete(_)
+        )));
+    }
+
+    #[tokio::test]
+    async fn mixed_chat_wire_frames_dispatch_text_before_tools_and_finish_each_call_once() {
+        let parser = OpenAIParser::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut processor = SseStreamProcessor::new(tx);
+        let first = json!({"choices":[{"delta":{
+            "content":"First.", "tool_calls":[
+                {"index":0,"id":"one","function":{"name":"read","arguments":"{\"path\":"}},
+                {"index":1,"id":"two","function":{"name":"read","arguments":"{\"path\":"}}
+            ]
+        }}]});
+        let second = json!({"choices":[{"delta":{
+            "content":"Tail.", "reasoning_content":"Both selected.", "tool_calls":[
+                {"index":0,"function":{"arguments":"\"a\"}"}},
+                {"index":1,"function":{"arguments":"\"b\"}"}}
+            ]
+        },"finish_reason":"tool_calls"}]});
+        let wire = format!("data: {first}\n\ndata: {second}\n\ndata: [DONE]\n\n");
+        processor
+            .process_chunk(bytes::Bytes::from(wire), &parser)
+            .await
+            .unwrap();
+        processor.finish().await;
+        drop(processor);
+        let mut parts = Vec::new();
+        while let Some(part) = rx.recv().await {
+            parts.push(part);
+        }
+        let mut observed = Vec::new();
+        let mut completed = Vec::new();
+        for part in parts {
+            match part {
+                StreamPart::TextDelta { delta } => observed.push(format!("text:{delta}")),
+                StreamPart::ThinkingDelta { thinking, .. } => {
+                    observed.push(format!("thinking:{thinking}"))
+                }
+                StreamPart::ToolCallStart { id, .. } => observed.push(format!("start:{id}")),
+                StreamPart::ToolCallDelta { id, .. } => observed.push(format!("delta:{id}")),
+                StreamPart::ToolCallComplete { tool_call } => completed.push(tool_call),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            observed,
+            [
+                "text:First.",
+                "start:one",
+                "delta:one",
+                "start:two",
+                "delta:two",
+                "text:Tail.",
+                "thinking:Both selected.",
+                "delta:one",
+                "delta:two"
+            ]
+        );
+        assert_eq!(completed.len(), 2);
+        assert_eq!(completed[0].arguments["path"], "a");
+        assert_eq!(completed[1].arguments["path"], "b");
     }
 }

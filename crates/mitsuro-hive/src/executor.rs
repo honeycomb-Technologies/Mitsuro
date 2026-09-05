@@ -374,7 +374,7 @@ impl ExecutionBackend for MitsuroExecutionBackend {
             // execution and will call `execute` after successfully claiming.
             ExecutionControl::Start => Ok(()),
             ExecutionControl::Message { message, persisted } => {
-                let content = vec![Content::Text { text: message }];
+                let content = vec![Content::text(message)];
                 let input = if persisted {
                     LoopInput::PersistedUserMessage { content }
                 } else {
@@ -452,9 +452,9 @@ impl ExecutionBackend for MitsuroExecutionBackend {
                         &run_id,
                         LoopInput::Steer {
                             pending_id: Some(pending_id),
-                            content: vec![Content::Text {
-                                text: format!("Response to {tool_call_id}:\n{response}"),
-                            }],
+                            content: vec![Content::text(format!(
+                                "Response to {tool_call_id}:\n{response}"
+                            ))],
                         },
                     )
                     .await

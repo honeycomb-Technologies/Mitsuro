@@ -95,6 +95,7 @@ async fn load_session_restores_recovery_only_storage_session() -> anyhow::Result
                 Some(LoopStopReason::ProviderError),
                 Some("provider failed".to_string()),
                 PartialAssistantState {
+                    citations: Vec::new(),
                     text: "Partial answer".to_string(),
                     thinking: String::new(),
                     tool_calls: Vec::new(),

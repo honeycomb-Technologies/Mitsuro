@@ -71,17 +71,13 @@ fn live_and_persisted_text_tool_text_have_identical_turns() {
                 "u1",
                 ModelMessage {
                     role: Role::User,
-                    content: vec![Content::Text {
-                        text: "Inspect this.".to_owned(),
-                    }],
+                    content: vec![Content::text("Inspect this.".to_owned())],
                 },
             ),
             PersistedMessage::without_id(ModelMessage {
                 role: Role::Assistant,
                 content: vec![
-                    Content::Text {
-                        text: "I’ll inspect the current state.".to_owned(),
-                    },
+                    Content::text("I’ll inspect the current state.".to_owned()),
                     Content::ToolUse {
                         id: "read-1".to_owned(),
                         name: "read".to_owned(),
@@ -99,9 +95,9 @@ fn live_and_persisted_text_tool_text_have_identical_turns() {
             }),
             PersistedMessage::without_id(ModelMessage {
                 role: Role::Assistant,
-                content: vec![Content::Text {
-                    text: "The state is stored in parallel vectors.".to_owned(),
-                }],
+                content: vec![Content::text(
+                    "The state is stored in parallel vectors.".to_owned(),
+                )],
             }),
         ],
     );
@@ -712,4 +708,78 @@ fn delegated_progress(name: &str, status: AgentProgressStatus) -> DelegatedProgr
             ..AgentProgress::default()
         },
     }
+}
+
+#[test]
+fn cited_text_keeps_sources_across_live_persisted_and_recovery_projection() {
+    use mitsuro_core::ai::types::Citation;
+    use mitsuro_core::storage::{
+        PartialAssistantState, RecoveryDecision, RecoveryStatus, SessionRecoveryState,
+    };
+    let first = Citation {
+        url: "https://example.org/source".into(),
+        title: "Source".into(),
+        cited_text: "first finding".into(),
+    };
+    let second = Citation {
+        cited_text: "second finding".into(),
+        ..first.clone()
+    };
+    let citations = vec![first, second];
+    let mut live = ConversationProjection::new("citation-session");
+    live.apply_event(LoopEvent::TextDelta {
+        delta: "Two findings.".into(),
+    });
+    live.apply_event(LoopEvent::TextDeltaWithCitations {
+        delta: String::new(),
+        citations: citations.clone(),
+    });
+    live.apply_event(LoopEvent::TextDeltaWithCitations {
+        delta: String::new(),
+        citations: citations.clone(),
+    });
+    let persisted = ConversationProjection::from_model_messages(
+        "citation-session",
+        &[ModelMessage {
+            role: Role::Assistant,
+            content: vec![Content::Text {
+                text: "Two findings.".into(),
+                citations: citations.clone(),
+            }],
+        }],
+    );
+    let recovery = SessionRecoveryState::new(
+        RecoveryStatus::Streaming,
+        None,
+        None,
+        PartialAssistantState {
+            text: "Two findings.".into(),
+            citations,
+            ..Default::default()
+        },
+        RecoveryDecision::Resumable {
+            latest_user_objective: "Cite evidence".into(),
+        },
+    );
+    let mut restored = ConversationProjection::new("citation-session");
+    restored.merge_recovery(&recovery);
+    restored.merge_recovery(&recovery);
+    let sources = |projection: &ConversationProjection| {
+        projection
+            .presentation()
+            .turns
+            .iter()
+            .flat_map(|turn| &turn.parts)
+            .filter_map(|part| {
+                if let TimelinePart::AgentText(text) = part {
+                    Some((text.text.clone(), text.citations.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sources(&live), sources(&persisted));
+    assert_eq!(sources(&live), sources(&restored));
+    assert_eq!(sources(&restored)[0].1.len(), 2);
 }

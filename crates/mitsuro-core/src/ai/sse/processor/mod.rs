@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::ai::models::ApiFormat;
 use crate::ai::providers::ProviderId;
-use crate::ai::stream_buffer::StreamBuffer;
+use crate::ai::stream_smoothing::StreamBuffer;
 use crate::ai::streaming::StreamPart;
 use crate::ai::transform::apply_stream_part_transform;
 use crate::ai::types::Usage;

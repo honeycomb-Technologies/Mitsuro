@@ -53,8 +53,10 @@ type SessionGuard = Arc<Mutex<()>>;
 const SESSION_LOCK_MAX_ENTRIES: usize = 1000;
 const SESSION_LOCK_MAX_AGE: Duration = Duration::from_secs(3600);
 mod acceptance;
+mod agent_streams;
 mod ai_bootstrap;
 mod child_wake;
+mod control_leases;
 mod process_wake;
 type SessionLockMap = HashMap<String, (SessionGuard, Instant)>;
 type SessionInputMap =
@@ -91,6 +93,8 @@ pub use acceptance::{start_hive_acceptance_server, HiveAcceptanceServerConfig};
 struct WebAssets;
 
 pub(crate) const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 100 * 1024 * 1024;
+/// Compatibility version for the server's shared HTTP/SSE/WebSocket contract.
+pub const API_PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy)]
 struct ServerHttpPolicy {
@@ -191,6 +195,10 @@ pub struct AppState {
     pub session_inputs: Arc<RwLock<SessionInputMap>>,
     /// Presence registry for active viewers/controllers per session.
     pub session_presence: Arc<RwLock<SessionPresenceMap>>,
+    /// Ephemeral, opaque mutation authority for interactive Code Agents.
+    pub(crate) session_control_leases: Arc<RwLock<control_leases::SessionControlLeaseRegistry>>,
+    /// Bounded canonical live/replay events for interactive Code Agent views.
+    pub(crate) agent_streams: Arc<RwLock<agent_streams::AgentStreamHub>>,
     /// Active delegated tool snapshots per session for reconnect/reload parity.
     pub delegated_state: Arc<RwLock<DelegatedStateMap>>,
     /// Cached remote-access authority configuration.
@@ -263,6 +271,13 @@ impl AppState {
     }
 
     /// Resolve a fresh AI client from an exact provider-aware model identity.
+    ///
+    /// `user_id` is accepted for signature parity with the legacy-slug path
+    /// but is intentionally unused here: an exact `ModelKey` needs no
+    /// per-user selection, and provider credentials are server-owned by
+    /// design (one self-hosted trust domain, one credential store). True
+    /// per-user credential partitioning is a product architecture decision,
+    /// not a route-level change.
     pub async fn resolve_ai_client_for_key_for_user(
         &self,
         key: &mitsuro_core::ai::models::ModelKey,
@@ -629,6 +644,10 @@ async fn build_app_state_with_hive_runtime(
         session_locks: Arc::new(RwLock::new(HashMap::new())),
         session_inputs: Arc::new(RwLock::new(HashMap::new())),
         session_presence: Arc::new(RwLock::new(HashMap::new())),
+        session_control_leases: Arc::new(RwLock::new(
+            control_leases::SessionControlLeaseRegistry::default(),
+        )),
+        agent_streams: Arc::new(RwLock::new(agent_streams::AgentStreamHub::default())),
         delegated_state: Arc::new(RwLock::new(HashMap::new())),
         remote_access,
         active_agent_streams: Arc::new(AtomicUsize::new(0)),
@@ -803,6 +822,66 @@ pub async fn start_server_with_listener(
     start_server_with_listener_mode(config, listener, HiveRuntimeMode::DaemonProxy).await
 }
 
+/// Start the canonical server from a pre-bound listener and drain in-flight
+/// HTTP work after the supplied process shutdown signal resolves.
+pub async fn start_server_with_listener_and_shutdown<F>(
+    config: ServerConfig,
+    listener: tokio::net::TcpListener,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let local_addr = listener.local_addr()?;
+    let (app, _state) =
+        build_router_with_runtime_mode(&config, HiveRuntimeMode::DaemonProxy).await?;
+
+    tracing::info!(
+        bind_address = %local_addr,
+        local_url = %format!("http://localhost:{}", local_addr.port()),
+        "Mitsuro server listening"
+    );
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
+
+    Ok(())
+}
+
+/// Start a desktop-managed companion that keeps the full HTTP API but does
+/// not attach to a shared Hive daemon.
+pub async fn start_desktop_managed_server_with_listener_and_shutdown<F>(
+    config: ServerConfig,
+    listener: tokio::net::TcpListener,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let local_addr = listener.local_addr()?;
+    let (app, _state) =
+        build_router_with_runtime_mode(&config, HiveRuntimeMode::ExecutionHost).await?;
+
+    tracing::info!(
+        bind_address = %local_addr,
+        local_url = %format!("http://localhost:{}", local_addr.port()),
+        "Mitsuro server listening"
+    );
+
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await?;
+
+    Ok(())
+}
+
 /// Start a server that is isolated from the shared Hive control plane.
 ///
 /// This is intended for disposable candidate evaluation. It keeps the normal
@@ -888,6 +967,13 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         identity: mitsuro_core::server_instance::HEALTH_IDENTITY.to_string(),
         pid: std::process::id(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        api_protocol: API_PROTOCOL_VERSION,
+        capabilities: HashMap::from([
+            ("agent_streams".to_string(), 1),
+            ("browser_sessions".to_string(), 1),
+            ("desktop_canvases".to_string(), 1),
+            ("terminal_sessions".to_string(), 2),
+        ]),
         features: HashMap::from([
             ("chat".to_string(), chat_available),
             ("tools".to_string(), tools_available),
@@ -901,6 +987,8 @@ struct HealthResponse {
     identity: String,
     pid: u32,
     version: String,
+    api_protocol: u16,
+    capabilities: HashMap<String, u16>,
     features: HashMap<String, bool>,
 }
 
@@ -927,6 +1015,13 @@ mod tests {
             identity: mitsuro_core::server_instance::HEALTH_IDENTITY.to_string(),
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            api_protocol: API_PROTOCOL_VERSION,
+            capabilities: HashMap::from([
+                ("agent_streams".to_string(), 1),
+                ("browser_sessions".to_string(), 1),
+                ("desktop_canvases".to_string(), 1),
+                ("terminal_sessions".to_string(), 2),
+            ]),
             features: HashMap::new(),
         };
         let value = serde_json::to_value(response).expect("health response JSON");
@@ -935,6 +1030,9 @@ mod tests {
             mitsuro_core::server_instance::HEALTH_IDENTITY
         );
         assert_eq!(value["pid"], std::process::id());
+        assert_eq!(value["api_protocol"], API_PROTOCOL_VERSION);
+        assert_eq!(value["capabilities"]["desktop_canvases"], 1);
+        assert_eq!(value["capabilities"]["terminal_sessions"], 2);
     }
 
     #[tokio::test]

@@ -1479,7 +1479,7 @@ fn canonical_user_evidence_text(content_json: &str) -> Result<Option<String>> {
     let text = content
         .into_iter()
         .filter_map(|block| match block {
-            Content::Text { text } => Some(text.trim().to_string()),
+            Content::Text { text, .. } => Some(text.trim().to_string()),
             Content::Image { .. }
             | Content::Document { .. }
             | Content::ToolUse { .. }
@@ -1520,7 +1520,7 @@ pub fn save_worker_introduction_opening_once(
     ensure!(
         matches!(
             canonical_content.as_slice(),
-            [Content::Text { text }] if !text.trim().is_empty()
+            [Content::Text { text, .. }] if !text.trim().is_empty()
         ),
         "Worker Introduction opening must be exactly one non-empty text block"
     );

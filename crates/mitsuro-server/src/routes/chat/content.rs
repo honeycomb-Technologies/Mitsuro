@@ -123,7 +123,7 @@ pub(super) fn build_user_content(
             ContentBlock::Text { text } => {
                 tracing::debug!("Content block: Text ({} chars)", text.len());
                 has_text_block = true;
-                contents.push(Content::Text { text: text.clone() });
+                contents.push(Content::text(text.clone()));
             }
             ContentBlock::Image { source } => {
                 contents.push(Content::Image {
@@ -135,15 +135,11 @@ pub(super) fn build_user_content(
     }
 
     if !message.is_empty() && !has_text_block {
-        contents.push(Content::Text {
-            text: message.to_string(),
-        });
+        contents.push(Content::text(message.to_string()));
     }
 
     if contents.is_empty() {
-        contents.push(Content::Text {
-            text: message.to_string(),
-        });
+        contents.push(Content::text(message.to_string()));
     }
 
     Ok(contents)

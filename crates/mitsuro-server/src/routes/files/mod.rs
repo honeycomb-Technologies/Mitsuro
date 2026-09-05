@@ -17,8 +17,8 @@ pub fn router() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
+    use crate::routes::test_support::current_user;
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use axum::{
@@ -38,10 +38,11 @@ mod tests {
 
     use super::browse::browse_directories;
     use super::workspace::{get_tree, read_file, resolve_file_path};
-    use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
     use crate::types::{BrowseQuery, FileQuery, TreeQuery};
     use crate::AppState;
+
+    use std::path::PathBuf;
 
     fn create_test_state() -> (AppState, PathBuf) {
         let temp_dir =
@@ -69,6 +70,12 @@ mod tests {
                 session_locks: Arc::new(RwLock::new(HashMap::new())),
                 session_inputs: Arc::new(RwLock::new(HashMap::new())),
                 session_presence: Arc::new(RwLock::new(HashMap::new())),
+                session_control_leases: Arc::new(RwLock::new(
+                    crate::control_leases::SessionControlLeaseRegistry::default(),
+                )),
+                agent_streams: Arc::new(RwLock::new(
+                    crate::agent_streams::AgentStreamHub::default(),
+                )),
                 delegated_state: Arc::new(RwLock::new(HashMap::new())),
                 remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                     enabled: true,
@@ -84,13 +91,6 @@ mod tests {
             },
             temp_dir,
         )
-    }
-
-    fn current_user(user_id: &str, home_dir: &Path) -> CurrentUser {
-        CurrentUser(AuthenticatedUser {
-            user_id: Some(user_id.to_string()),
-            home_dir: Some(home_dir.to_path_buf()),
-        })
     }
 
     #[tokio::test]

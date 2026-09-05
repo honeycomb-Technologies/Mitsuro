@@ -13,9 +13,10 @@ pub use context::{
 pub use policy::{
     agent_call_action, agent_call_execution_profile, agent_call_is_research,
     agent_call_may_start_run, agent_call_requests_write, agent_call_starts_run,
-    authorize_tool_call, effective_tool_call, tool_category, tool_policy, tool_policy_for_call,
-    DelegationPolicy, DelegationSurface, MutationToolSurface, PermissionMode, ToolAuthorization,
-    ToolCategory, ToolPolicy, ToolRequestPolicy, DEFAULT_CODE_TOOL_LIMIT,
+    authorize_tool_call, effective_tool_call, filter_code_tools_for_mode, tool_category,
+    tool_policy, tool_policy_for_call, DelegationPolicy, DelegationSurface, MutationToolSurface,
+    PermissionMode, ToolAuthorization, ToolCategory, ToolPolicy, ToolRequestPolicy,
+    DEFAULT_CODE_TOOL_LIMIT,
 };
 pub use result::{parse_params, progress_change_key_for_paths, trusted_changed, ToolResult};
 pub use runtime::{Tool, ToolRegistry};

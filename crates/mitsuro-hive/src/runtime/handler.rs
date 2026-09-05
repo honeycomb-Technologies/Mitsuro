@@ -5307,10 +5307,8 @@ fn send_message(
     let session = require_owned_session(tx, actor, session_id)?;
     let introduction_gate = enforce_worker_introduction_content_gate(tx, &session)?;
     if introduction_gate == WorkerIntroductionContentGate::AwaitingContext {
-        let content_json = serde_json::to_string(&vec![Content::Text {
-            text: message.to_string(),
-        }])
-        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+        let content_json = serde_json::to_string(&vec![Content::text(message.to_string())])
+            .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
         enforce_worker_introduction_canonical_content_bound(&content_json)?;
     }
     if let Some(binding) = ordinary_direct_worker_binding(tx, &session)? {
@@ -5437,7 +5435,7 @@ fn stage_steer(
         }
         if !content
             .iter()
-            .any(|item| matches!(item, Content::Text { text } if !text.trim().is_empty()))
+            .any(|item| matches!(item, Content::Text { text, .. } if !text.trim().is_empty()))
         {
             return Err(RuntimeStoreError::Invalid(
                 "Hive Worker Introduction context requires non-empty text".into(),
@@ -5538,7 +5536,7 @@ fn steering_objective(content: &[Content]) -> String {
     let text = content
         .iter()
         .filter_map(|item| match item {
-            Content::Text { text } if !text.trim().is_empty() => Some(text.trim()),
+            Content::Text { text, .. } if !text.trim().is_empty() => Some(text.trim()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -5673,10 +5671,8 @@ fn user_response(
     let _direct_worker_binding = ordinary_direct_worker_binding(tx, &session)?;
     let durable_response = format!("Response to {tool_call_id}:\n{response}");
     if introduction_gate == WorkerIntroductionContentGate::AwaitingContext {
-        let content_json = serde_json::to_string(&vec![Content::Text {
-            text: durable_response.clone(),
-        }])
-        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+        let content_json = serde_json::to_string(&vec![Content::text(durable_response.clone())])
+            .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
         enforce_worker_introduction_canonical_content_bound(&content_json)?;
     }
     let controller = get_or_create_controller(tx, &session, now)?;
@@ -7378,10 +7374,8 @@ pub(super) fn insert_canonical_user_message(
     message: &str,
     now: &str,
 ) -> Result<(), RuntimeStoreError> {
-    let content = serde_json::to_string(&vec![Content::Text {
-        text: message.to_string(),
-    }])
-    .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    let content = serde_json::to_string(&vec![Content::text(message.to_string())])
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
     tx.execute(
         "INSERT INTO messages (session_id, role, content, created_at)
          VALUES (?1, 'user', ?2, ?3)",
@@ -7423,10 +7417,8 @@ fn insert_pending_user_message(
     message: &str,
     now: &str,
 ) -> Result<(), RuntimeStoreError> {
-    let content = serde_json::to_string(&vec![Content::Text {
-        text: message.to_string(),
-    }])
-    .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
+    let content = serde_json::to_string(&vec![Content::text(message.to_string())])
+        .map_err(|error| RuntimeStoreError::Internal(error.into()))?;
     insert_pending_user_content(tx, session_id, pending_id, &content, now)
 }
 
@@ -7458,7 +7450,7 @@ fn canonical_text(content_json: &str) -> Option<String> {
         .ok()?
         .into_iter()
         .filter_map(|content| match content {
-            Content::Text { text } => Some(text),
+            Content::Text { text, .. } => Some(text),
             _ => None,
         })
         .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))

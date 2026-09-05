@@ -255,16 +255,6 @@ impl PlanFile {
         }
     }
 
-    /// Increment version number (call before saving).
-    pub fn increment_version(&mut self) {
-        self.version += 1;
-    }
-
-    /// Check if this plan's version matches the expected version.
-    pub fn version_matches(&self, expected: u64) -> bool {
-        self.version == expected
-    }
-
     /// Add a new phase (test helper).
     #[cfg(test)]
     pub fn add_phase(&mut self, name: impl Into<String>) -> &mut PlanPhase {

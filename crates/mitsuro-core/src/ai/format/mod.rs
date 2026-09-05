@@ -7,6 +7,9 @@ pub mod anthropic;
 pub mod google;
 pub mod openai;
 pub mod response;
+mod source_context;
+
+pub(crate) use source_context::{provider_text, provider_text_len};
 
 use serde_json::Value;
 

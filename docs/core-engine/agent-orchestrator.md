@@ -1,285 +1,214 @@
-# The Brain: Agent Orchestrator
+# Agent orchestration
 
-The agent orchestrator is the single most important piece of code in Mitsuro. Every conversation — whether it comes from the terminal, the web browser, a mobile app, or an editor integration — flows through the same loop. The orchestrator decides when to call the AI, when to run tools, when to ask the user for input, when to compact context, and when to stop. It is the canonical agentic loop, and there is exactly one of it.
+Mitsuro's interactive Agent uses a shared core orchestrator through validated
+`RunSpec` contracts. Terminal, web, mobile, and ACP surfaces attach to its
+`LoopEvent` output and send `LoopInput` controls. Delegated agents have their own
+execution loop; Hive also owns durable Worker admission and commit boundaries.
+Shared helpers do not make these execution lifecycles interchangeable.
 
-This document explains how it works from the inside out.
+This document describes the source contracts. A passing test or a local source
+change does not establish which binary a deployed service is running.
 
-## Why One Loop
+## Ownership and entry points
 
-Early in development, the TUI had its own agentic loop, the HTTP server had another, and the ACP server had a third. They duplicated logic for streaming, tool execution, error handling, and state persistence. When a bug was fixed in one, the others lagged behind. When a feature was added — say, failure detection — it had to be implemented three times.
+A surface resolves the model and its capabilities, builds a `RunSpec` with
+`RunSpecBuilder`, and calls `start` with `OrchestratorServices` and conversation
+history. The builder validates the run contract before the crate-private
+orchestrator starts. Services provide the provider client, tool registry,
+process registry, database path, and skills manager.
 
-The orchestrator eliminated that. It lives in `crates/mitsuro-core/src/agent/orchestrator.rs` and owns the entire lifecycle of an AI turn: accepting a conversation, calling the provider, processing the stream, executing tools, detecting failures, and repeating until the AI finishes or a guard intervenes. The TUI, server, and ACP are now thin presentation layers that create an orchestrator, call `run()`, and react to its events.
+The run contract includes session and workspace identity, work mode, permission
+mode, tool restrictions, provider options, recovery inputs, and an explicit run
+budget when configured. Work mode and permission mode are separate: activating
+an approved Goal enables Build work without granting additional permissions.
 
-The architecture looks like this:
-
+```mermaid
+flowchart TD
+    Surface[Client or execution host] --> Spec[Validated RunSpec]
+    Spec --> Loop[Agent orchestrator]
+    Context[Shared prompt and current context] --> Loop
+    Workflow[Durable workflow] <--> Loop
+    Loop --> Provider[Provider normalization and stream]
+    Provider --> Loop
+    Loop --> Tools[Tool control and registry]
+    Tools --> Loop
+    Loop --> Events[LoopEvent]
+    Events --> Surface
+    Surface --> Inputs[LoopInput]
+    Inputs --> Loop
+    Loop <--> History[Conversation and recovery storage]
 ```
- Orchestrator ──── LoopEvent ────► Consumer (TUI / Server / ACP)
-   (core)      ◄──── LoopInput ────  (presentation layer)
-```
 
-The orchestrator emits `LoopEvent` values for every state change — text deltas, tool executions, errors, mode switches. The consumer sends `LoopInput` values back for user interactions like tool approvals, question responses, and cancellation. This is a clean unidirectional data flow with a single feedback channel.
-
-## Configuration and Services
-
-Product surfaces build a validated `RunSpec`, which owns the per-run configuration and starts the crate-private orchestrator with shared `OrchestratorServices`.
-
-**OrchestratorConfig** captures everything specific to a single run:
-
-- `session_id` — which conversation this run belongs to
-- `working_dir` and `project_dir` — filesystem context for tool execution
-- `permission_mode` — whether tools run autonomously or require user approval (can be overridden by per-project `.mitsuro/settings.json`)
-- `max_iterations` — optional turn budget (the hard ceiling on how many AI round-trips this run can make)
-- `stream_idle_timeout` — how long to wait for data on a stalled stream before giving up
-- `initial_work_mode` — whether the session starts in Build mode (read/write) or Plan mode (read-only)
-- `generate_title` — whether to auto-generate a session title from the first AI response
-- `delegated_progress_tx` — optional channel for forwarding sub-agent progress to external surfaces
-
-**OrchestratorServices** holds the shared infrastructure:
-
-- `ai_client` — the normalized LLM client (handles Anthropic, OpenAI, OpenRouter, and others behind one interface)
-- `tool_registry` — the complete set of registered tools and their execution logic
-- `process_registry` — background process management for bash commands
-- `db_path` — where the SQLite database lives for persistence
-- `skills_manager` — available slash-command-style skills
-
-The consumer resolves a frozen model runtime and constructs a `RunSpec` through `RunSpecBuilder`, then calls `run()` with the shared services, conversation history, and call options. Direct orchestrator construction is crate-private. The run returns a pair of channels — an event receiver and an input sender — and spawns the loop as a tokio task. From that point on, the consumer listens for canonical events and occasionally sends input.
-
-## The Main Loop
-
-The heart of the orchestrator is an async loop inside `run_inner()`. Here is what happens on every iteration.
-
-### 1. Turn budget check
-
-The loop checks `max_iterations`. If the current iteration count meets or exceeds the budget, the loop emits a `LoopEvent::Error` with a budget exhaustion message, then a `LoopEvent::Finished` with stop reason `BudgetExhausted`, and returns. This is a hard stop — no more AI calls.
-
-### 2. Context injection
-
-Before each AI call, the orchestrator builds a context-injected copy of the conversation. The raw conversation (just user and assistant messages) gets a stack of system messages prepended:
-
-- **Workspace context** — the execution directory, project directory, and workspace mode (project vs. neutral)
-- **Environment context** — platform, shell, date, current git branch, modification counts
-- **Persistent memory** — user preferences, feedback, project notes pulled from the database (capped at 8KB)
-- **Project instructions** — contents of `KRAB.md`, `CLAUDE.md`, `.cursorrules`, or similar instruction files found in the project hierarchy
-- **Project settings** — any `system_prompt_append` from `.mitsuro/settings.json`
-- **Plan context** — the active plan's task list, progress, and which tasks are ready vs. blocked
-- **Delegated run context** — recent sub-agent investigations, so the AI knows what's already been explored
-- **Autonomous task context** — pending and in-progress Hive tasks
-- **Report context** — recent reports available via `ReadReport`
-- **Skills context** — available skills and how to invoke them
-
-This injection happens every iteration, so the AI always sees current state. The context module lives in `crates/mitsuro-core/src/agent/context.rs`.
-
-### 3. Context compaction check
-
-Before sending the conversation to the AI, the orchestrator estimates its token count and checks whether it exceeds the model's compaction trigger threshold. If it does, the `CompactionManager` kicks in.
-
-Compaction is a multi-pass process that tries to shrink the conversation without losing critical information:
-
-1. **Strip old thinking blocks** — extended thinking from older turns is removed (only the two most recent are kept)
-2. **Compact old tool results** — tool outputs beyond the most recent six messages are truncated to short summaries, with a note to re-run the tool if details are needed. Tool results tagged `drop_after_compaction` are replaced entirely.
-3. **Summary replacement** — if the conversation is still too large after the above, the middle section (everything between the first user message and the recent tail) is replaced with a structured summary. The summary preserves user goals, assistant progress, important tool activity, and the latest user request.
-4. **Aggressive continuation** — if the summary replacement still isn't small enough, the system drops everything except system messages and one or two recent messages, replacing everything else with a dense summary.
-
-If compaction succeeds, the orchestrator emits a `ContextCompacted` event, persists the compacted conversation, and continues. If it fails (the result is still above the hard failure threshold), the loop terminates with `ContextCompactionFailed`.
-
-The `/pinch` command is the manual form of this same in-place compaction. It
-keeps the session ID, durable history, and client thread intact.
-
-### 4. Stream the AI response
-
-The orchestrator calls `ai_client.call_streaming()` with the context-injected conversation and receives a stream of `StreamPart` events. The stream processor in `crates/mitsuro-core/src/agent/stream.rs` accumulates text, thinking blocks, and tool calls while forwarding deltas to the event channel as `TextDelta`, `ThinkingDelta`, `ToolCallStart`, and `ToolCallComplete` events.
-
-During streaming, the orchestrator periodically checkpoints the partial assistant state to the database. If the process crashes mid-stream, the session recovery system can detect an interrupted turn and present options to the user.
-
-If the stream stalls beyond the configured idle timeout, processing stops with a `StreamIdleTimeout` reason. If the AI provider returns an error, it stops with `ProviderError`.
-
-### 5. Build and save the assistant message
-
-Once streaming completes, the orchestrator constructs a `ModelMessage` from the accumulated text, thinking blocks, and tool calls, pushes it onto the conversation, updates the context ledger, and persists it to the database.
-
-On the first response, if title generation is enabled, the orchestrator spawns a background task that calls the AI with the user's first message to generate a short session title.
-
-### 6. Handle the no-tools case
-
-If the AI response contains no tool calls, the turn is complete. The orchestrator checks for plan detection (in plan mode, the AI might have written a structured plan in its response text), emits `TurnComplete` and `Finished` events, and returns.
-
-### 7. Handle AskUser partitioning
-
-If the AI wants to ask the user a question (via the `AskUserQuestion` tool), the orchestrator partitions the tool calls. Non-AskUser tools execute immediately. Then placeholder results are added for the AskUser calls, and the loop emits `AwaitingInput` events and pauses. The consumer is responsible for collecting the user's response and submitting it to resume the session.
-
-### 8. Failure detection (pre-execution)
-
-Before executing tools, the orchestrator checks for repeated read-only exploration sequences. If the AI keeps issuing the exact same read-only tool pattern (same tools with same arguments) across multiple iterations without taking action, a loop guard fires and the session stops with an error message telling the AI to act on the evidence or change strategy. The threshold is four identical sequences.
-
-### 9. Execute tools
-
-Tool calls go through `crates/mitsuro-core/src/agent/executor/mod.rs`. For each tool call in the batch:
-
-1. **Advertised capability check** — the call name must exist in the exact function-tool set frozen from the canonical provider request. An unadvertised or hallucinated call returns a structured `tool_not_advertised` result before extensions, approvals, recovery interaction persistence, or registry execution.
-2. **Disabled tool check** — if the tool is listed in the project's `disabled_tools`, it's denied immediately.
-3. **Authorization** — the `ToolControl` module checks the permission mode. In autonomous mode, tools execute without approval. In supervised mode, write-category tools emit a `ToolApprovalRequired` event and wait for the user to approve or deny. Read-only tools run without approval regardless of mode. There's a five-minute timeout on approval requests.
-4. **Special tool interception** — mode switch tools (`set_work_mode`, `enter_plan_mode`) and plan task tools (`task_start`, `task_complete`, `add_subtask`, `set_dependency`) are handled directly by the orchestrator rather than going through the tool registry, because they mutate the loop's own state.
-5. **Regular execution** — the tool runs through the `ToolRegistry`, which handles argument validation, path and permission policy enforcement, and output streaming. These policies are not an OS sandbox for Bash. Tool output gets streamed back via `ToolOutputDelta` events (so bash output, for example, appears in real time).
-6. **Retry policy** — read-only tools that time out get one automatic retry. Everything else stops on failure.
-7. **Result shaping** — the `ToolControl` module truncates oversized tool outputs (over 30,000 characters), wraps the result with history metadata for later compaction, and publishes the `ToolResult` event.
-
-During execution of sub-agent tools (the `agent` tool), the executor sets up a progress channel so delegated progress events flow back to the parent session's event stream.
-
-### 10. Failure detection (post-execution)
-
-After tool execution, the orchestrator runs two more failure detectors:
-
-- **Repeated failure detection** — tracks tool error signatures across iterations. If the same tool fails with the same error pattern (same error code, same fingerprint, same arguments) twice, the loop stops. Success on a tool clears its failure counter. This prevents infinite retry loops where the AI keeps calling a broken tool the same way.
-- **Terminal explore failure** — if a delegated explore tool returned with zero usable agents or zero files examined, the loop stops immediately rather than letting the AI try to manually re-explore.
-
-There's also a post-explore manual fallback detector that stops the AI from issuing broad read-only probes after a delegated exploration already returned usable coverage.
-
-### 11. Exploration budget
-
-The orchestrator tracks a soft exploration budget. Read-only tool calls (read, glob, grep) increment a counter. Any write action resets it. At 15 read-only calls, a warning is logged. At 30, a hard warning fires. This doesn't stop the loop by itself, but it signals that the AI may be over-exploring without acting.
-
-### 12. Save results and loop
-
-Tool results are saved as a user message (since tool results go in the user role per the Anthropic message format), the context ledger is updated, and the loop continues from step 1.
-
-## Turn Management
-
-Every pass through the main loop is a "turn" — one AI call and its resulting tool executions. The iteration counter increments at the top of each loop pass. The turn budget (`max_iterations`) provides a hard ceiling.
-
-`AgentState` in `crates/mitsuro-core/src/agent/state.rs` tracks turn count, timing, and interruption status. Interactive, ACP, and delegated runs are unlimited by default. `AgentConfig` can provide separate explicit `primary_max_turns`, `subagent_max_turns`, and `acp_max_turns` resource ceilings; the legacy `max_turns` field remains a lower-precedence migration fallback. Semantic repetition is handled by the progress ledger rather than a hidden turn count.
-
-## The Hook System
-
-Hooks intercept tool calls before and after execution. They're defined by the `PreToolHook` and `PostToolHook` traits in `crates/mitsuro-core/src/agent/hooks/mod.rs`.
-
-### Built-in Hooks
-
-**SafetyHook** — blocks dangerous bash commands before they execute. It parses shell commands into segments (handling pipes, semicolons, and logical operators), strips environment variable prefixes, and checks each segment against a set of rules:
-
-- Fork bombs
-- `curl`/`wget` piped to `sh`/`bash`
-- Redirects to block devices (`/dev/sda`, etc.)
-- `sudo`, `doas`, `su` (privilege escalation)
-- `rm -rf /` and similar destructive targets
-- `chmod 777`
-- `dd` with raw device access
-- `mkfs` (filesystem formatting)
-
-The hook is regex-based with proper shell quoting awareness, so `rm '-rf' /` is caught just as well as `rm -rf /`.
-
-**PlanModeHook** — when plan mode is active, blocks all write-category tools and modifying bash commands. It uses the tool registry's per-tool policy to determine categories. Read-only tools and read-only bash commands (like `ls`, `git status`, `git diff`) pass through. This enforces the "read before you write" discipline of plan mode.
-
-**LoggingHook** — runs after every tool execution, logging the tool name, duration, error status, and output size via the tracing system.
-
-### User-Configurable Hooks
-
-Users can define their own hooks in `crates/mitsuro-core/src/agent/user_hooks/mod.rs`. Each hook is a shell command with a regex pattern that matches tool names. The hook receives JSON on stdin containing the tool name, arguments, hook ID, and hook type.
-
-The exit code protocol:
-- `0` — continue (stdout/stderr not shown)
-- `2` — block tool execution, show stderr as the reason
-- Any other code — warn the user with stderr, but continue
-
-User hooks have four types: `PreToolUse`, `PostToolUse`, `Notification`, and `UserPromptSubmit`. They're persisted in the database, support enable/disable toggling, and have a 30-second execution timeout.
-
-The `UserPreToolHook` and `UserPostToolHook` wrappers adapt user hooks into the `PreToolHook`/`PostToolHook` traits so they plug into the same execution pipeline as built-in hooks.
-
-## Context Ledger
-
-The `ContextLedger` in `crates/mitsuro-core/src/agent/context_ledger.rs` tracks the high-level state of the conversation for compaction and recovery decisions. It counts canonical messages, summarized messages, dropped messages, pinned messages (like project instructions), and replayed messages. It also extracts the latest user objective — the most recent user message that contains actual text (not just tool results).
-
-The ledger records:
-
-- **ContextLedgerRecord** — a snapshot of all counters and the last compaction event, serialized to the database after every state change
-- **ContinuationContract** — a `Resumable` or `NonResumable` decision retained for compatibility with older continuation flows
-
-## Summarization
-
-When a session approaches its useful context limit, the compaction pipeline
-summarizes older history and continues in the same session. Manual `/pinch`,
-automatic pressure handling, and provider-overflow recovery use this shared
-in-place path. The summarizer in
-`crates/mitsuro-core/src/agent/summarizer.rs` produces four fields:
-
-- `work_summary` — 2-3 paragraphs of what was accomplished
-- `key_decisions` — architectural choices and trade-offs
-- `pending_tasks` — incomplete work and identified next steps
-- `important_files` — the top 10 most relevant file paths
-
-Summarization uses a short, stable system prefix and a bounded transcript
-prompt. It does not claim to reuse the full parent request prefix because the
-parent's project and tool instruction layers are not reproduced.
-
-## Session Recovery
-
-The orchestrator persists recovery state at critical transition points throughout the loop. Before streaming starts, it writes a `Streaming` status. During streaming, checkpoints capture the partial assistant response (text, thinking, tool calls accumulated so far). Before tool execution, it writes a `ToolExecuting` status. After tool execution, recovery state is cleared.
-
-If the process crashes or the connection drops, the next session load can inspect the recovery state and determine what happened:
-
-- **Interrupted during streaming** — the partial response can be shown to the user, and they can choose to retry or continue
-- **Interrupted during tool execution** — the user is warned that tools may have partially executed
-
-The recovery state includes the context ledger snapshot, the stop reason (if any), error details, and the partial assistant state. This is stored per-session in the database.
-
-## The LoopEvent / LoopInput Protocol
-
-`LoopEvent` (in `crates/mitsuro-core/src/agent/loop_events.rs`) is a tagged enum with roughly 30 variants covering every observable state change:
-
-**Streaming events** — `TextDelta`, `TextDeltaWithCitations`, `ThinkingDelta`, `ThinkingComplete`
-
-**Tool lifecycle** — `ToolCallStart`, `ToolCallComplete`, `ToolExecuting`, `ToolOutputDelta`, `ToolResult`
-
-**Interaction** — `AwaitingInput`, `ToolApprovalRequired`, `ToolApproved`, `ToolDenied`
-
-**Server-side tools** — `ServerToolStart`, `ServerToolComplete`, `WebSearchResults`, `WebFetchResult`, `ServerToolError`
-
-**Mode and plan** — `ModeChange`, `PlanUpdate`, `PlanComplete`
-
-**Turn lifecycle** — `TurnComplete`, `TickInjected`, `Usage`, `ContextCompacted`, `TitleGenerated`, `Finished`, `Error`
-
-**Background agents** — `AgentBackgroundStarted`, `AgentBackgroundCompleted`, `UserMessage`, `ClassifierDecision`
-
-**Team events** — `TeammateSpawned`, `TeammateTaskCompleted`, `TeammateTaskFailed`, `TeammateCancelled`
-
-`LoopStopReason` is a separate enum that tags how the loop terminated: `Completed`, `AwaitingInput`, `BudgetExhausted`, `ProviderError`, `LoopGuardTriggered`, `StreamIdleTimeout`, `UserAbort`, `ContextCompactionFailed`, or `Sleeping`.
-
-`LoopInput` has three variants:
-
-- `ToolApproval` — user approved or denied a tool (carries the tool call ID and a boolean)
-- `UserResponse` — user answered an AskUser or PlanConfirm prompt (carries the tool call ID and response text)
-- `Cancel` — user requested cancellation
-
-This protocol is the complete contract between the orchestrator and any consumer. If you can emit `LoopInput` and consume `LoopEvent`, you can build a new Mitsuro frontend.
-
-## Cancellation
-
-`AgentCancellation` in `crates/mitsuro-core/src/agent/cancellation.rs` wraps a `tokio_util::CancellationToken`. It provides `cancel()` to signal all tasks, `child_token()` to create scoped sub-tokens for individual operations, and `reset()` to create a fresh token for the next request. This is how the user's Ctrl+C propagates through nested async operations — the cancellation token flows from the session down through the orchestrator, into tool execution, and through sub-agent spawning.
-
-## Plan Mode Integration
-
-The orchestrator has deep integration with plan mode through `crates/mitsuro-core/src/agent/plan_handler.rs`. When the AI calls `set_work_mode` or `enter_plan_mode`, the orchestrator intercepts the call before it reaches the tool registry, updates the session's work mode in the database, and emits a `ModeChange` event.
-
-In plan mode, the AI can read files and explore the codebase but cannot write. The `PlanModeHook` enforces this by blocking write-category tools and modifying bash commands. When the AI produces a response that contains a structured plan (detected by `try_detect_plan()`), the orchestrator parses it, saves it to the database, and emits `PlanUpdate` and `PlanComplete` events. The consumer then presents the plan to the user for confirmation before switching to build mode.
-
-During build mode with an active plan, the AI uses `task_start` and `task_complete` to track progress through the plan's phases. The orchestrator intercepts these calls too, updates the plan state in the database, and emits `PlanUpdate` events so the UI can show real-time progress.
-
-## Key Source Files
-
-| File | Purpose |
-|------|---------|
-| `crates/mitsuro-core/src/agent/orchestrator.rs` | The orchestrator itself — config, services, and the main loop |
-| `crates/mitsuro-core/src/agent/mod.rs` | Module index and public re-exports |
-| `crates/mitsuro-core/src/agent/executor/mod.rs` | Tool execution engine with approval workflow and retry policy |
-| `crates/mitsuro-core/src/agent/state.rs` | Turn counting, timing, and per-session configuration |
-| `crates/mitsuro-core/src/agent/hooks/mod.rs` | SafetyHook, PlanModeHook, LoggingHook, and the hook traits |
-| `crates/mitsuro-core/src/agent/user_hooks/mod.rs` | User-configurable hooks with shell command execution |
-| `crates/mitsuro-core/src/agent/failure.rs` | Repeated failure detection and exploration loop guards |
-| `crates/mitsuro-core/src/agent/context.rs` | Context injection — system prompt assembly from all sources |
-| `crates/mitsuro-core/src/agent/context_ledger.rs` | Context tracking for compaction and continuation decisions |
-| `crates/mitsuro-core/src/agent/compaction/mod.rs` | Live conversation compaction (same-session context trimming) |
-| `crates/mitsuro-core/src/agent/summarizer.rs` | AI-powered conversation summarization for session handoff |
-| `crates/mitsuro-core/src/agent/cancellation.rs` | Cancellation token wrapper for async task interruption |
-| `crates/mitsuro-core/src/agent/plan_handler.rs` | Plan and mode switch tool handlers |
-| `crates/mitsuro-core/src/agent/loop_events.rs` | LoopEvent and LoopInput type definitions |
-| `crates/mitsuro-core/src/agent/stream.rs` | Stream processing — accumulates AI response chunks |
-| `crates/mitsuro-core/src/agent/tool_control.rs` | Approval, retry, and result-shaping policy |
+## Conversation, run, attempt, and provider turn
+
+These are different lifetimes:
+
+| Lifetime | Authority |
+| --- | --- |
+| Conversation | Persisted user, assistant, and tool messages in one session |
+| Run | One foreground orchestrator invocation and its terminal event |
+| Goal | Durable outcome, approved plan, criteria, and status |
+| Attempt | Bounded execution of a Goal step, or verification after the steps |
+| Provider turn | One model response and its resulting tool batch |
+
+An ordinary run with an active Goal resolves current workflow state before
+provider admission. It claims a dependency-ready attempt when necessary,
+refreshes Build context and advertised tools after activation, and seeds its
+counters from durable usage. Exhausting a finite attempt can release its step
+and admit a replacement; it does not reset the enclosing Goal's token budget
+or an explicit caller run ceiling.
+
+Accounting belongs to the Goal and attempt that admitted the work. Completing
+a step or starting a successor in one tool batch cannot charge the successor
+for earlier work. Replacing a Goal while a provider request is in flight cannot
+transfer the old request's effects or usage to the replacement. Terminal
+settlement preserves monotonic counters without reopening completed work.
+
+Once required plan work is complete, a bounded attempt without a step can perform
+Goal verification. Pending optional steps do not prevent verification of a
+completed plan. Goal completion checks the required evidence and settles that
+verification attempt atomically. A model's final-looking paragraph does not
+complete the durable Goal. A premature final receives one corrective
+continuation; a repeated premature final pauses with an actionable incomplete
+state. Accepted new user steering renews that correction opportunity.
+
+Hive Worker runs retain their host-owned admission, accepted-input, and outcome
+commit contracts. Ordinary Agent attempt helpers do not take over those states.
+
+## One iteration
+
+1. Collect controls and inject accepted steering at a safe model boundary.
+   Already-persisted user messages are not persisted a second time.
+2. Resolve workflow admission, caller budgets, work mode, and the exact
+   advertised tool surface. Durable pause, block, cancellation, and replacement
+   are checked again before returned tools can cause effects.
+3. Assemble the shared prompt, workspace/project instructions, current workflow,
+   and relevant bounded context. Apply shared context-pressure and compaction
+   policy before requesting the provider.
+4. Normalize streaming text, thinking, tools, usage, and source references.
+   Forward ordered events and checkpoint interrupted-response state separately
+   from canonical conversation history.
+5. Persist the assistant response. Preserve substantive prose accompanying tool
+   calls so the next provider request retains the findings the user saw.
+6. Execute admitted tools through central capability, permission, approval,
+   cancellation, retry, and result-shaping policy. Preserve paired tool results
+   when cancellation interrupts a batch.
+7. Account progress against the admitted attempt and decide whether to continue,
+   await input or a child, pause, or finish. Persist the relevant lifecycle
+   transition before reporting it.
+
+Tool output shown to a user and tool output retained for subsequent model
+requests have different purposes. `history_policy` creates bounded retained
+results while preserving evidence needed to continue. Compaction can summarize
+older history; manual `/pinch` and provider-overflow recovery use the shared
+in-place path and retain the session identity.
+
+## Prompt and project context
+
+The stable coding contract is shared across providers. Provider-specific wire
+formats, reasoning replay, and mutation-tool conventions remain in their
+adapters and model profiles. Tool schemas determine the available calls.
+
+System-message text blocks are retained and classified through a shared context
+kind. Budget priority and cache stability are deliberately different decisions.
+The active Goal receives a bounded view that prioritizes its outcome, execution
+obligations, current step, and verification. Explicit excerpt markers direct the
+Agent to `workflow_read` for omitted material; a shortened view never narrows the
+Goal. Pagination is scoped to the current session and Goal, with content hashes
+preventing accidental concatenation across changed sections.
+
+Project instructions are resolved for the actual working directory, including
+nested directories. Parent and child execution use the bounded project bundle;
+child task content does not silently replace project-instruction authority.
+
+## Delegation and useful progress
+
+Delegation follows the session policy and the available capability.
+`ExplicitOnly` requires a user request. Fresh observations across several areas
+can trigger one advisory suggestion; breadth alone does not force a productive
+audit to stop. Semantic repetition and explicit budgets still constrain runs.
+
+Starting a background child allows the parent to continue independent work.
+When further progress depends on that child, the foreground run can finish with
+the Goal still active and its attempt paused. The durable child completion wake
+owns resumption. `Completed` in that foreground event is therefore not evidence
+that the Goal or child is complete. Active-child lookup uses the canonical
+parent-wake store rather than a capped recent-history list.
+
+## Stop, steering, and recovery
+
+The input protocol includes approvals, question responses, steering,
+already-persisted messages, workflow notifications, and cancellation. The inbox
+retains steering while waiting for a control so concurrent user input is not
+lost. An in-flight provider or tool lifecycle is not spliced into a second user
+message mid-operation.
+
+A disconnected client is not proof that server execution stopped. Ordinary
+client Stop detaches its stale stream callbacks, reports cancellation failure,
+and reconciles the receipt against authoritative session state. Late results
+are fenced by session selection and operation generation. A missing snapshot
+cannot establish successful cancellation.
+
+Workflow commands are revisioned and idempotent. A replayed historical receipt
+must not interrupt or wake a newer execution state. Operation identity is scoped
+to its stored session and action. These durable checks complement live
+notifications, which can race with channel registration or removal.
+
+Legacy receipts labelled `goal_paused` or `goal_blocked` do not identify their
+original command uniquely. Replaying these receipts returns a conflict; clients
+must refresh current workflow state before issuing a fresh command with a new
+operation ID. New receipts store the exact command identity.
+
+Recovery checkpoints carry partial text, tool state, and source references.
+They remain separate from canonical transcript storage. Approval, unfinished
+tool effects, and ordinary attempt settlement must survive retry without
+inventing successful work.
+
+## Text and source references
+
+Text annotations are optional fields on canonical text content, so older plain
+text records remain readable. Ordinary Agent streaming, interrupted recovery,
+storage, and supported clients preserve normalized source references. Empty-text
+annotation events can add sources without duplicating prose. Source metadata in
+subsequent provider requests is bounded plain reference text; it is not forged
+provider-native citation or reasoning replay data.
+
+Display, copy/export, and reload derive text from ordered message parts. A short
+preview field does not limit copied final answers. Historical thinking rendering
+uses the retained excerpt while canonical content remains available to its
+storage lifecycle.
+
+The protocol has turn and run boundaries; it does not provide a universal
+semantic progress-versus-final classification for every prose fragment. Clients
+must not infer workflow completion from prose. Hive Worker response commits
+also retain their separate content and acceptance contract; normalized source
+annotations are not a claim of complete provider-feature parity there.
+
+## Validation and source map
+
+Deterministic runtime tests drive local scripted HTTP providers through the
+production orchestrator, real tool registry, workflow store, and event stream.
+They cover activation, cancellation/resume, attempt rollover, accepted steering,
+background parent work, verification, and in-flight workflow changes. Focused
+client tests cover Stop races, text retention, and citation recovery.
+
+Ignored benchmarks measure fixed request histories and TUI event bursts. The
+opt-in `agent_live_acceptance` integration test uses an explicitly selected real
+provider, an exact candidate artifact, and isolated fixture state. It is skipped
+by ordinary tests. Scripted tests, this live fixture, native Release interaction
+checks, and deployment verification establish different evidence levels.
+
+| Source | Responsibility |
+| --- | --- |
+| `agent/run_spec.rs` | Validated execution contracts and entry point |
+| `agent/orchestrator.rs` | Ordinary provider/tool loop and terminal decisions |
+| `agent/orchestrator/workflow_runtime.rs` | Goal admission, accounting, and attempt settlement |
+| `workflow/manager.rs` | Revisioned durable transitions and evidence checks |
+| `agent/loop_events.rs` | Canonical events, inputs, and inbox |
+| `agent/context/` and `ai/model_profile/` | Context assembly and shared prompt classification |
+| `agent/stream.rs` and `ai/parsers/` | Stream accumulation and provider normalization |
+| `agent/executor/` and `agent/tool_control.rs` | Tool execution and centralized policy |
+| `agent/history_policy/` and `agent/compaction/` | Retention, budgeting, and in-place compaction |
+| `storage/recovery.rs` | Interrupted-response state |
+
+Paths in the table are relative to `crates/mitsuro-core/src/`.

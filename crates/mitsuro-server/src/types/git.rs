@@ -43,6 +43,7 @@ pub struct GitChangesResponse {
     pub in_repo: bool,
     pub repo_root: Option<String>,
     pub files: Vec<GitChangedFileResponse>,
+    pub truncated: bool,
 }
 
 #[derive(Deserialize)]

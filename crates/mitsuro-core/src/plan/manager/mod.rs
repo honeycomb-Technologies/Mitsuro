@@ -94,11 +94,6 @@ impl PlanManager {
             .unwrap_or(false)
     }
 
-    /// Update plan content for a session.
-    pub fn update_plan(&self, session_id: &str, plan: &PlanFile) -> Result<()> {
-        self.with_store(|store| store.update_content(session_id, plan))
-    }
-
     /// Create a new plan for a session.
     pub fn create_plan(
         &self,

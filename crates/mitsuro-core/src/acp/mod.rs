@@ -37,6 +37,7 @@ mod model_manager;
 mod processor;
 mod server;
 mod session;
+mod source_references;
 mod tools;
 mod workspace_context;
 

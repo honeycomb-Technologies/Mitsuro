@@ -12,6 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::ai::types::{AiToolCall, Content};
+use crate::storage::DelegationMode;
 use crate::tools::registry::{
     agent_call_action, agent_call_requests_write, effective_tool_call, tool_policy_for_call,
     trusted_changed, ToolCategory,
@@ -38,8 +39,8 @@ pub const MAX_INTENTS_PER_IDENTICAL_OUTCOME: usize = 8;
 /// short sequence of distinct build steps, then require independent evidence
 /// before more unverified effects can keep the run alive.
 pub const MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS: usize = 6;
-/// Broad parent-side observation should either converge or be split into a
-/// named child task. Keep this above quick one- or two-turn inspection.
+/// Offer delegation advice after sustained multi-area investigation. This is
+/// not a stop threshold: productive observation may continue without a child.
 pub const DELEGATION_NUDGE_TURN_THRESHOLD: usize = 3;
 pub const DELEGATION_NUDGE_AREA_THRESHOLD: usize = 3;
 
@@ -174,17 +175,9 @@ fn turn_has_verified_mutation(tool_calls: &[AiToolCall], tool_results: &[Content
     })
 }
 
-/// Parent-only pressure toward delegation after sustained, successful
-/// observation across multiple repository areas. Small/local work never has
-/// to delegate. Broad work gets one model-visible checkpoint; if the parent
-/// ignores it and performs another observation-only turn, the caller gets a
-/// bounded landing diagnostic instead of allowing open-ended archaeology.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DelegationCheckpoint {
-    Nudge(String),
-    Land(String),
-}
-
+/// One advisory nudge per observation sequence, when session policy and the
+/// current tool surface permit delegation. Only the semantic progress guard
+/// may stop evidence-free work; breadth alone never forces a final response.
 #[derive(Debug, Default)]
 pub(crate) struct DelegationNudgeTracker {
     consecutive_observation_turns: usize,
@@ -205,8 +198,12 @@ impl DelegationNudgeTracker {
         &mut self,
         tool_calls: &[AiToolCall],
         tool_results: &[Content],
-    ) -> Option<DelegationCheckpoint> {
-        if tool_calls.is_empty()
+        mode: DelegationMode,
+        can_delegate: bool,
+    ) -> Option<String> {
+        if mode == DelegationMode::ExplicitOnly
+            || !can_delegate
+            || tool_calls.is_empty()
             || !tool_calls
                 .iter()
                 .all(|call| action_fingerprint(call).class == ActionClass::Observe)
@@ -225,17 +222,13 @@ impl DelegationNudgeTracker {
             return None;
         }
 
+        if self.nudged {
+            return None;
+        }
+
         self.consecutive_observation_turns = self.consecutive_observation_turns.saturating_add(1);
         for call in tool_calls {
             self.observed_areas.extend(observation_areas(call));
-        }
-
-        if self.nudged {
-            return Some(DelegationCheckpoint::Land(format!(
-                "Broad parent-only observation continued after the delegation checkpoint for {} consecutive turns across {} repository areas. Synthesize the evidence already gathered now. If a later turn needs more substantial investigation, delegate one precise bounded child instead of continuing parent-side archaeology.",
-                self.consecutive_observation_turns,
-                self.observed_areas.len(),
-            )));
         }
 
         if self.consecutive_observation_turns < DELEGATION_NUDGE_TURN_THRESHOLD
@@ -245,11 +238,11 @@ impl DelegationNudgeTracker {
         }
 
         self.nudged = true;
-        Some(DelegationCheckpoint::Nudge(format!(
-            "[BROAD OBSERVATION CHECKPOINT]\nThe parent has completed {} consecutive observation turns across {} repository areas. If the remaining investigation is substantial and separable, start one named `agent` child with precise bounded instructions. Set `run_in_background=true` only when that field is available on the current Agent tool surface; in that case, continue independent work while the child runs. Otherwise run the named child in the foreground and use its result before continuing. If the evidence is already sufficient or the remaining work is small, synthesize or act directly. Do not delegate merely to satisfy this checkpoint.",
+        Some(format!(
+            "[BROAD OBSERVATION CHECKPOINT]\nThe parent has completed {} consecutive observation turns across {} repository areas. If the remaining investigation is substantial and separable, consider one named `agent` child with precise bounded instructions. Set `run_in_background=true` only when that field is available on the current Agent tool surface; in that case, continue independent work while the child runs. Otherwise run the named child in the foreground and use its result before continuing. Continue productive direct investigation when it best serves the user's scope. If the evidence is sufficient, synthesize or act directly. Do not delegate merely to satisfy this checkpoint.",
             self.consecutive_observation_turns,
             self.observed_areas.len(),
-        )))
+        ))
     }
 
     fn reset_sequence(&mut self) {
@@ -914,14 +907,11 @@ mod tests {
         for (index, (id, path)) in turns.into_iter().enumerate() {
             let calls = [call(id, "read", json!({"file_path": path}))];
             let results = [result(id, "observed", false)];
-            let nudge = tracker.record_turn(&calls, &results);
+            let nudge = tracker.record_turn(&calls, &results, DelegationMode::Balanced, true);
             if index + 1 < DELEGATION_NUDGE_TURN_THRESHOLD {
                 assert!(nudge.is_none());
             } else {
                 let nudge = nudge.expect("broad sustained observation should nudge");
-                let DelegationCheckpoint::Nudge(nudge) = nudge else {
-                    panic!("first broad checkpoint must be a nudge");
-                };
                 assert!(nudge.contains("named `agent` child"));
                 assert!(
                     nudge.contains("`run_in_background=true` only when that field is available")
@@ -935,14 +925,17 @@ mod tests {
             "read",
             json!({"file_path": "docs/architecture.md"}),
         )];
-        let landing = tracker
-            .record_turn(&calls, &[result("read-4", "observed", false)])
-            .expect("ignoring the checkpoint must converge");
-        let DelegationCheckpoint::Land(diagnostic) = landing else {
-            panic!("second broad checkpoint must land");
-        };
-        assert!(diagnostic.contains("Synthesize the evidence"));
-        assert!(diagnostic.contains("delegate one precise bounded child"));
+        assert!(
+            tracker
+                .record_turn(
+                    &calls,
+                    &[result("read-4", "new architectural evidence", false)],
+                    DelegationMode::Balanced,
+                    true,
+                )
+                .is_none(),
+            "productive investigation must not force synthesis"
+        );
     }
 
     #[test]
@@ -956,7 +949,12 @@ mod tests {
                 json!({"file_path": format!("crates/mitsuro-core/src/agent/file_{index}.rs")}),
             )];
             assert!(tracker
-                .record_turn(&calls, &[result(&id, "observed", false)])
+                .record_turn(
+                    &calls,
+                    &[result(&id, "observed", false)],
+                    DelegationMode::Balanced,
+                    true
+                )
                 .is_none());
         }
 
@@ -966,7 +964,12 @@ mod tests {
             json!({"file_path": "crates/mitsuro-core/src/agent/file.rs"}),
         )];
         assert!(tracker
-            .record_turn(&edit, &[result("edit-1", "changed", false)])
+            .record_turn(
+                &edit,
+                &[result("edit-1", "changed", false)],
+                DelegationMode::Balanced,
+                true
+            )
             .is_none());
 
         let calls = [call(
@@ -975,8 +978,76 @@ mod tests {
             json!({"file_path": "apps/mobile/src/app.tsx"}),
         )];
         assert!(tracker
-            .record_turn(&calls, &[result("read-new", "observed", false)])
+            .record_turn(
+                &calls,
+                &[result("read-new", "observed", false)],
+                DelegationMode::Balanced,
+                true
+            )
             .is_none());
+    }
+
+    #[test]
+    fn delegation_advice_respects_policy_and_current_capabilities() {
+        for (mode, can_delegate) in [
+            (DelegationMode::ExplicitOnly, true),
+            (DelegationMode::Balanced, false),
+            (DelegationMode::Proactive, false),
+            (DelegationMode::Orchestrator, false),
+        ] {
+            let mut tracker = DelegationNudgeTracker::new();
+            for index in 0..8 {
+                let id = format!("read-{index}");
+                let calls = [call(
+                    &id,
+                    "read",
+                    json!({"file_path": format!("crates/area_{index}/src/lib.rs")}),
+                )];
+                assert!(
+                    tracker
+                        .record_turn(
+                            &calls,
+                            &[result(&id, &format!("new evidence {index}"), false)],
+                            mode,
+                            can_delegate,
+                        )
+                        .is_none(),
+                    "no policy-inconsistent advice: {mode:?}/{can_delegate}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn productive_multi_area_audit_remains_live_after_advisory_checkpoint() {
+        let mut tracker = DelegationNudgeTracker::new();
+        let mut guard = LoopGuard::new();
+        let mut nudges = 0;
+        for index in 0..20 {
+            let id = format!("audit-{index}");
+            let calls = [call(
+                &id,
+                "read",
+                json!({"file_path": format!("crates/area_{index}/src/lib.rs")}),
+            )];
+            let results = [result(&id, &format!("distinct finding {index}"), false)];
+            let outcome = guard.evaluate(&calls, &results);
+            assert!(outcome.progress.is_none());
+            assert!(outcome.repeated_failure.is_none());
+            assert!(outcome.repeated_read_only.is_none());
+            nudges += usize::from(
+                tracker
+                    .record_turn(&calls, &results, DelegationMode::Balanced, true)
+                    .is_some(),
+            );
+        }
+        assert_eq!(nudges, 1);
+
+        // Explicit steering opens a fresh sequence; the advice itself never
+        // consumes the user's permission or becomes a terminal loop decision.
+        tracker.reset_for_steering();
+        assert!(!tracker.nudged);
+        assert!(tracker.observed_areas.is_empty());
     }
 
     #[test]

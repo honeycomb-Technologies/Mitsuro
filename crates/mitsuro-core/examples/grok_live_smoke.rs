@@ -53,9 +53,9 @@ async fn main() -> Result<()> {
 
     let messages = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Reply with exactly: mitsuro grok stream ok".to_string(),
-        }],
+        content: vec![Content::text(
+            "Reply with exactly: mitsuro grok stream ok".to_string(),
+        )],
     }];
     let mut rx = client
         .call_streaming(

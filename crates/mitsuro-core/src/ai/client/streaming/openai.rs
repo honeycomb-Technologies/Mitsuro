@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 use super::super::config::{
-    normalized_prompt_cache_key, openai_prompt_cache_options, openai_prompt_cache_retention,
-    CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
+    apply_parallel_tool_call_policy, normalized_prompt_cache_key, openai_prompt_cache_options,
+    openai_prompt_cache_retention, CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
 };
 use super::super::core::AiClient;
 use super::super::RemoteAttemptPolicy;
@@ -140,12 +140,7 @@ impl AiClient {
         attempt_policy: RemoteAttemptPolicy,
     ) -> Result<mpsc::UnboundedReceiver<StreamPart>> {
         // Check if we're using ChatGPT Codex API (OAuth) vs standard OpenAI API
-        let is_chatgpt_codex = self
-            .config()
-            .base_url
-            .as_ref()
-            .map(|url| url.contains("chatgpt.com"))
-            .unwrap_or(false);
+        let is_chatgpt_codex = self.config().uses_chatgpt_codex_format();
 
         if is_chatgpt_codex {
             info!(
@@ -291,6 +286,11 @@ impl AiClient {
             }
         }
         append_openai_hosted_web_search_tool(&mut body, options, self.config().api_format);
+        apply_parallel_tool_call_policy(
+            &mut body,
+            Some(options),
+            self.config().parallel_tool_call_transport(),
+        );
         let body = apply_request_body_transform(
             body,
             self.provider_id(),

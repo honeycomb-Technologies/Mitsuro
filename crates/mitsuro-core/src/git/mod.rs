@@ -8,7 +8,7 @@ mod status;
 #[cfg(test)]
 mod tests;
 
-pub use changes::{changes, file_diff};
+pub use changes::{changes, file_diff, project_changes, project_file_diff};
 pub use command::{checkout, resolve_repo_root, should_suppress_display};
 pub use model::{
     GitBranchSummary, GitChangedFileSummary, GitChangesSummary, GitFileDiff, GitStatusSummary,

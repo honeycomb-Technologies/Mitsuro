@@ -202,21 +202,19 @@ mod tests {
         let messages = [
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: "[HIVE SOUL - HIVE_SOUL.md]\nidentity-layer".into(),
-                }],
+                content: vec![Content::text(
+                    "[HIVE SOUL - HIVE_SOUL.md]\nidentity-layer".into(),
+                )],
             },
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: "[PROJECT INSTRUCTIONS - AGENTS.md]\nproject-layer".into(),
-                }],
+                content: vec![Content::text(
+                    "[PROJECT INSTRUCTIONS - AGENTS.md]\nproject-layer".into(),
+                )],
             },
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: "[HIVE HEARTBEAT]\nsession-layer".into(),
-                }],
+                content: vec![Content::text("[HIVE HEARTBEAT]\nsession-layer".into())],
             },
         ];
         let sections = build_system_prompt_sections(

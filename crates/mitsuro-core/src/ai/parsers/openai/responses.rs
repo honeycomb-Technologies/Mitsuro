@@ -3,10 +3,37 @@ use serde_json::Value;
 use super::OpenAIParser;
 use crate::ai::retry::safe_provider_code;
 use crate::ai::sse::SseEvent;
-use crate::ai::types::FinishReason;
+use crate::ai::types::{Citation, FinishReason};
 use crate::ai::usage::parse_openai_responses_usage;
 
 impl OpenAIParser {
+    pub(super) fn responses_snapshot_citations(json: &Value) -> Vec<Citation> {
+        let mut citations = Vec::new();
+        match json.get("type").and_then(Value::as_str) {
+            Some("response.done" | "response.completed") => {
+                let response = json.get("response").unwrap_or(json);
+                if let Some(output) = response.get("output").and_then(Value::as_array) {
+                    for item in output {
+                        collect_item_citations(item, &mut citations);
+                    }
+                }
+            }
+            Some("response.output_item.done") => {
+                if let Some(item) = json.get("item") {
+                    collect_item_citations(item, &mut citations);
+                }
+            }
+            Some("response.content_part.done") => {
+                if let Some(part) = json.get("part") {
+                    collect_text_citations(part, &mut citations);
+                }
+            }
+            Some("response.output_text.done") => collect_annotations(json, &mut citations),
+            _ => {}
+        }
+        citations
+    }
+
     fn reasoning_completion_key(json: &Value) -> String {
         let item_id = json
             .get("item_id")
@@ -116,6 +143,7 @@ impl OpenAIParser {
         let event_kind = match event_type {
             "response.output_text.delta" => "output_text_delta",
             "response.output_text.done" => "output_text_done",
+            "response.output_text.annotation.added" => "output_text_annotation",
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
                 "reasoning_delta"
             }
@@ -144,6 +172,14 @@ impl OpenAIParser {
         );
 
         match event_type {
+            "response.output_text.annotation.added" => {
+                if let Some(citation) = json.get("annotation").and_then(parse_url_citation) {
+                    return Ok(SseEvent::TextDeltaWithCitations {
+                        text: String::new(),
+                        citations: vec![citation],
+                    });
+                }
+            }
             "response.output_text.delta" => {
                 if let Some(delta) = json.get("delta").and_then(|d| d.as_str()) {
                     if !delta.is_empty() {
@@ -334,5 +370,215 @@ impl OpenAIParser {
         }
 
         Ok(SseEvent::Skip)
+    }
+}
+
+fn parse_url_citation(annotation: &Value) -> Option<Citation> {
+    if annotation.get("type").and_then(Value::as_str) != Some("url_citation") {
+        return None;
+    }
+    let url = annotation.get("url").and_then(Value::as_str)?;
+    if url.is_empty() {
+        return None;
+    }
+    Some(Citation {
+        url: url.to_string(),
+        title: annotation
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        // Responses supplies character ranges, not a quoted passage. The
+        // portable contract has no range field, so do not invent cited text.
+        cited_text: String::new(),
+    })
+}
+
+fn collect_annotations(text: &Value, citations: &mut Vec<Citation>) {
+    if let Some(annotations) = text.get("annotations").and_then(Value::as_array) {
+        citations.extend(annotations.iter().filter_map(parse_url_citation));
+    }
+}
+
+fn collect_text_citations(part: &Value, citations: &mut Vec<Citation>) {
+    if matches!(
+        part.get("type").and_then(Value::as_str),
+        Some("output_text" | "text")
+    ) {
+        collect_annotations(part, citations);
+    }
+}
+
+fn collect_item_citations(item: &Value, citations: &mut Vec<Citation>) {
+    if item.get("type").and_then(Value::as_str) == Some("message") {
+        if let Some(content) = item.get("content").and_then(Value::as_array) {
+            for part in content {
+                collect_text_citations(part, citations);
+            }
+        }
+    } else {
+        collect_text_citations(item, citations);
+    }
+}
+
+#[cfg(test)]
+mod citation_tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::agent::stream::process_stream;
+    use crate::ai::sse::{SseParser, SseStreamProcessor};
+    use serde_json::json;
+    use tokio::sync::mpsc;
+
+    fn annotation() -> Value {
+        json!({
+            "type": "url_citation", "url": "https://example.org/source", "title": "Source",
+            "start_index": 0, "end_index": 6
+        })
+    }
+
+    fn cited_part(text: &str) -> Value {
+        json!({"type": "output_text", "text": text, "annotations": [annotation()]})
+    }
+
+    #[tokio::test]
+    async fn responses_url_annotation_event_preserves_metadata_without_inventing_text() {
+        let parser = OpenAIParser::new();
+        let event = parser
+            .parse_event(&json!({
+                "type": "response.output_text.annotation.added", "item_id": "message-a",
+                "output_index": 0, "content_index": 0, "annotation_index": 0,
+                "annotation": annotation(), "sequence_number": 4
+            }))
+            .await
+            .unwrap();
+        let SseEvent::TextDeltaWithCitations { text, citations } = event else {
+            panic!("expected URL citation event");
+        };
+        assert!(text.is_empty());
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].url, "https://example.org/source");
+        assert_eq!(citations[0].title, "Source");
+        assert!(citations[0].cited_text.is_empty());
+
+        for annotation in [
+            json!({"type": "file_citation", "file_id": "file-a"}),
+            json!({"type": "url_citation", "url": 7}),
+            json!({"type": "url_citation", "url": ""}),
+        ] {
+            assert!(matches!(
+                parser
+                    .parse_event(&json!({
+                        "type": "response.output_text.annotation.added", "annotation": annotation
+                    }))
+                    .await
+                    .unwrap(),
+                SseEvent::Skip
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_url_citation_completed_snapshot_recovers_sources_after_missing_deltas() {
+        let events = OpenAIParser::new()
+            .parse_events(&json!({
+                "type": "response.completed", "response": {
+                    "status": "completed", "output_text": "A 🦀 answer.",
+                    "output": [{"type": "message", "content": [cited_part("A 🦀 answer.")]}]
+                }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], SseEvent::TextDelta(text) if text == "A 🦀 answer."));
+        assert!(
+            matches!(&events[1], SseEvent::TextDeltaWithCitations { text, citations }
+            if text.is_empty() && citations.len() == 1)
+        );
+        assert!(matches!(&events[2], SseEvent::Finish { .. }));
+    }
+
+    #[tokio::test]
+    async fn responses_url_citation_snapshot_events_preserve_stream_text_and_deduplicate_durably() {
+        let parser = OpenAIParser::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut processor = SseStreamProcessor::new(tx);
+        let item = json!({"type": "message", "content": [cited_part("First. Tail.")]});
+        let events = [
+            json!({"type": "response.output_text.delta", "delta": "First. "}),
+            json!({"type": "response.output_text.annotation.added", "annotation": annotation()}),
+            json!({"type": "response.output_text.delta", "delta": "Tail."}),
+            json!({"type": "response.output_text.done", "text": "First. Tail.", "annotations": [annotation()]}),
+            json!({"type": "response.content_part.done", "part": cited_part("First. Tail.")}),
+            json!({"type": "response.output_item.done", "item": item.clone()}),
+            json!({"type": "response.completed", "response": {"status": "completed", "output": [item]}}),
+        ];
+        for event in events {
+            processor
+                .process_sse_data(&event.to_string(), &parser)
+                .await
+                .unwrap();
+        }
+        processor.finish().await;
+        drop(processor);
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let result = process_stream(rx, &event_tx, Duration::from_secs(1), |_| {}).await;
+        assert_eq!(result.text, "First. Tail.");
+        assert_eq!(
+            result.citations.len(),
+            1,
+            "snapshot echoes must not multiply durable sources"
+        );
+        assert_eq!(result.recovery_checkpoint.citations, result.citations);
+        let mut live_text = String::new();
+        let mut sources_seen = 0;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                crate::agent::loop_events::LoopEvent::TextDelta { delta } => {
+                    live_text.push_str(&delta)
+                }
+                crate::agent::loop_events::LoopEvent::TextDeltaWithCitations {
+                    delta,
+                    citations,
+                } => {
+                    assert!(
+                        live_text.starts_with("First. "),
+                        "buffered prose must precede its annotation"
+                    );
+                    live_text.push_str(&delta);
+                    sources_seen += citations.len();
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(live_text, "First. Tail.");
+        assert_eq!(
+            sources_seen, 5,
+            "each provider annotation surface reaches the shared dedup boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn responses_url_citation_snapshot_ignores_non_text_metadata_and_keeps_source_only_text()
+    {
+        let events = OpenAIParser::new()
+            .parse_events(&json!({
+                "type": "response.completed", "response": {"status": "completed", "output": [
+                    {"type": "web_search_call", "annotations": [annotation()]},
+                    {"type": "message", "content": [
+                        {"type": "refusal", "annotations": [annotation()]},
+                        cited_part("")
+                    ]}
+                ]}
+            }))
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(
+            matches!(&events[0], SseEvent::TextDeltaWithCitations { text, citations }
+            if text.is_empty() && citations.len() == 1)
+        );
+        assert!(matches!(&events[1], SseEvent::Finish { .. }));
     }
 }

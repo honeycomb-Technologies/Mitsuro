@@ -1,4 +1,4 @@
-import type { ToolCall } from "@mitsuro/api";
+import { mergeCitations, type Citation, type ToolCall } from "@mitsuro/api";
 
 export type AssistantVisualSegment =
   | {
@@ -10,6 +10,7 @@ export type AssistantVisualSegment =
       type: "text";
       id: string;
       content: string;
+      citations?: Citation[];
     }
   | {
       type: "attachments";
@@ -200,6 +201,15 @@ export function smoothInterruptedText(
       )
     ) {
       appendToAccumulator(activeText, segment.content);
+      if (segment.citations?.length) {
+        const previous = smoothed[activeText.index];
+        if (previous.type === "text") {
+          smoothed[activeText.index] = {
+            ...previous,
+            citations: mergeCitations(previous.citations, segment.citations),
+          };
+        }
+      }
       continue;
     }
 

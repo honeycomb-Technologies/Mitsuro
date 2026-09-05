@@ -733,6 +733,7 @@ Deno.test("rejected Worker Stop restores authoritative partial state and exposes
 Deno.test("primary Hive Stop retains generic transient finalization", async () => {
 	let cancelCount = 0;
 	let reloadCount = 0;
+	let workerStatusCount = 0;
 	const client = {
 		cancelSession: async () => {
 			cancelCount += 1;
@@ -740,6 +741,11 @@ Deno.test("primary Hive Stop retains generic transient finalization", async () =
 		getSession: async () => {
 			reloadCount += 1;
 			return sessionResponse();
+		},
+		getSessionState: async () => sessionState("idle"),
+		getHiveSessionStatus: async () => {
+			workerStatusCount += 1;
+			return {};
 		},
 	};
 	const store = createSessionStore(
@@ -761,21 +767,25 @@ Deno.test("primary Hive Stop retains generic transient finalization", async () =
 	});
 
 	store.getState().stopStreaming();
-	await Promise.resolve();
 	assertEquals(
 		cancelCount,
 		1,
 		"primary Hive Stop should retain generic cancellation",
 	);
 	assertEquals(
-		reloadCount,
-		0,
-		"session_type=hive alone must not use Worker reload semantics",
-	);
-	assertEquals(
 		store.getState().messages[0]?.kind,
 		undefined,
 		"ordinary Hive partials retain the existing generic finalization behavior",
+	);
+	for (let attempt = 0; attempt < 50 && store.getState().isStreaming; attempt += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+	assertEquals(reloadCount, 1, "ordinary Hive Stop also reconciles canonical state");
+	assertEquals(store.getState().isStreaming, false, "the ordinary response settles at idle");
+	assertEquals(
+		workerStatusCount,
+		0,
+		"session_type=hive alone must not enter exact Worker run settlement",
 	);
 	store.getState().cleanup();
 });

@@ -2,7 +2,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::ai::client::config::{
-    normalized_prompt_cache_key, AiClientConfig, CallOptions, EffectiveRequestSettings,
+    normalized_prompt_cache_key, resolve_parallel_tool_calls, AiClientConfig, CallOptions,
+    EffectiveRequestSettings,
 };
 use crate::ai::client::streaming::codex::session::CodexWsPool;
 use crate::ai::model_profile::{build_system_prompt_sections, SystemPromptSections};
@@ -108,11 +109,6 @@ impl AiClient {
         })
     }
 
-    /// Alias for new() - backwards compatible
-    pub fn with_api_key(config: AiClientConfig, api_key: String) -> Self {
-        Self::new(config, api_key)
-    }
-
     /// Get the API key
     pub fn api_key(&self) -> &str {
         &self.api_key
@@ -166,6 +162,16 @@ impl AiClient {
             options.effective_request_settings_for_runtime(&self.resolved_model);
         effective_request.max_tokens = canonical.max_tokens;
         effective_request.tool_count = canonical.tools.as_ref().map_or(0, Vec::len);
+        effective_request.parallel_tool_calls = resolve_parallel_tool_calls(
+            Some(&canonical),
+            self.config.parallel_tool_call_transport(),
+            canonical
+                .tools
+                .as_ref()
+                .is_some_and(|tools| !tools.is_empty())
+                || canonical.web_search.is_some(),
+        )
+        .unwrap_or(false);
         let mut tool_names = canonical
             .tools
             .as_deref()

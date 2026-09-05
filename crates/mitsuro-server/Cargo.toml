@@ -35,6 +35,11 @@ uuid = { version = "1.11", features = ["v4"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 portable-pty = "0.8"
+cap-std = "3.4.5"
+cap-fs-ext = "3.4.5"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Web Push notifications (pure Rust, no OpenSSL — matches rustls stack)
 web-push-native = "0.4"

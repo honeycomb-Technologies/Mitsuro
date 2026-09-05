@@ -29,8 +29,8 @@ use crate::storage::{
     WorkspaceMode,
 };
 use crate::tools::registry::{
-    effective_tool_call, tool_policy_for_call, FileObservationTracker, PermissionMode,
-    ToolCategory, ToolContext, ToolRegistry, ToolResult,
+    tool_policy_for_call, FileObservationTracker, PermissionMode, ToolCategory, ToolContext,
+    ToolRegistry, ToolResult,
 };
 
 #[cfg(test)]
@@ -69,7 +69,7 @@ pub(crate) struct ToolExecutionBatch {
     pub(crate) results: Vec<Content>,
     pub(crate) next_work_mode: WorkMode,
     pub(crate) cancelled: bool,
-    pub(crate) yield_after_background_agent: bool,
+    pub(crate) background_agent_started: bool,
 }
 
 /// Execute a batch of tool calls, emitting LoopEvents and receiving LoopInputs
@@ -105,7 +105,7 @@ pub(crate) async fn execute_tools(
 ) -> ToolExecutionBatch {
     let mut work_mode = current_mode;
     let mut results = Vec::new();
-    let mut yield_after_background_agent = false;
+    let mut background_agent_started = false;
     let tool_control = ToolControl::new(permission_mode);
     let mut parallel_calls_to_skip = 0usize;
     let configured_extension_manager = if extension_policy.extensions_enabled() {
@@ -317,7 +317,7 @@ pub(crate) async fn execute_tools(
                         results,
                         next_work_mode: work_mode,
                         cancelled: true,
-                        yield_after_background_agent: false,
+                        background_agent_started: false,
                     };
                 };
 
@@ -374,7 +374,7 @@ pub(crate) async fn execute_tools(
                     results,
                     next_work_mode: work_mode,
                     cancelled: true,
-                    yield_after_background_agent: false,
+                    background_agent_started: false,
                 };
             }
         }
@@ -483,7 +483,7 @@ pub(crate) async fn execute_tools(
                     result = &mut execution => break Some(result),
                     cancelled = input_inbox.recv_cancel(), if !input_closed => {
                         match cancelled {
-                            Some(()) if tool_call_requires_completion_shield(call) => {
+                            Some(()) if crate::agent::loop_kernel::tool_call_requires_completion_shield(&call.name, &call.arguments) => {
                                 cancellation_requested = true;
                                 execution_cancellation.cancel();
                                 break Some(execution.as_mut().await);
@@ -503,7 +503,7 @@ pub(crate) async fn execute_tools(
                     results,
                     next_work_mode: work_mode,
                     cancelled: true,
-                    yield_after_background_agent: false,
+                    background_agent_started: false,
                 };
             };
 
@@ -513,7 +513,7 @@ pub(crate) async fn execute_tools(
                     results,
                     next_work_mode: work_mode,
                     cancelled: true,
-                    yield_after_background_agent: false,
+                    background_agent_started: false,
                 };
             }
 
@@ -532,7 +532,7 @@ pub(crate) async fn execute_tools(
             }
         };
 
-        yield_after_background_agent |= successful_background_agent_start(call, &result);
+        background_agent_started |= successful_background_agent_start(call, &result);
         results.push(tool_control.publish_result(call, &result, event_tx));
     }
 
@@ -540,22 +540,8 @@ pub(crate) async fn execute_tools(
         results,
         next_work_mode: work_mode,
         cancelled: false,
-        yield_after_background_agent,
+        background_agent_started,
     }
-}
-
-/// Once a mutating operation has been dispatched, dropping its future is not
-/// proof that its side effects stopped. Signal the exact call's cancellation
-/// token and retain ownership until the registry's governed timeout or its
-/// producer-owned terminal result. Read-only calls remain immediately
-/// cancellable.
-fn tool_call_requires_completion_shield(call: &AiToolCall) -> bool {
-    let (effective_name, _) = effective_tool_call(&call.name, &call.arguments);
-    tool_policy_for_call(&call.name, &call.arguments).category == ToolCategory::Write
-        // Bash owns a process-group drop guard and kill-on-drop child, so
-        // dropping it is its bounded quiescence mechanism. Waiting here would
-        // regress an interrupt into the command's (potentially long) timeout.
-        && effective_name != "bash"
 }
 
 fn emit_workflow_update(
@@ -1419,7 +1405,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_agent_batch_inherits_governance_and_requests_foreground_yield() {
+    async fn background_agent_batch_reports_start_and_preserves_governance() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let registry = Arc::new(ToolRegistry::new());
         let captured_calls = Arc::new(StdMutex::new(Vec::new()));
@@ -1488,7 +1474,7 @@ mod tests {
         .await;
 
         assert!(!batch.cancelled);
-        assert!(batch.yield_after_background_agent);
+        assert!(batch.background_agent_started);
         assert_eq!(captured_calls.lock().unwrap().len(), 1);
         assert_eq!(
             captured_governance
@@ -1964,12 +1950,42 @@ export default (mitsuro) => {
             arguments: json!({"agent_type": "verify", "prompt": "validate"}),
         };
 
-        assert!(tool_call_requires_completion_shield(&write));
-        assert!(tool_call_requires_completion_shield(&deferred_write));
-        assert!(tool_call_requires_completion_shield(&execute_agent));
-        assert!(tool_call_requires_completion_shield(&legacy_verify_agent));
-        assert!(!tool_call_requires_completion_shield(&read));
-        assert!(!tool_call_requires_completion_shield(&bash));
+        assert!(
+            crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &write.name,
+                &write.arguments
+            )
+        );
+        assert!(
+            crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &deferred_write.name,
+                &deferred_write.arguments
+            )
+        );
+        assert!(
+            crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &execute_agent.name,
+                &execute_agent.arguments
+            )
+        );
+        assert!(
+            crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &legacy_verify_agent.name,
+                &legacy_verify_agent.arguments
+            )
+        );
+        assert!(
+            !crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &read.name,
+                &read.arguments
+            )
+        );
+        assert!(
+            !crate::agent::loop_kernel::tool_call_requires_completion_shield(
+                &bash.name,
+                &bash.arguments
+            )
+        );
     }
 
     fn create_session_db() -> (TempDir, std::path::PathBuf, String) {
@@ -1992,6 +2008,7 @@ export default (mitsuro) => {
             arguments: json!({"file_path": "src/lib.rs"}),
         };
         let partial_assistant = PartialAssistantState {
+            citations: Vec::new(),
             text: "I will edit the file.".to_string(),
             thinking: String::new(),
             tool_calls: vec![RecoveryToolCall::from_call_parts(

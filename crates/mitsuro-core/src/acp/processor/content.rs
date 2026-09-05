@@ -5,7 +5,7 @@ use crate::ai::types::Content;
 /// Convert ACP content block to Mitsuro's Content type.
 pub(super) fn convert_acp_content(block: AcpContent) -> Option<Content> {
     match block {
-        AcpContent::Text(text) => Some(Content::Text { text: text.text }),
+        AcpContent::Text(text) => Some(Content::text(text.text)),
         AcpContent::Resource(embedded) => match embedded.resource {
             EmbeddedResourceResource::TextResourceContents(text_resource) => {
                 let formatted = format!(
@@ -17,7 +17,7 @@ pub(super) fn convert_acp_content(block: AcpContent) -> Option<Content> {
                     text_resource.uri,
                     text_resource.text.len()
                 );
-                Some(Content::Text { text: formatted })
+                Some(Content::text(formatted))
             }
             EmbeddedResourceResource::BlobResourceContents(blob) => {
                 let formatted = format!(
@@ -26,7 +26,7 @@ pub(super) fn convert_acp_content(block: AcpContent) -> Option<Content> {
                     blob.mime_type.as_deref().unwrap_or("unknown type")
                 );
                 tracing::debug!("Binary resource: {}", blob.uri);
-                Some(Content::Text { text: formatted })
+                Some(Content::text(formatted))
             }
             _ => {
                 tracing::warn!("Unknown embedded resource type, skipping");
@@ -40,7 +40,7 @@ pub(super) fn convert_acp_content(block: AcpContent) -> Option<Content> {
                 format!("[File reference: {}]", link.uri)
             };
             tracing::debug!("Resource link: {}", link.uri);
-            Some(Content::Text { text: formatted })
+            Some(Content::text(formatted))
         }
         AcpContent::Image(_) => {
             tracing::warn!("Image content not yet supported, skipping");

@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 
 use mitsuro_client::{
-    ChatRequest, ChatStreamEvent, ContentBlock, ImageSource, ModelInfo, ModelKey, PermissionMode,
-    PlanItem, SessionStateResponse, SessionType, SessionWithMessages, ThinkingLevel, WorkMode,
-    WorkspaceMode,
+    ChatRequest, ChatStreamEvent, Citation, ContentBlock, ImageSource, ModelInfo, ModelKey,
+    PermissionMode, PlanItem, SessionStateResponse, SessionType, SessionWithMessages,
+    ThinkingLevel, WorkMode, WorkspaceMode,
 };
 
 use crate::stored::{pending_approval_from_state, transcript_from_session};
@@ -103,6 +103,7 @@ pub struct ChatMessage {
     pub id: String,
     pub role: MessageRole,
     pub content: String,
+    pub citations: Vec<Citation>,
     pub streaming: bool,
     pub attachments: Vec<AttachmentDraft>,
 }
@@ -341,8 +342,8 @@ impl ChatStore {
                 .map(|recovery| &recovery.partial_assistant)
         });
         if let Some(live) = partial {
-            if !live.text.trim().is_empty() {
-                self.ensure_live_partial_assistant(&live.text);
+            if !live.text.trim().is_empty() || !live.citations.is_empty() {
+                self.ensure_live_partial_assistant(&live.text, &live.citations);
             }
             if let Some(thinking) = &live.thinking {
                 if !thinking.trim().is_empty() {
@@ -493,6 +494,7 @@ impl ChatStore {
                 id: user_id,
                 role: MessageRole::User,
                 content,
+                citations: Vec::new(),
                 streaming: false,
                 attachments,
             }));
@@ -505,6 +507,7 @@ impl ChatStore {
                 id: assistant_id,
                 role: MessageRole::Assistant,
                 content: String::new(),
+                citations: Vec::new(),
                 streaming: true,
                 attachments: Vec::new(),
             }));
@@ -513,9 +516,20 @@ impl ChatStore {
 
     pub fn apply_stream_event(&mut self, event: ChatStreamEvent) {
         match event {
-            ChatStreamEvent::TextDelta { delta }
-            | ChatStreamEvent::TextDeltaWithCitations { delta, .. } => {
+            ChatStreamEvent::TextDelta { delta } => {
                 self.append_assistant_text(&delta);
+            }
+            ChatStreamEvent::TextDeltaWithCitations { delta, citations } => {
+                self.append_assistant_text(&delta);
+                if let Some(id) = self.active_assistant_id.clone() {
+                    if let Some(message) = self.find_message_mut(&id) {
+                        for citation in citations {
+                            if !message.citations.contains(&citation) {
+                                message.citations.push(citation);
+                            }
+                        }
+                    }
+                }
             }
             ChatStreamEvent::ThinkingDelta { thinking } => self.append_thinking(&thinking, true),
             ChatStreamEvent::ThinkingComplete { thinking, .. } => {
@@ -677,18 +691,19 @@ impl ChatStore {
             ChatStreamEvent::ContextCompactionStarted { reason } => {
                 self.push_system(format!("Compaction started: {reason}"));
             }
+            ChatStreamEvent::TurnComplete { has_more: true, .. } => {
+                self.settle_assistant_turn();
+            }
             ChatStreamEvent::ContextCompacted { .. }
             | ChatStreamEvent::DelegatedProgress { .. }
             | ChatStreamEvent::DelegationEvent { .. }
-            | ChatStreamEvent::TurnComplete { .. }
+            | ChatStreamEvent::TurnComplete {
+                has_more: false, ..
+            }
             | ChatStreamEvent::TickInjected { .. }
             | ChatStreamEvent::AgentBackgroundStarted { .. }
             | ChatStreamEvent::AgentBackgroundCompleted { .. }
             | ChatStreamEvent::ClassifierDecision { .. }
-            | ChatStreamEvent::TeammateSpawned { .. }
-            | ChatStreamEvent::TeammateTaskCompleted { .. }
-            | ChatStreamEvent::TeammateTaskFailed { .. }
-            | ChatStreamEvent::TeammateCancelled { .. }
             | ChatStreamEvent::Other { .. } => {}
         }
     }
@@ -704,7 +719,7 @@ impl ChatStore {
         self.finish_thinking();
         if let Some(active_id) = self.active_assistant_id.take() {
             if let Some(message) = self.find_message_mut(&active_id) {
-                if message.content.trim().is_empty() {
+                if message.content.trim().is_empty() && message.citations.is_empty() {
                     message.content = "Turn completed without assistant text.".to_owned();
                 }
                 message.streaming = false;
@@ -722,21 +737,28 @@ impl ChatStore {
             }));
     }
 
-    fn push_live_steering(&mut self, pending_id: Option<String>, message: String) {
+    /// Close the provider turn without ending the run or inventing answer text.
+    /// The next text/citation event allocates its own assistant node lazily.
+    fn settle_assistant_turn(&mut self) {
         self.finish_thinking();
         if let Some(active_id) = self.active_assistant_id.take() {
             let remove_empty = self
                 .find_message_mut(&active_id)
                 .map(|active| {
                     active.streaming = false;
-                    active.content.trim().is_empty() && active.attachments.is_empty()
+                    active.content.trim().is_empty()
+                        && active.attachments.is_empty()
+                        && active.citations.is_empty()
                 })
                 .unwrap_or(false);
             if remove_empty {
                 self.state.transcript.retain(|node| node.id() != active_id);
             }
         }
+    }
 
+    fn push_live_steering(&mut self, pending_id: Option<String>, message: String) {
+        self.settle_assistant_turn();
         let id = pending_id
             .map(|id| format!("user-steering-{id}"))
             .unwrap_or_else(|| self.next_node_id("user-steering"));
@@ -749,6 +771,7 @@ impl ChatStore {
                 id,
                 role: MessageRole::User,
                 content: message,
+                citations: Vec::new(),
                 streaming: false,
                 attachments: Vec::new(),
             }));
@@ -825,7 +848,7 @@ impl ChatStore {
         }));
     }
 
-    fn ensure_live_partial_assistant(&mut self, text: &str) {
+    fn ensure_live_partial_assistant(&mut self, text: &str, citations: &[Citation]) {
         let id = self
             .active_assistant_id
             .clone()
@@ -834,6 +857,7 @@ impl ChatStore {
         self.active_assistant_id = Some(id.clone());
         if let Some(message) = self.find_message_mut(&id) {
             message.content = text.to_owned();
+            message.citations = citations.to_vec();
             message.streaming = streaming;
             return;
         }
@@ -843,6 +867,7 @@ impl ChatStore {
                 id,
                 role: MessageRole::Assistant,
                 content: text.to_owned(),
+                citations: citations.to_vec(),
                 streaming,
                 attachments: Vec::new(),
             }));
@@ -860,6 +885,7 @@ impl ChatStore {
                 id: id.clone(),
                 role: MessageRole::Assistant,
                 content: String::new(),
+                citations: Vec::new(),
                 streaming: true,
                 attachments: Vec::new(),
             }));
@@ -962,6 +988,37 @@ mod tests {
             text_messages(&store).last().map(String::as_str),
             Some("hi there")
         );
+    }
+
+    #[test]
+    fn stream_citations_and_annotation_only_updates_remain_on_the_assistant() {
+        let mut store = ChatStore::default();
+        store.submit_user_message("Find the source".to_owned());
+        store.apply_stream_event(ChatStreamEvent::TextDelta {
+            delta: "Sourced answer".to_owned(),
+        });
+        let cited = serde_json::json!({
+            "type": "text_delta_with_citations", "delta": "",
+            "citations": [{ "url": "https://example.test/source", "title": "Source", "cited_text": "Sourced answer" }, null]
+        });
+        store.apply_stream_event(ChatStreamEvent::from_json_value(cited.clone()));
+        store.apply_stream_event(ChatStreamEvent::from_json_value(cited));
+        store.finish_stream();
+        let assistant = store
+            .state
+            .transcript
+            .iter()
+            .find_map(|node| match node {
+                TranscriptNode::Message(message) if message.role == MessageRole::Assistant => {
+                    Some(message)
+                }
+                _ => None,
+            })
+            .expect("assistant with source annotations");
+        assert_eq!(assistant.content, "Sourced answer");
+        assert_eq!(assistant.citations.len(), 1);
+        assert_eq!(assistant.citations[0].url, "https://example.test/source");
+        assert_eq!(assistant.citations[0].cited_text, "Sourced answer");
     }
 
     #[test]
@@ -1138,6 +1195,7 @@ mod tests {
             }],
             live_partial_assistant: Some(mitsuro_client::PartialAssistantState {
                 text: "partial".to_owned(),
+                citations: Vec::new(),
                 thinking: None,
                 tool_calls: Vec::new(),
             }),
@@ -1148,6 +1206,8 @@ mod tests {
             delegation_events: Vec::new(),
             delegation_event_cursor: None,
             last_event_sequence: Some(7),
+            agent_stream_generation: 0,
+            agent_stream_sequence: 0,
         };
 
         store.apply_session_state_snapshot(&snapshot);

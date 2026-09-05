@@ -137,11 +137,12 @@ export function assistantVisualSegments(
         break;
       }
       case "text": {
-        if (part.content.length === 0) break;
+        if (part.content.length === 0 && !part.citations?.length) break;
         segments.push({
           type: "text",
           id: part.id,
           content: part.content,
+          ...(part.citations?.length ? { citations: part.citations } : {}),
         });
         break;
       }

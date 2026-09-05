@@ -467,9 +467,7 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "hello".to_string(),
-        }],
+        content: vec![Content::text("hello".to_string())],
     }];
 
     let injected = inject_context(
@@ -490,12 +488,12 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
     assert_eq!(injected[0].role, Role::System);
     assert!(matches!(
         &injected[0].content[0],
-        Content::Text { text } if text.contains("[WORKSPACE MODE: NEUTRAL]")
+        Content::Text { text, .. } if text.contains("[WORKSPACE MODE: NEUTRAL]")
     ));
     assert_eq!(injected[1].role, Role::System);
     assert!(matches!(
         &injected[1].content[0],
-        Content::Text { text } if text.contains("[ENVIRONMENT]")
+        Content::Text { text, .. } if text.contains("[ENVIRONMENT]")
     ));
     assert!(matches!(
         injected.last(),
@@ -503,7 +501,7 @@ fn inject_context_skips_project_instructions_without_explicit_project_dir() {
     ));
     assert!(injected.iter().all(|message| {
         message.content.iter().all(|content| {
-            !matches!(content, Content::Text { text } if text.contains("repo instructions"))
+            !matches!(content, Content::Text { text, .. } if text.contains("repo instructions"))
         })
     }));
 }
@@ -515,9 +513,7 @@ fn chat_context_does_not_inject_a_conflicting_tool_policy() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "research the current release".to_string(),
-        }],
+        content: vec![Content::text("research the current release".to_string())],
     }];
 
     let injected = inject_context(
@@ -536,7 +532,7 @@ fn chat_context_does_not_inject_a_conflicting_tool_policy() {
 
     assert!(injected.iter().all(|message| {
         message.content.iter().all(|content| match content {
-            Content::Text { text } => !text.contains("do NOT have access to any tools"),
+            Content::Text { text, .. } => !text.contains("do NOT have access to any tools"),
             _ => true,
         })
     }));
@@ -547,7 +543,7 @@ fn chat_context_does_not_inject_a_conflicting_tool_policy() {
 fn aggregate_dynamic_context_budget_preserves_high_priority_sections() {
     let system_message = |text: String| ModelMessage {
         role: Role::System,
-        content: vec![Content::Text { text }],
+        content: vec![Content::text(text)],
     };
     let mut messages = vec![
         system_message(format!("[PERSISTENT MEMORY]\n{}", "memory ".repeat(8_000))),
@@ -564,16 +560,16 @@ fn aggregate_dynamic_context_budget_preserves_high_priority_sections() {
         .iter()
         .flat_map(|message| &message.content)
         .filter_map(|content| match content {
-            Content::Text { text } => Some(text.len()),
+            Content::Text { text, .. } => Some(text.len()),
             _ => None,
         })
         .sum::<usize>();
     assert!(retained_bytes <= MAX_DYNAMIC_CONTEXT_BYTES);
     assert!(messages.iter().any(|message| {
-        matches!(&message.content[0], Content::Text { text } if text.starts_with("[ACTIVE PLAN"))
+        matches!(&message.content[0], Content::Text { text, .. } if text.starts_with("[ACTIVE PLAN"))
     }));
     assert!(messages.iter().any(|message| {
-        matches!(&message.content[0], Content::Text { text } if text.starts_with("[PROJECT INSTRUCTIONS"))
+        matches!(&message.content[0], Content::Text { text, .. } if text.starts_with("[PROJECT INSTRUCTIONS"))
     }));
 }
 
@@ -581,7 +577,7 @@ fn aggregate_dynamic_context_budget_preserves_high_priority_sections() {
 fn aggregate_context_pressure_preserves_complete_hive_identity_before_optional_context() {
     let system_message = |text: String| ModelMessage {
         role: Role::System,
-        content: vec![Content::Text { text }],
+        content: vec![Content::text(text)],
     };
     let mut messages = vec![
         system_message(format!(
@@ -620,7 +616,7 @@ fn aggregate_context_pressure_preserves_complete_hive_identity_before_optional_c
     let texts = messages
         .iter()
         .filter_map(|message| match &message.content[0] {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -673,9 +669,7 @@ fn inject_context_filters_persistent_memory_by_user_id() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "please use bob preference".to_string(),
-        }],
+        content: vec![Content::text("please use bob preference".to_string())],
     }];
 
     let injected = inject_context(
@@ -695,7 +689,7 @@ fn inject_context_filters_persistent_memory_by_user_id() {
     let context = injected
         .iter()
         .filter_map(|message| match &message.content[0] {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -747,21 +741,17 @@ fn inject_context_uses_latest_user_memory_relevance_and_hides_compaction_flushes
     let conversation = vec![
         ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "we were discussing compaction cleanup".to_string(),
-            }],
+            content: vec![Content::text(
+                "we were discussing compaction cleanup".to_string(),
+            )],
         },
         ModelMessage {
             role: Role::Assistant,
-            content: vec![Content::Text {
-                text: "Understood.".to_string(),
-            }],
+            content: vec![Content::text("Understood.".to_string())],
         },
         ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "tell me facts about space".to_string(),
-            }],
+            content: vec![Content::text("tell me facts about space".to_string())],
         },
     ];
 
@@ -782,7 +772,7 @@ fn inject_context_uses_latest_user_memory_relevance_and_hides_compaction_flushes
     let context = injected
         .iter()
         .filter_map(|message| match &message.content[0] {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -816,9 +806,9 @@ fn generic_project_words_do_not_trigger_persistent_memory_injection() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Tell me about this project and its code.".to_string(),
-        }],
+        content: vec![Content::text(
+            "Tell me about this project and its code.".to_string(),
+        )],
     }];
     let injected = inject_context(
         &conversation,
@@ -835,7 +825,7 @@ fn generic_project_words_do_not_trigger_persistent_memory_injection() {
     );
 
     assert!(injected.iter().all(|message| {
-        !matches!(&message.content[0], Content::Text { text } if text.contains("[PERSISTENT MEMORY]"))
+        !matches!(&message.content[0], Content::Text { text, .. } if text.contains("[PERSISTENT MEMORY]"))
     }));
 }
 
@@ -850,9 +840,7 @@ fn inject_context_includes_hive_identity_only_for_hive_sessions() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "hello".to_string(),
-        }],
+        content: vec![Content::text("hello".to_string())],
     }];
 
     let hive_injected = inject_context(
@@ -885,19 +873,19 @@ fn inject_context_includes_hive_identity_only_for_hive_sessions() {
     assert!(hive_injected.iter().any(|message| {
         matches!(
             &message.content[0],
-            Content::Text { text } if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]") && text.contains("Always Swimming.")
+            Content::Text { text, .. } if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]") && text.contains("Always Swimming.")
         )
     }));
     assert!(hive_injected.iter().all(|message| {
         !matches!(
             &message.content[0],
-            Content::Text { text } if text.contains("[HIVE HOME ")
+            Content::Text { text, .. } if text.contains("[HIVE HOME ")
         )
     }));
     assert!(!code_injected.iter().any(|message| {
         matches!(
             &message.content[0],
-            Content::Text { text } if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]")
+            Content::Text { text, .. } if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]")
         )
     }));
 }
@@ -919,9 +907,7 @@ fn inject_context_places_all_hive_layers_before_project_settings() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "hello".to_string(),
-        }],
+        content: vec![Content::text("hello".to_string())],
     }];
 
     let injected = inject_context(
@@ -941,7 +927,7 @@ fn inject_context_places_all_hive_layers_before_project_settings() {
     let texts = injected
         .iter()
         .filter_map(|message| match &message.content[0] {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -969,9 +955,7 @@ fn inject_context_includes_hive_coordinator_prompt_for_hive_sessions() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "hello".to_string(),
-        }],
+        content: vec![Content::text("hello".to_string())],
     }];
 
     let injected = inject_context(
@@ -991,7 +975,7 @@ fn inject_context_includes_hive_coordinator_prompt_for_hive_sessions() {
     assert!(injected.iter().any(|message| {
         matches!(
             &message.content[0],
-            Content::Text { text } if text.contains("[HIVE COORDINATOR]")
+            Content::Text { text, .. } if text.contains("[HIVE COORDINATOR]")
         )
     }));
 }
@@ -1047,9 +1031,7 @@ fn inject_context_includes_hive_knowledge_from_memory_and_reports() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Check the wake pipeline health.".to_string(),
-        }],
+        content: vec![Content::text("Check the wake pipeline health.".to_string())],
     }];
 
     let injected = inject_context(
@@ -1069,7 +1051,7 @@ fn inject_context_includes_hive_knowledge_from_memory_and_reports() {
     let context = injected
         .iter()
         .filter_map(|message| match &message.content[0] {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -1163,9 +1145,9 @@ fn hive_knowledge_prompt_is_exact_owner_for_alice_bob_and_local() {
 
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Review queue ownership evidence.".to_string(),
-        }],
+        content: vec![Content::text(
+            "Review queue ownership evidence.".to_string(),
+        )],
     }];
     let alice = build_hive_knowledge_context(
         &db_path,
@@ -1289,9 +1271,9 @@ fn hive_knowledge_prompt_isolated_by_primary_and_named_crew_namespace() {
 
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Recall the correct working style.".to_string(),
-        }],
+        content: vec![Content::text(
+            "Recall the correct working style.".to_string(),
+        )],
     }];
     let primary = build_hive_knowledge_context(
         &db_path,
@@ -1476,9 +1458,9 @@ fn inject_context_scopes_worker_dm_to_its_own_persona_and_namespace() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Recall the correct working style.".to_string(),
-        }],
+        content: vec![Content::text(
+            "Recall the correct working style.".to_string(),
+        )],
     }];
     let render = |session_id: &str| {
         inject_context(
@@ -1496,7 +1478,7 @@ fn inject_context_scopes_worker_dm_to_its_own_persona_and_namespace() {
         )
         .iter()
         .filter_map(|message| match &message.content[0] {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -1596,9 +1578,7 @@ fn neutral_worker_context_has_no_workspace_or_global_hive_fallback() {
         .unwrap();
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Who are you?".into(),
-        }],
+        content: vec![Content::text("Who are you?".into())],
     }];
 
     let injected = inject_worker_conversation_context(
@@ -1614,7 +1594,7 @@ fn neutral_worker_context_has_no_workspace_or_global_hive_fallback() {
         .iter()
         .flat_map(|message| &message.content)
         .filter_map(|content| match content {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -1842,7 +1822,7 @@ fn worker_goal_context_isolates_workflow_worker_knowledge_and_ephemeral_trigger(
         .iter()
         .flat_map(|message| &message.content)
         .filter_map(|content| match content {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -1894,7 +1874,7 @@ fn worker_goal_context_isolates_workflow_worker_knowledge_and_ephemeral_trigger(
             content,
         }) if matches!(
             content.as_slice(),
-            [Content::Text { text }]
+            [Content::Text { text, .. }]
                 if text.contains("[WORKER GOAL TRIGGER v1]")
                     && text.contains("goal-context-1")
                     && text.contains("attempt-context-1")
@@ -1971,9 +1951,9 @@ fn inject_context_prioritizes_relevant_reports_over_recent_reports() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Please stabilize queue scheduling and overdue runs.".to_string(),
-        }],
+        content: vec![Content::text(
+            "Please stabilize queue scheduling and overdue runs.".to_string(),
+        )],
     }];
 
     let injected = inject_context(
@@ -1993,7 +1973,7 @@ fn inject_context_prioritizes_relevant_reports_over_recent_reports() {
     assert!(injected.iter().any(|message| {
         matches!(
             &message.content[0],
-            Content::Text { text }
+            Content::Text { text, .. }
                 if text.contains("[RELEVANT REPORTS]")
                     && text.contains("Queue Scheduling Audit")
         )
@@ -2003,7 +1983,7 @@ fn inject_context_prioritizes_relevant_reports_over_recent_reports() {
         .iter()
         .flat_map(|message| &message.content)
         .filter_map(|content| match content {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -2038,9 +2018,9 @@ fn inject_context_omits_reports_when_none_are_relevant() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Tune the mobile animation easing.".to_string(),
-        }],
+        content: vec![Content::text(
+            "Tune the mobile animation easing.".to_string(),
+        )],
     }];
     let injected = inject_context(
         &conversation,
@@ -2058,7 +2038,7 @@ fn inject_context_omits_reports_when_none_are_relevant() {
 
     assert!(injected.iter().all(|message| {
         message.content.iter().all(|content| {
-            !matches!(content, Content::Text { text } if text.contains("[RELEVANT REPORTS]"))
+            !matches!(content, Content::Text { text, .. } if text.contains("[RELEVANT REPORTS]"))
         })
     }));
 }
@@ -2114,9 +2094,7 @@ fn inject_context_uses_active_hive_tasks_for_report_relevance() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Keep watch and continue.".to_string(),
-        }],
+        content: vec![Content::text("Keep watch and continue.".to_string())],
     }];
 
     let injected = inject_context(
@@ -2136,7 +2114,7 @@ fn inject_context_uses_active_hive_tasks_for_report_relevance() {
     assert!(injected.iter().any(|message| {
         matches!(
             &message.content[0],
-            Content::Text { text }
+            Content::Text { text, .. }
                 if text.contains("[HIVE KNOWLEDGE]")
                     && text.contains("## Relevant Reports")
                     && text.contains("Scheduler Drift Runbook")
@@ -2186,9 +2164,7 @@ fn inject_context_does_not_duplicate_generic_memory_and_report_blocks_for_hive()
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "hello".to_string(),
-        }],
+        content: vec![Content::text("hello".to_string())],
     }];
 
     let injected = inject_context(
@@ -2208,7 +2184,7 @@ fn inject_context_does_not_duplicate_generic_memory_and_report_blocks_for_hive()
     let texts = injected
         .iter()
         .filter_map(|message| match &message.content[0] {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2263,9 +2239,9 @@ fn inject_context_includes_recent_delegated_run_guidance() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "use explore again".to_string(),
-        }],
+        content: vec![Content::text(
+            "Review the existing delegated findings".to_string(),
+        )],
     }];
 
     let injected = inject_context(
@@ -2282,16 +2258,31 @@ fn inject_context_includes_recent_delegated_run_guidance() {
         None,
     );
 
-    assert!(injected.iter().any(|message| {
-        matches!(
-            &message.content[0],
-            Content::Text { text }
-                if text.contains("[RECENT DELEGATED RUNS]")
-                    && text.contains("prefer calling `explore` again")
-                    && text.contains("run-1")
-                    && text.contains("src/storage")
-        )
-    }));
+    let guidance = injected
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|content| match content {
+            Content::Text { text, .. } if text.contains("[RECENT DELEGATED RUNS]") => Some(text),
+            _ => None,
+        })
+        .expect("recent delegated evidence should be included");
+    for expected in [
+        "run-1",
+        "src/storage",
+        "Architecture review completed across 1 targets.",
+        "Reuse relevant completed evidence",
+        "`agent` tool's status action reads terminal evidence",
+        "do not poll running children",
+        "message action steers live work",
+        "followup/resume starts new work",
+        "ExplicitOnly's user-request requirement",
+        "Continue useful independent work directly",
+        "Prior delegation does not require delegating again",
+    ] {
+        assert!(guidance.contains(expected), "missing guidance: {expected}");
+    }
+    assert!(!guidance.contains("prefer calling `explore` again"));
+    assert!(!guidance.contains("Only fall back to manual probing"));
 }
 
 #[test]
@@ -2302,9 +2293,7 @@ fn inject_context_adds_orchestrator_contract_for_code_sessions() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "hello".to_string(),
-        }],
+        content: vec![Content::text("hello".to_string())],
     }];
 
     let injected = inject_context(
@@ -2324,7 +2313,7 @@ fn inject_context_adds_orchestrator_contract_for_code_sessions() {
     assert!(injected.iter().any(|message| {
         matches!(
             &message.content[0],
-            Content::Text { text }
+            Content::Text { text, .. }
                 if text.contains("[DELEGATION MODE: ORCHESTRATOR]")
                     && text.contains("coordinate through focused agents early")
                     && text.contains("do not delegate trivial actions")
@@ -2346,9 +2335,7 @@ fn inject_context_honors_explicit_only_delegation_setting() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "hello".to_string(),
-        }],
+        content: vec![Content::text("hello".to_string())],
     }];
 
     let injected = inject_context(
@@ -2368,7 +2355,7 @@ fn inject_context_honors_explicit_only_delegation_setting() {
     assert!(injected.iter().any(|message| {
         matches!(
             &message.content[0],
-            Content::Text { text }
+            Content::Text { text, .. }
                 if text.contains("[DELEGATION MODE: EXPLICIT_ONLY]")
                     && text.contains("only when the user explicitly requests")
         )
@@ -2672,9 +2659,9 @@ fn group_member_run_isolates_worker_private_memories() {
     let skills = RwLock::new(SkillsManager::with_defaults(repo));
     let conversation = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "Recall the correct working style.".to_string(),
-        }],
+        content: vec![Content::text(
+            "Recall the correct working style.".to_string(),
+        )],
     }];
     let group_run = HiveGroupRunContext {
         group_id: group.id,
@@ -2702,7 +2689,7 @@ fn group_member_run_isolates_worker_private_memories() {
     let context = injected
         .iter()
         .filter_map(|message| match &message.content[0] {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -2747,7 +2734,7 @@ fn group_member_run_isolates_worker_private_memories() {
         )
         .iter()
         .filter_map(|message| match &message.content[0] {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -2841,7 +2828,7 @@ fn group_member_run_isolates_worker_private_memories() {
     )
     .iter()
     .filter_map(|message| match &message.content[0] {
-        Content::Text { text } => Some(text.as_str()),
+        Content::Text { text, .. } => Some(text.as_str()),
         _ => None,
     })
     .collect::<Vec<_>>()
@@ -2861,4 +2848,199 @@ fn group_member_run_isolates_worker_private_memories() {
             "unresolved group binding failed open on {denied_canary}"
         );
     }
+}
+
+#[test]
+fn canonical_goal_assembly_preserves_obligations_and_full_unicode_outcome_under_pressure() {
+    use crate::ai::model_profile::build_system_prompt_sections;
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::ProviderId;
+
+    let temp = TempDir::new().unwrap();
+    let binding = test_worker_goal_context(temp.path(), "worker", 1);
+    let mut snapshot = binding.workflow_snapshot().clone();
+    snapshot.goal.objective = "🦀".repeat(4_000);
+    snapshot.goal.constraints = vec!["constraint ".repeat(200); 100];
+    snapshot.criteria = (0..100)
+        .map(|index| {
+            let mut criterion = snapshot.criteria[0].clone();
+            criterion.id = format!("criterion-{index}");
+            criterion.description = "required verification ".repeat(100);
+            criterion.status = crate::workflow::CriterionStatus::Passed;
+            criterion
+        })
+        .collect();
+    snapshot.criteria.last_mut().unwrap().status = crate::workflow::CriterionStatus::Pending;
+    let step = snapshot.steps[0].clone();
+    snapshot.steps = (0..100)
+        .map(|index| {
+            let mut step = step.clone();
+            step.id = format!("step-{index}");
+            step.status = WorkflowStepStatus::Completed;
+            step.description = "historic task ".repeat(100);
+            step
+        })
+        .collect();
+    snapshot.steps.push(step);
+
+    for mode in [WorkMode::Build, WorkMode::Plan] {
+        let goal = super::plan::build_workflow_context(&snapshot, mode);
+        assert!(goal.len() <= 28 * 1024);
+        assert!(goal.contains(&snapshot.goal.objective));
+        assert!(goal.contains("ADDITIONAL ITEMS OMITTED"));
+        assert!(goal.contains("workflow_read"));
+        assert!(goal.contains("criterion-99"));
+        let system = |text| ModelMessage {
+            role: Role::System,
+            content: vec![Content::text(text)],
+        };
+        let mut messages = vec![
+            system(format!(
+                "[PROJECT INSTRUCTIONS - AGENTS.md]\n{}",
+                "project ".repeat(7_000)
+            )),
+            system(format!("[AVAILABLE SKILLS]\n{}", "skill ".repeat(7_000))),
+            system(format!("[PERSISTENT MEMORY]\n{}", "memory ".repeat(7_000))),
+            system(goal.clone()),
+        ];
+        bound_dynamic_context_messages(&mut messages);
+        assert!(messages.iter().any(
+            |message| matches!(&message.content[0], Content::Text { text, .. } if text == &goal)
+        ));
+        let sections = build_system_prompt_sections(
+            ProviderId::OpenAI,
+            ApiFormat::OpenAIResponses,
+            "gpt-5.5",
+            &messages,
+            None,
+            &[],
+        );
+        assert!(sections.session_context.contains(&snapshot.goal.objective));
+        assert!(sections
+            .session_context
+            .contains("Goal completion requires verification criteria to pass"));
+        if mode == WorkMode::Build {
+            assert!(sections.session_context.contains("Continue only Step 1:"));
+            assert!(
+                sections
+                    .session_context
+                    .find("Continue only Step 1:")
+                    .unwrap()
+                    < sections.session_context.find("Constraints:").unwrap()
+            );
+        } else {
+            assert!(sections
+                .session_context
+                .contains("Plan mode is read-only for project state"));
+            assert!(sections
+                .session_context
+                .contains("Only the user can approve"));
+        }
+    }
+}
+
+#[test]
+fn canonical_goal_completion_and_pause_obligations_precede_optional_history() {
+    let temp = TempDir::new().unwrap();
+    let binding = test_worker_goal_context(temp.path(), "worker", 1);
+    let mut snapshot = binding.workflow_snapshot().clone();
+    snapshot.steps[0].status = WorkflowStepStatus::Completed;
+    let context = super::plan::build_workflow_context(&snapshot, WorkMode::Build);
+    assert!(context.contains("All plan steps are terminal"));
+    assert!(context.contains("verify_criterion"));
+    assert!(context.contains("complete_goal"));
+    snapshot.goal.status = GoalStatus::Paused;
+    let paused = super::plan::build_workflow_context(&snapshot, WorkMode::Build);
+    assert!(paused.contains("Do not continue implementation until the user resumes"));
+    assert!(!paused.contains("All plan steps are terminal"));
+}
+
+#[test]
+fn assembled_code_and_child_prompts_share_bounded_nested_project_instructions() {
+    use crate::ai::model_profile::build_system_prompt_sections;
+    use crate::ai::models::ApiFormat;
+    use crate::ai::providers::ProviderId;
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("project");
+    let nested = root.join("a").join("b");
+    fs::create_dir_all(&nested).unwrap();
+    fs::create_dir_all(root.join(".mitsuro")).unwrap();
+    // No Git metadata: the selected project root still owns ancestor instructions.
+    fs::write(root.join("AGENTS.md"), "ROOT-INSTRUCTIONS").unwrap();
+    fs::write(root.join("a").join("AGENTS.md"), "ANCESTOR-INSTRUCTIONS").unwrap();
+    fs::write(nested.join("AGENTS.md"), "WORKING-DIRECTORY-INSTRUCTIONS").unwrap();
+    fs::write(
+        temp.path().join("AGENTS.md"),
+        "OUTSIDE-PROJECT-INSTRUCTIONS",
+    )
+    .unwrap();
+    fs::write(
+        root.join(".mitsuro").join("settings.json"),
+        serde_json::to_string(&serde_json::json!({
+            "system_prompt_append": "设置".repeat(10_000), "delegation_mode": "explicit_only"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let db_path = temp.path().join("context.sqlite");
+    Database::new(&db_path).unwrap();
+    let skills = RwLock::new(SkillsManager::with_defaults(&root));
+    let messages = inject_context(
+        &[],
+        &db_path,
+        "test-session",
+        &nested,
+        Some(&root),
+        WorkMode::Build,
+        &skills,
+        None,
+        Some("code"),
+        None,
+        None,
+    );
+    let parent = build_system_prompt_sections(
+        ProviderId::Anthropic,
+        ApiFormat::Anthropic,
+        "claude-sonnet-4-5",
+        &messages,
+        None,
+        &[],
+    );
+    let child = super::build_subagent_project_context(&nested, Some(&root));
+    for marker in [
+        "ROOT-INSTRUCTIONS",
+        "ANCESTOR-INSTRUCTIONS",
+        "WORKING-DIRECTORY-INSTRUCTIONS",
+        "PROJECT SETTINGS TRUNCATED",
+    ] {
+        assert!(
+            parent.project_context.contains(marker),
+            "parent missing {marker}"
+        );
+        assert!(child.contains(marker), "child missing {marker}");
+    }
+    assert!(!parent.combined().contains("OUTSIDE-PROJECT-INSTRUCTIONS"));
+    assert!(!child.contains("OUTSIDE-PROJECT-INSTRUCTIONS"));
+    let instructions = super::build_subagent_project_instructions(&nested, Some(&root));
+    assert!(parent
+        .project_context
+        .contains(instructions.split("\n\n[PROJECT SETTINGS]").next().unwrap()));
+    assert!(instructions.len() < 41 * 1024);
+    assert!(parent
+        .base_prompt
+        .contains("ExplicitOnly requires a user request"));
+}
+
+#[test]
+fn environment_discovers_git_from_a_nested_working_directory() {
+    let temp = TempDir::new().unwrap();
+    git2::Repository::init(temp.path()).unwrap();
+    let nested = temp.path().join("src").join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("file.rs"), "untracked").unwrap();
+    let context = build_environment_context(&nested, None);
+    assert!(context.contains("Git repository: yes"));
+    assert!(context.contains("Git root:"));
+    assert!(context.contains("untracked"));
+    assert!(context.contains(&format!("Working directory: {}", nested.display())));
 }

@@ -6,8 +6,7 @@
 //! - `OrchestratorConfig` / `OrchestratorServices` - Configuration and dependencies
 //!
 //! ## Core Components
-//! - `AgentEventBus` - Central event dispatcher
-//! - `AgentState` - Turn tracking and execution state
+//! - `LoopEvent` / `LoopInput` - The single canonical event protocol
 //! - `AgentCancellation` - Proper task cancellation
 //!
 //! ## Hooks
@@ -41,14 +40,13 @@ pub mod constants;
 pub mod context;
 pub mod context_ledger;
 pub mod delegation;
-pub mod event_bus;
-pub mod events;
 pub mod executor;
 pub mod failure;
 pub mod history_policy;
 pub mod hooks;
 pub mod learning;
 pub mod loop_events;
+pub(crate) mod loop_kernel;
 mod observability;
 mod orchestrator;
 pub mod pinch_context;
@@ -86,8 +84,6 @@ pub use delegation::{
     CoordinatedSynthesisOwnerFence, CoordinatedSynthesisPermit, CoordinatedTaskPermit,
     DelegationCoordinator, DelegationTaskOutcome,
 };
-pub use event_bus::AgentEventBus;
-pub use events::{AgentEvent, InterruptReason};
 pub use hooks::{LoggingHook, PlanModeHook, SafetyHook};
 pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo, ProviderRequestSnapshot};
 pub use observability::{ProviderCallTraceContext, ProviderCallTraceOutcome};
@@ -108,7 +104,7 @@ pub use run_spec::{
     RunContextMode, RunKernel, RunProvenance, RunSpec, RunSpecBuilder, RunSpecError,
     WorkerGoalExecutionBinding, WorkerGoalExecutionContext, WORKER_GOAL_TOOL_CAPABILITY_CEILING,
 };
-pub use state::{AgentConfig, AgentState, RunBudget, RunBudgetResolution, RunBudgetSource};
+pub use state::{AgentConfig, RunBudget, RunBudgetResolution, RunBudgetSource};
 pub use subagent::build_context;
 pub use subagent::build_context::SharedBuildContext;
 pub use summarizer::{generate_summary, SummarizationResult};

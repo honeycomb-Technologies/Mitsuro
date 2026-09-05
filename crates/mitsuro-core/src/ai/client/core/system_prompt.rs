@@ -23,7 +23,7 @@ pub const MITSURO_SYSTEM_PROMPT: &str = r#"You are Agent inside Mitsuro. Finish 
 
 ## Delegation
 
-- For substantial multi-area work, spawn a named agnostic child with precise instructions. Prefer `run_in_background` and completion wake; do not status-poll.
+- Follow the session delegation mode; ExplicitOnly requires a user request. When permitted, delegate substantial independent work to a named agnostic child. Prefer `run_in_background` and completion wake; do not status-poll.
 - Keep small or tightly coupled work on the parent; integrate and verify child summaries.
 
 ## Communication
@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn core_prompt_stays_compact_and_keeps_critical_contracts() {
-        assert!(MITSURO_SYSTEM_PROMPT.len() <= 2_500);
+        assert!(MITSURO_SYSTEM_PROMPT.len() <= 2_650);
         assert!(MITSURO_SYSTEM_PROMPT.split_whitespace().count() <= 400);
 
         for required in [
@@ -49,6 +49,7 @@ mod tests {
             "Do not commit",
             "Never claim success",
             "agnostic child",
+            "ExplicitOnly requires a user request",
             "run_in_background",
         ] {
             assert!(

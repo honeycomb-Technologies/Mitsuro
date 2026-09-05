@@ -440,7 +440,7 @@ impl ConversationProjection {
 
 fn merge_citations(existing: &mut Vec<CitationModel>, incoming: Vec<CitationModel>) {
     for citation in incoming {
-        if !existing.iter().any(|item| item.url == citation.url) {
+        if !existing.contains(&citation) {
             existing.push(citation);
         }
     }

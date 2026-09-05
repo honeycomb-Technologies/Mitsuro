@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Current schema version
-pub(crate) const SCHEMA_VERSION: i32 = 78;
+pub(crate) const SCHEMA_VERSION: i32 = 80;
 
 /// Shared database handle for connection reuse
 ///
@@ -52,6 +52,15 @@ impl Database {
         Ok(db)
     }
 
+    /// Open an existing database for inspection without creating directories,
+    /// configuring journal mode, or running migrations. Writes are denied by
+    /// SQLite even if a caller accidentally invokes a mutating store method.
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_secs(30))?;
+        Ok(Self { conn })
+    }
+
     /// Get the underlying connection
     pub fn conn(&self) -> &Connection {
         &self.conn
@@ -88,4 +97,39 @@ fn is_sqlite_busy(error: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(code, _)
             if matches!(code.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
     )
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use super::Database;
+
+    #[test]
+    fn inspection_does_not_create_a_missing_database_or_parent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing").join("database.sqlite");
+        assert!(Database::open_read_only(&path).is_err());
+        assert!(!path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn inspection_leaves_an_existing_schema_and_rows_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("database.sqlite");
+        // Deliberately not a Mitsuro schema: inspection must not migrate it.
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE sample(value TEXT); INSERT INTO sample VALUES ('preserved'); PRAGMA user_version=5;").unwrap();
+        drop(connection);
+        let before = std::fs::read(&path).unwrap();
+        let db = Database::open_read_only(&path).unwrap();
+        assert_eq!(
+            db.conn()
+                .query_row("SELECT value FROM sample", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "preserved"
+        );
+        assert!(db.conn().execute("DELETE FROM sample", []).is_err());
+        drop(db);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
 }

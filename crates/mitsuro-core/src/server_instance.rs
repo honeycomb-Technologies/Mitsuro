@@ -3,13 +3,18 @@
 //! Tracks running Mitsuro server instances via a PID file at ~/.mitsuro/server.pid.
 //! Enables the desktop app and CLI to detect and reuse an existing server.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use std::fs::{File, OpenOptions};
+use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::paths;
 
 pub const HEALTH_IDENTITY: &str = "mitsuro-server";
+
+static PID_FILE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerInstance {
@@ -17,8 +22,77 @@ pub struct ServerInstance {
     pub port: u16,
 }
 
+/// Process-lifetime authority for publishing the canonical server instance.
+///
+/// The advisory lock prevents two modern Mitsuro processes from both deciding
+/// that they own the canonical PID record. Older releases do not hold this
+/// lock, so callers must still probe [`detect_running_server`] before
+/// acquiring it.
+#[derive(Debug)]
+pub struct ServerInstanceGuard {
+    instance: ServerInstance,
+    pid_path: PathBuf,
+    lock_file: File,
+}
+
+impl ServerInstanceGuard {
+    /// Acquire the canonical server singleton lock and atomically publish this
+    /// process as its owner.
+    pub fn acquire(port: u16) -> Result<Self> {
+        Self::acquire_at(pid_file_path(), port)
+    }
+
+    fn acquire_at(pid_path: PathBuf, port: u16) -> Result<Self> {
+        ensure_private_parent(&pid_path)?;
+        let lock_path = pid_path.with_extension("pid.lock");
+        let lock_file = open_private_lock_file(&lock_path)?;
+        fs2::FileExt::try_lock_exclusive(&lock_file).with_context(|| {
+            format!(
+                "Another Mitsuro server process owns the singleton lock {}",
+                lock_path.display()
+            )
+        })?;
+
+        match read_pid_file_from(&pid_path, true) {
+            Some(existing) if existing.pid != std::process::id() || existing.port != port => {
+                let _ = fs2::FileExt::unlock(&lock_file);
+                bail!(
+                    "Mitsuro server PID record is still owned by process {} on port {}",
+                    existing.pid,
+                    existing.port
+                );
+            }
+            _ => {}
+        }
+
+        let instance = ServerInstance {
+            pid: std::process::id(),
+            port,
+        };
+        write_pid_file_at(&pid_path, &instance)?;
+
+        Ok(Self {
+            instance,
+            pid_path,
+            lock_file,
+        })
+    }
+
+    pub fn instance(&self) -> &ServerInstance {
+        &self.instance
+    }
+}
+
+impl Drop for ServerInstanceGuard {
+    fn drop(&mut self) {
+        let _ = remove_pid_file_if_matches_at(&self.pid_path, &self.instance);
+        let _ = fs2::FileExt::unlock(&self.lock_file);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct HealthIdentity {
+    status: String,
     identity: String,
     pid: u32,
 }
@@ -30,12 +104,117 @@ fn pid_file_path() -> PathBuf {
 /// Write PID file when server starts.
 pub fn write_pid_file(port: u16) -> Result<()> {
     let path = pid_file_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    ensure_private_parent(&path)?;
+    write_pid_file_at(
+        &path,
+        &ServerInstance {
+            pid: std::process::id(),
+            port,
+        },
+    )
+}
+
+fn ensure_private_parent(path: &std::path::Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("Failed to create {}", parent.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to secure {}", parent.display()))?;
     }
-    let content = format!("{}:{}", std::process::id(), port);
-    std::fs::write(&path, content).context("Failed to write server PID file")?;
     Ok(())
+}
+
+fn open_private_lock_file(path: &std::path::Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .with_context(|| format!("Failed to open server lock {}", path.display()))?;
+    if !file.metadata()?.is_file() {
+        bail!("Server lock is not a regular file: {}", path.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to secure server lock {}", path.display()))?;
+    }
+    Ok(file)
+}
+
+fn singleton_lock_is_held_at(pid_path: &std::path::Path) -> bool {
+    let lock_path = pid_path.with_extension("pid.lock");
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let Ok(lock_file) = options.open(lock_path) else {
+        return false;
+    };
+    match fs2::FileExt::try_lock_exclusive(&lock_file) {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&lock_file);
+            false
+        }
+        Err(error) => error.kind() == std::io::ErrorKind::WouldBlock,
+    }
+}
+
+fn write_pid_file_at(path: &std::path::Path, instance: &ServerInstance) -> Result<()> {
+    let nonce = PID_FILE_NONCE.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("server.pid");
+    let temporary =
+        path.with_file_name(format!(".{file_name}.{}.{}.tmp", std::process::id(), nonce));
+
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+
+    let publish = (|| -> Result<()> {
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("Failed to stage server PID file {}", temporary.display()))?;
+        write!(file, "{}:{}", instance.pid, instance.port)
+            .context("Failed to write staged server PID file")?;
+        file.sync_all()
+            .context("Failed to sync staged server PID file")?;
+        std::fs::rename(&temporary, path).with_context(|| {
+            format!(
+                "Failed to atomically publish server PID file {}",
+                path.display()
+            )
+        })?;
+        Ok(())
+    })();
+
+    if publish.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    publish
 }
 
 /// Remove a PID file on shutdown only when it still belongs to this process.
@@ -139,12 +318,13 @@ async fn probe_health_for_instance(instance: &ServerInstance) -> bool {
 }
 
 fn health_identity_matches(instance: &ServerInstance, health: &HealthIdentity) -> bool {
-    health.identity == HEALTH_IDENTITY && health.pid == instance.pid
+    health.status == "ok" && health.identity == HEALTH_IDENTITY && health.pid == instance.pid
 }
 
 /// Detect a running Mitsuro server instance.
 /// Returns the instance info if a healthy server is found.
 pub async fn detect_running_server() -> Option<ServerInstance> {
+    let pid_path = pid_file_path();
     let instance = read_pid_file()?;
 
     if !process_can_host_canonical_server(instance.pid) {
@@ -155,15 +335,28 @@ pub async fn detect_running_server() -> Option<ServerInstance> {
     if probe_health_for_instance(&instance).await {
         Some(instance)
     } else {
-        // Process alive but not the exact canonical server recorded by this
-        // PID file. Remove only the authority record we actually inspected.
-        let _ = remove_pid_file_if_matches(instance.pid, instance.port);
+        // A modern server publishes its PID before expensive application-state
+        // initialization so supervisors know which process is starting. Keep
+        // that record while its process-lifetime singleton lock is held; a
+        // later poll can validate health once the listener begins serving.
+        // Legacy/unlocked records still get cleaned when their health proof no
+        // longer matches.
+        if !singleton_lock_is_held_at(&pid_path) {
+            let _ = remove_pid_file_if_matches(instance.pid, instance.port);
+        }
         None
     }
 }
 
+/// Whether the live process is an executable allowed to own the canonical
+/// Mitsuro server record.
+///
+/// Linux callers use this before trusting an otherwise well-formed PID file,
+/// so PID reuse by an unrelated process cannot turn a stale record into server
+/// authority. Other platforms still require the exact PID and canonical
+/// identity from `/health`, but cannot prove the executable through `std`.
 #[cfg(target_os = "linux")]
-fn process_can_host_canonical_server(pid: u32) -> bool {
+pub fn process_can_host_canonical_server(pid: u32) -> bool {
     let path = PathBuf::from(format!("/proc/{pid}/exe"));
     std::fs::read_link(path)
         .map(strip_deleted_suffix)
@@ -171,7 +364,7 @@ fn process_can_host_canonical_server(pid: u32) -> bool {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn process_can_host_canonical_server(_pid: u32) -> bool {
+pub fn process_can_host_canonical_server(_pid: u32) -> bool {
     // The health response still has to prove canonical identity and the exact
     // PID. Linux additionally provides a trustworthy executable path via
     // procfs; other platforms do not expose an equivalent through std.
@@ -267,6 +460,76 @@ mod tests {
         assert!(!path.exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn stale_pid_record_is_removed_before_a_new_server_is_considered() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("server.pid");
+        std::fs::write(&path, format!("{}:3000", u32::MAX)).expect("stale PID file");
+
+        assert_eq!(read_pid_file_from(&path, true), None);
+        assert!(!path.exists(), "the exact stale authority must be removed");
+    }
+
+    #[test]
+    fn singleton_guard_blocks_a_second_owner_and_cleans_its_record() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("server.pid");
+        let first = ServerInstanceGuard::acquire_at(path.clone(), 3000)
+            .expect("first process acquires singleton authority");
+        assert!(singleton_lock_is_held_at(&path));
+
+        let error = ServerInstanceGuard::acquire_at(path.clone(), 3000)
+            .expect_err("second owner must be refused");
+        assert!(error.to_string().contains("singleton lock"));
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("published PID record"),
+            format!("{}:3000", std::process::id())
+        );
+
+        drop(first);
+        assert!(!singleton_lock_is_held_at(&path));
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_and_lock_files_are_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("private").join("server.pid");
+        let guard =
+            ServerInstanceGuard::acquire_at(path.clone(), 3000).expect("singleton authority");
+
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("PID metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(path.with_extension("pid.lock"))
+                .expect("lock metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(path.parent().expect("parent"))
+                .expect("parent metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        drop(guard);
+    }
+
     #[test]
     fn health_identity_requires_canonical_role_and_exact_pid() {
         let expected = ServerInstance {
@@ -276,6 +539,7 @@ mod tests {
         assert!(health_identity_matches(
             &expected,
             &HealthIdentity {
+                status: "ok".to_string(),
                 identity: HEALTH_IDENTITY.to_string(),
                 pid: 123,
             }
@@ -283,6 +547,7 @@ mod tests {
         assert!(!health_identity_matches(
             &expected,
             &HealthIdentity {
+                status: "ok".to_string(),
                 identity: "krusty-server".to_string(),
                 pid: 123,
             }
@@ -290,8 +555,17 @@ mod tests {
         assert!(!health_identity_matches(
             &expected,
             &HealthIdentity {
+                status: "ok".to_string(),
                 identity: HEALTH_IDENTITY.to_string(),
                 pid: 999,
+            }
+        ));
+        assert!(!health_identity_matches(
+            &expected,
+            &HealthIdentity {
+                status: "starting".to_string(),
+                identity: HEALTH_IDENTITY.to_string(),
+                pid: 123,
             }
         ));
     }

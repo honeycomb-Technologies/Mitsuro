@@ -4,6 +4,7 @@ import type {
   RecoveryToolArguments as ApiRecoveryToolArguments,
   SessionRecoveryState as ApiRecoveryState,
 } from '@mitsuro/api';
+import { normalizeCitations } from '@mitsuro/api';
 
 import {
   createDelegatedArtifactState,
@@ -129,6 +130,7 @@ export function pruneEmptyAssistantMessages(messages: ChatMessage[]): ChatMessag
       message.content.trim().length > 0
       || (message.thinking?.trim().length ?? 0) > 0
       || (message.toolCalls?.length ?? 0) > 0
+      || Boolean(message.renderParts?.some((part) => part.type === 'text' && part.citations?.length))
     );
   });
 }
@@ -190,6 +192,7 @@ export function applyRecoveryParity(
     }));
 
     const partial = recovery.partial_assistant;
+    const citations = normalizeCitations(partial.citations);
     const partialThinking = partial.thinking ?? '';
     const hasPartialText = partial.text.trim().length > 0;
     const hasPartialThinking = partialThinking.trim().length > 0;
@@ -202,7 +205,7 @@ export function applyRecoveryParity(
     );
 
     if (
-      (hasPartialText || hasPartialThinking || hasPartialTools)
+      (hasPartialText || hasPartialThinking || hasPartialTools || citations.length > 0)
       && !canonicalAlreadyContainsPartial
     ) {
       const toolCalls = partial.tool_calls.map((toolCall) => ({
@@ -221,8 +224,8 @@ export function applyRecoveryParity(
           id: `recovery-tool-${toolCall.id}`,
           toolCallId: toolCall.id,
         })),
-        ...(hasPartialText
-          ? [{ type: 'text' as const, id: 'recovery-text', content: partial.text }]
+        ...(hasPartialText || citations.length > 0
+          ? [{ type: 'text' as const, id: 'recovery-text', content: partial.text, ...(citations.length ? { citations } : {}) }]
           : []),
       ];
 
@@ -378,6 +381,7 @@ export function applyLivePartialAssistant(
   }
 
   const hasContent = (livePartial?.text.trim().length ?? 0) > 0;
+  const citations = normalizeCitations(livePartial?.citations);
   const hasThinking = (livePartial?.thinking?.trim().length ?? 0) > 0;
   const liveToolCalls = livePartial?.tool_calls ?? [];
   const toolCalls = applyPendingInteractionsToToolCalls(
@@ -397,7 +401,7 @@ export function applyLivePartialAssistant(
     pendingInteractions,
   );
 
-  if (!hasContent && !hasThinking && toolCalls.length === 0) {
+  if (!hasContent && !hasThinking && toolCalls.length === 0 && citations.length === 0) {
     return nextMessages;
   }
 
@@ -415,15 +419,14 @@ export function applyLivePartialAssistant(
     id: `live-partial-tool-${toolCall.id}`,
     toolCallId: toolCall.id,
   }));
+  const textParts = text || citations.length > 0
+    ? [{ type: 'text' as const, id: 'live-partial-text', content: text, ...(citations.length ? { citations } : {}) }]
+    : [];
   if (toolsFirst) {
     renderParts.push(...toolParts);
-    if (text) {
-      renderParts.push({ type: 'text', id: 'live-partial-text', content: text });
-    }
+    renderParts.push(...textParts);
   } else {
-    if (text) {
-      renderParts.push({ type: 'text', id: 'live-partial-text', content: text });
-    }
+    renderParts.push(...textParts);
     renderParts.push(...toolParts);
   }
 

@@ -233,7 +233,7 @@ fn episode_body(role: &str, content_json: &str) -> Option<String> {
     let joined = content
         .into_iter()
         .filter_map(|block| match block {
-            Content::Text { text } => Some(text),
+            Content::Text { text, .. } => Some(text),
             _ => None,
         })
         .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))

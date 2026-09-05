@@ -122,7 +122,9 @@ impl FormatHandler for GoogleFormat {
 /// Convert a single content block to Google parts format
 fn convert_content_to_part(content: &Content) -> Option<Value> {
     match content {
-        Content::Text { text } => Some(serde_json::json!({"text": text})),
+        Content::Text { text, citations } => {
+            Some(serde_json::json!({"text": crate::ai::format::provider_text(text, citations)}))
+        }
         Content::Image { image, .. } => {
             // Google expects inline_data for images
             let mime = image.media_type.as_deref().unwrap_or("image/png");

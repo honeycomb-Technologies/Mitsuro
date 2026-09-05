@@ -3,6 +3,13 @@ use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 
+const MAX_GIT_ERROR_BYTES: usize = 64 * 1024;
+
+pub(super) struct BoundedGitOutput {
+    pub(super) stdout: Vec<u8>,
+    pub(super) stdout_truncated: bool,
+}
+
 /// Returns true if git display should be suppressed for this repo.
 /// Suppresses when the repo root is the user's home directory (dotfiles repo).
 pub fn should_suppress_display(repo_root: &Path) -> bool {
@@ -80,6 +87,73 @@ pub(super) fn run_git(args: &[&str], cwd: &Path) -> Result<std::process::Output>
     }
 }
 
+pub(super) fn run_git_bounded(
+    args: &[&str],
+    cwd: &Path,
+    max_stdout_bytes: usize,
+) -> Result<BoundedGitOutput> {
+    let mut child = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "Failed to execute git {} in {}",
+                args.join(" "),
+                cwd.display()
+            )
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("git stdout pipe was unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("git stderr pipe was unavailable"))?;
+    let stderr_reader = std::thread::spawn(move || read_bounded(stderr, MAX_GIT_ERROR_BYTES));
+    let stdout_result = read_bounded(stdout, max_stdout_bytes);
+    let status_result = child.wait();
+    let stderr_result = stderr_reader
+        .join()
+        .map_err(|_| anyhow!("git stderr reader panicked"))?;
+
+    let status = status_result.context("waiting for bounded git command")?;
+    let (stdout, stdout_truncated) = stdout_result.context("reading bounded git stdout")?;
+    let (stderr, stderr_truncated) = stderr_result.context("reading bounded git stderr")?;
+    if !status.success() {
+        let mut detail = command_error_detail(&stdout, &stderr);
+        if stdout_truncated || stderr_truncated {
+            detail.push_str(" (command output truncated)");
+        }
+        return Err(anyhow!("git {} failed: {}", args.join(" "), detail));
+    }
+
+    Ok(BoundedGitOutput {
+        stdout,
+        stdout_truncated,
+    })
+}
+
+fn read_bounded(mut reader: impl std::io::Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut captured = Vec::with_capacity(limit.min(8 * 1024));
+    let mut truncated = false;
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        let count = reader.read(&mut chunk)?;
+        if count == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(captured.len());
+        let keep = count.min(remaining);
+        captured.extend_from_slice(&chunk[..keep]);
+        truncated |= keep < count;
+    }
+    Ok((captured, truncated))
+}
+
 pub(super) fn command_error_detail(stdout: &[u8], stderr: &[u8]) -> String {
     let stderr = String::from_utf8_lossy(stderr).trim().to_string();
     if !stderr.is_empty() {
@@ -105,4 +179,24 @@ pub(super) fn ref_exists(repo_root: &Path, reference: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::read_bounded;
+
+    #[test]
+    fn bounded_reader_caps_capture_and_reports_drained_tail() {
+        let input = vec![b'x'; 32 * 1024];
+        let (captured, truncated) = read_bounded(Cursor::new(input), 1_024).expect("bounded read");
+        assert_eq!(captured.len(), 1_024);
+        assert!(truncated);
+
+        let (captured, truncated) =
+            read_bounded(Cursor::new(b"complete"), 1_024).expect("complete read");
+        assert_eq!(captured, b"complete");
+        assert!(!truncated);
+    }
 }

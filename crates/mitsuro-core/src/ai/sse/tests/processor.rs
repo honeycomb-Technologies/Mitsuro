@@ -160,3 +160,39 @@ async fn test_sse_processor_thinking_events() {
     let part = rx.recv().await.unwrap();
     assert!(matches!(part, StreamPart::ThinkingStart { index: 0 }));
 }
+
+#[tokio::test]
+async fn buffered_text_precedes_annotation_only_citation_events() {
+    struct CitationParser;
+    #[async_trait::async_trait]
+    impl SseParser for CitationParser {
+        async fn parse_event(&self, _json: &Value) -> anyhow::Result<SseEvent> {
+            Ok(SseEvent::Skip)
+        }
+        async fn parse_events(&self, _json: &Value) -> anyhow::Result<Vec<SseEvent>> {
+            Ok(vec![
+                SseEvent::TextDelta("Cited fact.".into()),
+                SseEvent::TextDeltaWithCitations {
+                    text: String::new(),
+                    citations: vec![crate::ai::types::Citation {
+                        url: "https://example.com/source".into(),
+                        title: "Source".into(),
+                        cited_text: "Cited fact.".into(),
+                    }],
+                },
+            ])
+        }
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut processor = SseStreamProcessor::new(tx);
+    processor
+        .process_sse_data("{}", &CitationParser)
+        .await
+        .unwrap();
+    assert!(
+        matches!(rx.try_recv().unwrap(), StreamPart::TextDelta { delta } if delta == "Cited fact.")
+    );
+    assert!(
+        matches!(rx.try_recv().unwrap(), StreamPart::TextDeltaWithCitations { delta, citations } if delta.is_empty() && citations.len() == 1)
+    );
+}

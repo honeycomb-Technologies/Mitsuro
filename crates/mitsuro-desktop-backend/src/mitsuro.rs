@@ -1,5 +1,9 @@
 //! Mitsuro HTTP/SSE backend adapter.
 
+mod source_references;
+
+use source_references::SourceReferences;
+
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures::StreamExt as _;
@@ -214,8 +218,41 @@ impl MitsuroServerBackend {
         let mut event_count = 1usize;
         let mut approvals_answered = 0usize;
         let mut completed = false;
+        let mut source_references = SourceReferences::default();
         while let Ok(Some(next)) = tokio::time::timeout_at(deadline, stream.next()).await {
-            let event = next.map_err(|error| AgentError::Other(error.to_string()))?;
+            let event = match next {
+                Ok(event) => event,
+                Err(error) => {
+                    flush_source_references(
+                        &event_tx,
+                        &thread_id,
+                        &turn_id,
+                        &assistant_item_id,
+                        &mut source_references,
+                    );
+                    return Err(AgentError::Other(error.to_string()));
+                }
+            };
+            if !matches!(
+                &event,
+                ChatStreamEvent::TextDelta { .. }
+                    | ChatStreamEvent::TextDeltaWithCitations { .. }
+                    | ChatStreamEvent::Usage { .. }
+            ) {
+                event_count += flush_source_references(
+                    &event_tx,
+                    &thread_id,
+                    &turn_id,
+                    &assistant_item_id,
+                    &mut source_references,
+                );
+            }
+            if matches!(&event, ChatStreamEvent::TurnComplete { .. }) {
+                source_references.end_response();
+            }
+            if let ChatStreamEvent::TextDeltaWithCitations { citations, .. } = &event {
+                source_references.extend(citations);
+            }
             match event {
                 ChatStreamEvent::TextDelta { delta }
                 | ChatStreamEvent::TextDeltaWithCitations { delta, .. } => {
@@ -365,12 +402,39 @@ impl MitsuroServerBackend {
             }
         }
 
+        event_count += flush_source_references(
+            &event_tx,
+            &thread_id,
+            &turn_id,
+            &assistant_item_id,
+            &mut source_references,
+        );
+
         Ok(LiveTurnOutcome {
             event_count,
             approvals_answered,
             completed,
         })
     }
+}
+
+fn flush_source_references(
+    event_tx: &std::sync::mpsc::Sender<TurnStreamEvent>,
+    thread_id: &str,
+    turn_id: &str,
+    item_id: &str,
+    references: &mut SourceReferences,
+) -> usize {
+    let Some(delta) = references.take_text() else {
+        return 0;
+    };
+    let _ = event_tx.send(TurnStreamEvent::AgentMessageDelta {
+        thread_id: thread_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+        item_id: item_id.to_owned(),
+        delta,
+    });
+    1
 }
 
 fn unknown_mitsuro_stream_event(event_type: String, payload: Value) -> TurnStreamEvent {
@@ -728,6 +792,7 @@ fn mitsuro_history_items(messages: &[MessageResponse]) -> Vec<Value> {
             .cloned()
             .unwrap_or_else(|| vec![message.content.clone()]);
         let mut authored_user_parts = Vec::new();
+        let mut source_references = SourceReferences::default();
 
         for (part_index, part) in parts.into_iter().enumerate() {
             let item_id = format!("mitsuro-message-{message_index}-{part_index}");
@@ -769,12 +834,23 @@ fn mitsuro_history_items(messages: &[MessageResponse]) -> Vec<Value> {
                     }
                     Some("text") => {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
-                            if !text.is_empty() {
-                                items.push(serde_json::json!({
+                            let citations =
+                                mitsuro_client::citations_from_value(part.get("citations"));
+                            source_references.extend(&citations);
+                            let mut text = text.to_owned();
+                            if let Some(sources) = source_references.take_text() {
+                                text.push_str(&sources);
+                            }
+                            if !text.is_empty() || !citations.is_empty() {
+                                let mut item = serde_json::json!({
                                     "id": item_id,
                                     "type": "agentMessage",
                                     "text": text,
-                                }));
+                                });
+                                if !citations.is_empty() {
+                                    item["citations"] = serde_json::json!(citations);
+                                }
+                                items.push(item);
                             }
                         }
                     }
@@ -1728,6 +1804,142 @@ fn mitsuro_work_mode(value: Option<&str>) -> Result<Option<WorkMode>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persisted_citations_keep_metadata_and_readable_sources_on_the_answer() {
+        let citation = serde_json::json!({"url":"https://example.com/docs","title":"Docs","cited_text":"Answer"});
+        let messages: Vec<MessageResponse> = serde_json::from_value(serde_json::json!([{
+            "role":"assistant", "content":[
+                {"type":"text","text":"Answer", "citations":[citation.clone()]},
+                {"type":"text","text":"More", "citations":[citation.clone()]}
+            ]
+        }]))
+        .unwrap();
+        let items = mitsuro_history_items(&messages);
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0]["text"],
+            "Answer\n\nSources:\n- [Docs](<https://example.com/docs>)\n"
+        );
+        assert_eq!(items[0]["citations"], serde_json::json!([citation]));
+        assert_eq!(items[1]["text"], "More");
+    }
+
+    #[tokio::test]
+    async fn cited_stream_sources_survive_finish_cancel_error_disconnect_and_timeout() {
+        use std::io::{Read as _, Write as _};
+
+        for terminal in [
+            "finish",
+            "cancel",
+            "error",
+            "disconnect",
+            "timeout",
+            "malformed",
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let frame = serde_json::json!({"type":"text_delta_with_citations","delta":"Answer","citations":[{"url":"https://example.com/docs","title":"Docs","cited_text":"Answer"}]}).to_string();
+            let annotations = serde_json::json!({"type":"text_delta_with_citations","delta":"","citations":[{"url":"https://example.com/docs","title":"Docs","cited_text":"Answer"}]}).to_string();
+            let ending = match terminal {
+                "finish" => "data: {\"type\":\"finish\",\"session_id\":\"session-1\",\"stop_reason\":\"completed\"}\n\n",
+                "cancel" => "data: {\"type\":\"finish\",\"session_id\":\"session-1\",\"stop_reason\":\"user_abort\"}\n\n",
+                "error" => "data: {\"type\":\"error\",\"error\":\"fixture failure\"}\n\n",
+                "malformed" => "data: {invalid JSON}\n\n",
+                _ => "",
+            };
+            let body = format!("data: {frame}\n\ndata: {annotations}\n\n{ending}");
+            let server = std::thread::spawn(move || {
+                for request_index in 0..2 {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    socket
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0_u8; 2048];
+                    loop {
+                        let count = socket.read(&mut buffer).unwrap();
+                        assert!(count > 0);
+                        request.extend_from_slice(&buffer[..count]);
+                        let Some(header_end) =
+                            request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                        else {
+                            continue;
+                        };
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if request.len() >= header_end + 4 + length {
+                            break;
+                        }
+                    }
+                    if request_index == 0 {
+                        assert!(request.starts_with(b"GET /api/sessions/session-1/control "));
+                        socket.write_all(b"HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+                        continue;
+                    }
+                    assert!(request.starts_with(b"POST /api/chat "));
+                    let length = body.len() + usize::from(terminal == "timeout");
+                    socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}").as_bytes()).unwrap();
+                    socket.flush().unwrap();
+                    if terminal == "timeout" {
+                        std::thread::sleep(Duration::from_millis(150));
+                    }
+                }
+            });
+            let backend =
+                MitsuroServerBackend::from_url(format!("http://{address}"), None).unwrap();
+            let (events, received) = std::sync::mpsc::channel();
+            let timeout = if terminal == "timeout" {
+                Duration::from_millis(40)
+            } else {
+                Duration::from_secs(3)
+            };
+            let result = backend
+                .run_turn_streaming(
+                    TurnStartParams::text("session-1", "fixture"),
+                    events,
+                    Arc::new(LiveApprovalBridge::new()),
+                    timeout,
+                )
+                .await;
+            server.join().unwrap();
+            assert_eq!(
+                result.is_err(),
+                matches!(terminal, "error" | "malformed"),
+                "{terminal}"
+            );
+            if let Ok(outcome) = result {
+                assert_eq!(outcome.completed, matches!(terminal, "finish" | "cancel"));
+            }
+            let events = received.try_iter().collect::<Vec<_>>();
+            let text = events
+                .iter()
+                .filter_map(|event| match event {
+                    TurnStreamEvent::AgentMessageDelta { delta, .. } => Some(delta.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(
+                text, "Answer\n\nSources:\n- [Docs](<https://example.com/docs>)\n",
+                "{terminal}"
+            );
+            if let Some(completed) = events
+                .iter()
+                .position(|event| matches!(event, TurnStreamEvent::TurnCompleted { .. }))
+            {
+                assert!(
+                    matches!(&events[completed - 1], TurnStreamEvent::AgentMessageDelta { delta, .. } if delta.contains("Sources:"))
+                );
+            }
+        }
+    }
 
     #[test]
     fn session_json_preserves_authoritative_rfc3339_update_time() {

@@ -32,9 +32,9 @@ pub(super) fn build_delegated_context(db_path: &Path, session_id: &str) -> Strin
         "[RECENT DELEGATED RUNS]".to_string(),
         String::new(),
         "Recent delegated investigations exist for this session.".to_string(),
-        "- If the user explicitly asks to use `explore` or continue/refine a prior architectural audit, prefer calling `explore` again over manual `glob`/`list`/`read` probing.".to_string(),
-        "- If a matching delegated scope already exists below, let the `explore` tool resume or deepen that work instead of remapping the directory from scratch.".to_string(),
-        "- Only fall back to manual probing if the user forbids delegation or the explore result was clearly unusable.".to_string(),
+        "- Reuse relevant completed evidence. The `agent` tool's status action reads terminal evidence; do not poll running children.".to_string(),
+        "- The `agent` tool's message action steers live work; followup/resume starts new work. Follow the session delegation mode, including ExplicitOnly's user-request requirement.".to_string(),
+        "- Continue useful independent work directly. Prior delegation does not require delegating again or replacing fresh inspection with another child.".to_string(),
         String::new(),
         "Most recent delegated runs:".to_string(),
     ];

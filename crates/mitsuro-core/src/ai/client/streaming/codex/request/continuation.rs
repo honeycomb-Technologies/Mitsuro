@@ -149,9 +149,9 @@ fn assistant_fingerprint_from_message(message: &ModelMessage) -> Option<String> 
         .content
         .iter()
         .filter_map(|content| match content {
-            Content::Text { text } => Some(serde_json::json!({
+            Content::Text { text, citations } => Some(serde_json::json!({
                 "type": "text",
-                "text": text,
+                "text": crate::ai::format::provider_text(text, citations),
             })),
             Content::ToolUse { id, name, input } => Some(serde_json::json!({
                 "type": "tool_use",
@@ -191,18 +191,38 @@ fn stable_fingerprint<T: serde::Serialize + ?Sized>(value: &T) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn citation_context_invalidates_plain_assistant_continuation_signature() {
+        let response = serde_json::json!({"output":[{"type":"message","content":[{"type":"output_text","text":"Answer"}]}]});
+        let plain = message(Role::Assistant, vec![Content::text("Answer".into())]);
+        let annotated = message(
+            Role::Assistant,
+            vec![Content::Text {
+                text: "Answer".into(),
+                citations: vec![crate::ai::types::Citation {
+                    url: "https://example.com/docs".into(),
+                    title: "Docs".into(),
+                    cited_text: "Answer".into(),
+                }],
+            }],
+        );
+        assert_eq!(
+            assistant_fingerprint_from_message(&plain),
+            assistant_fingerprint_from_response(&response)
+        );
+        assert_ne!(
+            assistant_fingerprint_from_message(&annotated),
+            assistant_fingerprint_from_response(&response)
+        );
+    }
+
     fn message(role: Role, content: Vec<Content>) -> ModelMessage {
         ModelMessage { role, content }
     }
 
     #[test]
     fn continuation_sends_only_new_items_when_history_and_request_match() {
-        let prior_user = message(
-            Role::User,
-            vec![Content::Text {
-                text: "inspect".into(),
-            }],
-        );
+        let prior_user = message(Role::User, vec![Content::text("inspect".into())]);
         let assistant = message(
             Role::Assistant,
             vec![Content::ToolUse {
@@ -262,9 +282,9 @@ mod tests {
     fn warm_continuation_wire_payload_is_under_ten_percent_of_cold_history() {
         let prior_user = message(
             Role::User,
-            vec![Content::Text {
-                text: "inspect this large repository snapshot\n".repeat(1_000),
-            }],
+            vec![Content::text(
+                "inspect this large repository snapshot\n".repeat(1_000),
+            )],
         );
         let assistant = message(
             Role::Assistant,
@@ -324,24 +344,9 @@ mod tests {
 
     #[test]
     fn continuation_resets_when_tools_or_instructions_change() {
-        let user = message(
-            Role::User,
-            vec![Content::Text {
-                text: "inspect".into(),
-            }],
-        );
-        let assistant = message(
-            Role::Assistant,
-            vec![Content::Text {
-                text: "done".into(),
-            }],
-        );
-        let next_user = message(
-            Role::User,
-            vec![Content::Text {
-                text: "continue".into(),
-            }],
-        );
+        let user = message(Role::User, vec![Content::text("inspect".into())]);
+        let assistant = message(Role::Assistant, vec![Content::text("done".into())]);
+        let next_user = message(Role::User, vec![Content::text("continue".into())]);
         let initial_body = serde_json::json!({
             "model": "gpt-5.6",
             "instructions": "stable",

@@ -12,6 +12,8 @@ import {
 } from "../src/session/constants.ts";
 import { createStreamCallbacks } from "../src/session/streaming.ts";
 import { createStreamingAssistantMessage } from "../src/session/transient.ts";
+import { getMessageText } from "../src/session/messageText.ts";
+import { processStoredMessages } from "../src/session/messages.ts";
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
@@ -91,5 +93,19 @@ Deno.test("stream content keeps the head when live bound is exceeded", async () 
   assert(
     rendered.includes("TAIL_SHOULD_NOT_REPLACE_HEAD"),
     "renderParts must keep the full stream including the overflow tail for display",
+  );
+  assertEquals(
+    getMessageText(ref.current),
+    rendered,
+    "copy/export must include the complete visible answer beyond the content bound",
+  );
+  const [reloaded] = processStoredMessages([{
+    role: "assistant",
+    content: [{ type: "text", text: rendered }],
+  }]);
+  assertEquals(
+    getMessageText(reloaded),
+    getMessageText(ref.current),
+    "the full copied answer must survive canonical reload",
   );
 });

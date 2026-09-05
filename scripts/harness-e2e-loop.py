@@ -22,7 +22,7 @@ import sys
 import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 import uuid
 
@@ -172,19 +172,28 @@ class MitsuroApi:
     def __init__(self, base_url: str, timeout: float) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.agent_control_client_id = f"acceptance-{uuid.uuid4().hex}"
 
     def json_request(
         self,
         method: str,
         path: str,
         payload: dict[str, Any] | None = None,
+        *,
+        headers: dict[str, str] | None = None,
     ) -> Any:
         data = None if payload is None else json.dumps(payload).encode()
+        request_headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if headers is not None:
+            request_headers.update(headers)
         request = Request(
             f"{self.base_url}{path}",
             data=data,
             method=method,
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            headers=request_headers,
         )
         try:
             with urlopen(request, timeout=self.timeout) as response:
@@ -207,6 +216,34 @@ class MitsuroApi:
                 f"{method} {path} returned non-JSON: {body[:500]!r}"
             ) from error
 
+    def agent_mutation_headers(self, session_id: str) -> dict[str, str]:
+        """Renew this runner's non-forcing Code Agent control authority.
+
+        The server rejects the claim if a real client controls the session. The
+        fresh token exists only long enough to build this request header; it is
+        never cached, logged, or included in reports. Re-claiming before each
+        mutation also keeps long acceptance cycles from relying on an expired
+        15-second lease.
+        """
+        response = self.json_request(
+            "POST",
+            f"/api/sessions/{quote(session_id, safe='')}/control",
+            {"client_id": self.agent_control_client_id, "force": False},
+        )
+        lease = response.get("lease") if isinstance(response, dict) else None
+        token = lease.get("lease_token") if isinstance(lease, dict) else None
+        resource_id = lease.get("resource_id") if isinstance(lease, dict) else None
+        client_id = lease.get("client_id") if isinstance(lease, dict) else None
+        require(
+            isinstance(token, str) and bool(token),
+            f"Code Agent control claim returned no lease token for {session_id}",
+        )
+        require(
+            resource_id == session_id and client_id == self.agent_control_client_id,
+            f"Code Agent control claim drifted for {session_id}",
+        )
+        return {"x-mitsuro-control-lease": token}
+
     def chat_incremental(
         self,
         payload: dict[str, Any],
@@ -219,14 +256,25 @@ class MitsuroApi:
         The boolean return value records whether that deliberate disconnect
         happened.
         """
+        headers = {
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+        }
+        # Control leases are a Code-only compatibility contract. Chat and Hive
+        # requests retain their prior behavior and never touch the Code-only
+        # control endpoint.
+        if payload.get("session_type") == "code":
+            session_id = payload.get("session_id")
+            require(
+                isinstance(session_id, str) and bool(session_id),
+                "Code Agent chat request requires a session_id",
+            )
+            headers.update(self.agent_mutation_headers(session_id))
         request = Request(
             f"{self.base_url}/api/chat",
             data=json.dumps(payload).encode(),
             method="POST",
-            headers={
-                "Accept": "text/event-stream",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
         events: list[dict[str, Any]] = []
         finish_seen = False
@@ -1830,6 +1878,7 @@ def chat_payload(
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "session_id": session_id,
+        "session_type": "code",
         "message": message,
         "permission_mode": permission_mode,
         "thinking_enabled": "off",
@@ -2519,7 +2568,9 @@ def cleanup_resilience_lane(
             if not clean_before:
                 report["intervention_required"] = True
                 response = api.json_request(
-                    "POST", f"/api/sessions/{session_id}/cancel"
+                    "POST",
+                    f"/api/sessions/{quote(session_id, safe='')}/cancel",
+                    headers=api.agent_mutation_headers(session_id),
                 )
                 require(
                     response.get("ok") is True,
@@ -3538,6 +3589,7 @@ def run_live_steering_lane(
                     "message": steering_message,
                     "content": [],
                 },
+                headers=api.agent_mutation_headers(session_id),
             )
             require(
                 isinstance(response, dict),
@@ -3776,7 +3828,9 @@ def run_cancel_lane(
             pids = read_probe_pids(run_dir)
             require(len(pids) == 2, f"{lane}: READY arrived without both probe PIDs")
             response = api.json_request(
-                "POST", f"/api/sessions/{session_id}/cancel"
+                "POST",
+                f"/api/sessions/{quote(session_id, safe='')}/cancel",
+                headers=api.agent_mutation_headers(session_id),
             )
             require(response.get("ok") is True, f"{lane}: cancel response was {response}")
             cancellation_sent = True

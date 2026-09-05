@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 use super::loader::{
-    ensure_skills_dir, load_skill_file, load_skills_from_root, read_utf8_file_bounded,
-    scaffold_skill, SkillDiagnostic, SkillLoadOptions, MAX_SKILL_DEFINITION_BYTES,
+    load_skill_file, load_skills_from_root, read_utf8_file_bounded, SkillDiagnostic,
+    SkillLoadOptions, MAX_SKILL_DEFINITION_BYTES,
 };
 use super::skill::{validate_skill_name, Skill, SkillInfo, SkillPermission, SkillSource};
 
@@ -356,17 +356,8 @@ impl SkillsManager {
         self.refresh();
     }
 
-    pub fn unregister_origin(&mut self, origin: &str) {
-        self.roots.retain(|root| root.origin != origin);
-        self.invalidate();
-    }
-
     pub fn discovery_roots(&self) -> &[SkillRoot] {
         &self.roots
-    }
-
-    pub fn ensure_global_dir(&self) -> Result<()> {
-        ensure_skills_dir(&self.global_dir)
     }
 
     /// Force a refresh. Normal reads also detect filesystem/config changes.
@@ -543,12 +534,6 @@ impl SkillsManager {
         Ok(skill.content.clone())
     }
 
-    /// Explicit user invocation path used by the TUI. `Ask` is accepted because
-    /// selecting the skill in the browser is the user action; `Deny` remains hard.
-    pub fn load_skill_content_for_user(&mut self, name: &str) -> Result<String> {
-        self.load_skill_content(name)
-    }
-
     pub fn load_file_from_skill(&mut self, skill_name: &str, file: &str) -> Result<String> {
         let skill = self.enabled_skill(skill_name)?;
         if skill.permission == SkillPermission::Deny {
@@ -567,46 +552,6 @@ impl SkillsManager {
             return Err(anyhow!("Skill '{name}' is disabled by local policy"));
         }
         Ok(skill)
-    }
-
-    pub fn get_skills_metadata(&mut self) -> String {
-        self.list_model_skills(true)
-            .into_iter()
-            .map(|skill| format!("- **{}**: {}", skill.name, skill.description))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    pub fn create_skill(&mut self, name: &str, description: &str) -> Result<PathBuf> {
-        ensure_skills_dir(&self.global_dir)?;
-        let path = scaffold_skill(&self.global_dir, name, description)?;
-        self.invalidate();
-        Ok(path)
-    }
-
-    pub fn delete_skill(&mut self, name: &str) -> Result<()> {
-        self.ensure_cache();
-        let skill = self
-            .cache
-            .get(name)
-            .ok_or_else(|| anyhow!("Skill '{name}' not found"))?;
-        if skill.source != SkillSource::Global || !skill.path.starts_with(&self.global_dir) {
-            return Err(anyhow!(
-                "Only native ~/.mitsuro global skills can be deleted; compatible, project, and package skills are managed at their source"
-            ));
-        }
-        fs::remove_dir_all(&skill.path)?;
-        self.invalidate();
-        Ok(())
-    }
-
-    pub fn reload_skill(&mut self, name: &str) -> Result<()> {
-        self.refresh();
-        if self.cache.contains_key(name) {
-            Ok(())
-        } else {
-            Err(anyhow!("Skill '{name}' not found after refresh"))
-        }
     }
 
     /// Persist an enable/disable override at the nearest project policy path.

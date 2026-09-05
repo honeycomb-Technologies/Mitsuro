@@ -225,32 +225,12 @@ impl McpManager {
         }
     }
 
-    /// Register a package-provided MCP configuration fragment. Package
-    /// fragments are defaults: global and project configurations override them.
-    /// Call `load_config` after changing the fragment set.
-    pub async fn register_package_config_path(&self, path: PathBuf) {
-        self.register_package_config(McpPackageConfig::new(path, McpConnectionAuthority::NONE))
-            .await;
-    }
-
     /// Register a package fragment with the exact current descriptor grant.
     pub async fn register_package_config(&self, config: McpPackageConfig) {
         let mut configs = self.package_configs.write().await;
         if !configs.contains(&config) {
             configs.push(config);
         }
-    }
-
-    /// Replace package-provided MCP configuration fragments in deterministic
-    /// caller-supplied precedence order. Call `load_config` afterward.
-    pub async fn set_package_config_paths(&self, paths: Vec<PathBuf>) {
-        self.set_package_configs(
-            paths
-                .into_iter()
-                .map(|path| McpPackageConfig::new(path, McpConnectionAuthority::NONE))
-                .collect(),
-        )
-        .await;
     }
 
     /// Replace package fragments and their exact process/network grants.
@@ -307,11 +287,6 @@ impl McpManager {
             )
         })?;
         self.oauth_status(name).await
-    }
-
-    /// Cancel an unfinished browser flow without changing saved credentials.
-    pub async fn cancel_oauth(&self, name: &str) {
-        self.oauth.cancel(name).await;
     }
 
     /// Finish a provider error callback only after matching its CSRF state to
@@ -704,7 +679,6 @@ impl McpManager {
             } else if let Some(client) = client {
                 let status = match client.status().await {
                     McpClientStatus::Connected => McpServerStatus::Connected,
-                    McpClientStatus::Disconnected => McpServerStatus::Disconnected,
                     McpClientStatus::Error => McpServerStatus::Error(
                         errors
                             .get(&name)
@@ -766,10 +740,6 @@ impl McpManager {
 
     pub async fn has_servers(&self) -> bool {
         !self.configs.read().await.is_empty()
-    }
-
-    pub async fn get_client(&self, name: &str) -> Option<Arc<McpClient>> {
-        self.clients.read().await.get(name).cloned()
     }
 
     async fn config(&self, server: &str) -> Result<McpServerConfig> {

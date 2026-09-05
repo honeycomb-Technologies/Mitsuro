@@ -1,5 +1,7 @@
+import { normalizeCitations } from "./citations";
 import type {
 	AgentMemory,
+	AgentControlState,
 	ApnsRegisterResponse,
 	ApnsStatusResponse,
 	ApproveHiveWorkerGoalRequest,
@@ -7,6 +9,7 @@ import type {
 	BrowserActionResponse,
 	BrowserAgentRequest,
 	BrowserAgentResponse,
+	BrowserControlLease,
 	BrowserSession,
 	BrowserSessionListResponse,
 	ChatRequest,
@@ -93,6 +96,8 @@ import type {
 	SteerResponse,
 	StreamCallbacks,
 	StreamEvent,
+	TakeBrowserControlResponse,
+	TakeAgentControlResponse,
 	ToolResultRequest,
 	TransitionHiveWorkerGoalRequest,
 	TreeEntry,
@@ -139,9 +144,19 @@ export function normalizeUsageMetrics(event: UsageStreamEvent): UsageMetrics {
 const STREAM_ACTIVITY_TIMEOUT = 240_000;
 const MITSURO_WIRE_VERSION_HEADER = "X-Mitsuro-Wire-Version";
 const MITSURO_WIRE_VERSION = "2";
+const MITSURO_CONTROL_LEASE_HEADER = "X-Mitsuro-Control-Lease";
+const MAX_COMPATIBILITY_AGENT_LEASES = 512;
 
 function monotonicNow(): number {
 	return globalThis.performance?.now?.() ?? Date.now();
+}
+
+function createAgentControlClientId(): string {
+	const random = globalThis.crypto?.randomUUID?.();
+	if (random) return `mitsuro-api-${random}`;
+	return `mitsuro-api-${Date.now().toString(36)}-${Math.random()
+		.toString(36)
+		.slice(2)}`;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -255,6 +270,12 @@ export class MitsuroClient {
 	private delegationEventListeners = new Set<
 		(event: DelegationEventResponse) => void
 	>();
+	private readonly agentControlClientId = createAgentControlClientId();
+	private readonly agentControlLeases = new Map<string, string>();
+	private readonly agentControlClaims = new Map<
+		string,
+		Promise<string | null>
+	>();
 
 	constructor(config: MitsuroClientConfig) {
 		this.baseUrl = config.baseUrl.replace(/\/+$/, "");
@@ -288,6 +309,81 @@ export class MitsuroClient {
 			h["Authorization"] = `Bearer ${this.token}`;
 		}
 		return h;
+	}
+
+	private ensureAgentControl(sessionId: string): Promise<string | null> {
+		const existing = this.agentControlClaims.get(sessionId);
+		if (existing) return existing;
+		const claim = this.resolveAgentControl(sessionId).finally(() => {
+			if (this.agentControlClaims.get(sessionId) === claim) {
+				this.agentControlClaims.delete(sessionId);
+			}
+		});
+		this.agentControlClaims.set(sessionId, claim);
+		return claim;
+	}
+
+	private async resolveAgentControl(sessionId: string): Promise<string | null> {
+		const path = `/sessions/${encodeURIComponent(sessionId)}/control`;
+		const summaryResponse = await this.fetchWithHiveCompatibility(path, {
+			method: "GET",
+			headers: this.headers(),
+		});
+		if (summaryResponse.status === 409) {
+			return null;
+		}
+		if (!summaryResponse.ok) {
+			const text = await summaryResponse.text().catch(() => "Request failed");
+			throw new MitsuroApiError(
+				summaryResponse.status,
+				apiErrorMessage(text, "Could not inspect Agent control"),
+				text,
+			);
+		}
+		const summary = (await summaryResponse.json()) as AgentControlState;
+		if (summary.controller) {
+			if (summary.controller.client_id !== this.agentControlClientId) {
+				throw new MitsuroApiError(
+					409,
+					`Code Agent is controlled by another client (${summary.controller.client_id})`,
+					"",
+				);
+			}
+			const cached = this.agentControlLeases.get(sessionId);
+			if (cached) return cached;
+		}
+
+		const takeResponse = await this.fetchWithHiveCompatibility(path, {
+			method: "POST",
+			headers: this.headers(),
+			body: JSON.stringify({
+				client_id: this.agentControlClientId,
+				force: false,
+			}),
+		});
+		if (!takeResponse.ok) {
+			const text = await takeResponse.text().catch(() => "Request failed");
+			throw new MitsuroApiError(
+				takeResponse.status,
+				apiErrorMessage(text, "Could not take Agent control"),
+				text,
+			);
+		}
+		const taken = (await takeResponse.json()) as TakeAgentControlResponse;
+		const token = taken.lease.lease_token;
+		if (this.agentControlLeases.size >= MAX_COMPATIBILITY_AGENT_LEASES) {
+			const oldest = this.agentControlLeases.keys().next().value;
+			if (typeof oldest === "string") this.agentControlLeases.delete(oldest);
+		}
+		this.agentControlLeases.set(sessionId, token);
+		return token;
+	}
+
+	private async agentMutationHeaders(
+		sessionId: string,
+	): Promise<Record<string, string>> {
+		const lease = await this.ensureAgentControl(sessionId);
+		return lease ? { [MITSURO_CONTROL_LEASE_HEADER]: lease } : {};
 	}
 
 	private async request<T>(
@@ -884,9 +980,28 @@ export class MitsuroClient {
 		return this.request(`/browser/${encodeURIComponent(id)}`);
 	}
 
-	async stopBrowserSession(id: string): Promise<BrowserSession> {
+	async stopBrowserSession(
+		id: string,
+		lease: BrowserControlLease,
+	): Promise<BrowserSession> {
+		const leaseToken = this.browserLeaseToken(id, lease);
 		return this.request(`/browser/${encodeURIComponent(id)}/stop`, {
 			method: "POST",
+			body: JSON.stringify({ lease_token: leaseToken }),
+		});
+	}
+
+	async takeBrowserControl(
+		id: string,
+		clientId: string,
+	): Promise<TakeBrowserControlResponse> {
+		const normalizedClientId = clientId.trim();
+		if (!normalizedClientId) {
+			throw new Error("Browser controller client id cannot be empty");
+		}
+		return this.request(`/browser/${encodeURIComponent(id)}/control`, {
+			method: "POST",
+			body: JSON.stringify({ client_id: normalizedClientId }),
 		});
 	}
 
@@ -894,21 +1009,80 @@ export class MitsuroClient {
 		id: string,
 		capability: "viewer" | "controller" = "viewer",
 		clientId?: string,
+		lease?: BrowserControlLease,
 	): Promise<BrowserSession> {
+		const leaseToken = capability === "controller"
+			? this.browserLeaseToken(id, lease)
+			: undefined;
+		if (capability === "viewer" && lease) {
+			throw new Error("Browser observers must not carry a control lease");
+		}
 		return this.request(`/browser/${encodeURIComponent(id)}/heartbeat`, {
 			method: "POST",
-			body: JSON.stringify({ capability, client_id: clientId }),
+			body: JSON.stringify({
+				capability,
+				client_id: clientId,
+				lease_token: leaseToken,
+			}),
 		});
 	}
 
 	async runBrowserActions(
 		id: string,
+		lease: BrowserControlLease,
 		actions: BrowserAction[],
 	): Promise<BrowserActionResponse> {
+		const leaseToken = this.browserLeaseToken(id, lease);
 		return this.request(`/browser/${encodeURIComponent(id)}/actions`, {
 			method: "POST",
-			body: JSON.stringify({ actions }),
+			body: JSON.stringify({ lease_token: leaseToken, actions }),
 		});
+	}
+
+	/**
+	 * Build the browser frame WebSocket URL. The configured account bearer is
+	 * deliberately never copied into this URL; HTTP authentication remains an
+	 * Authorization header and the only query secret is the resource-scoped
+	 * Browser control lease required by the server stream contract.
+	 */
+	browserStreamUrl(
+		streamPath: string,
+		capability: "viewer" | "controller",
+		clientId: string,
+		lease?: BrowserControlLease,
+	): string {
+		const match = streamPath.match(/^\/api\/browser\/([^/?#]+)\/stream$/);
+		if (!match) throw new Error("Invalid Mitsuro Browser stream path");
+		const normalizedClientId = clientId.trim();
+		if (!normalizedClientId) throw new Error("Browser client id cannot be empty");
+		const resourceId = decodeURIComponent(match[1] as string);
+		const leaseToken = capability === "controller"
+			? this.browserLeaseToken(resourceId, lease)
+			: undefined;
+		if (capability === "viewer" && lease) {
+			throw new Error("Browser observers must not carry a control lease");
+		}
+
+		const base = new URL(this.baseUrl);
+		if (base.protocol !== "http:" && base.protocol !== "https:") {
+			throw new Error("Unsupported Mitsuro Browser server URL scheme");
+		}
+		const url = new URL(streamPath, `${base.origin}/`);
+		url.protocol = base.protocol === "https:" ? "wss:" : "ws:";
+		url.searchParams.set("capability", capability);
+		url.searchParams.set("client_id", normalizedClientId);
+		if (leaseToken) url.searchParams.set("lease_token", leaseToken);
+		return url.toString();
+	}
+
+	private browserLeaseToken(
+		resourceId: string,
+		lease?: BrowserControlLease,
+	): string {
+		if (!lease || lease.resource_id !== resourceId || !lease.lease_token.trim()) {
+			throw new Error("Browser control lease is required for mutations");
+		}
+		return lease.lease_token.trim();
 	}
 
 	async runBrowserAgent(
@@ -1008,11 +1182,15 @@ export class MitsuroClient {
 		request: SteerRequest,
 		options?: { idempotencyKey?: string },
 	): Promise<SteerResponse> {
+		const controlHeaders = await this.agentMutationHeaders(request.session_id);
 		return this.request("/chat/steer", {
 			method: "POST",
-			headers: options?.idempotencyKey
-				? { "Idempotency-Key": options.idempotencyKey }
-				: undefined,
+			headers: {
+				...controlHeaders,
+				...(options?.idempotencyKey
+					? { "Idempotency-Key": options.idempotencyKey }
+					: {}),
+			},
 			body: JSON.stringify(request),
 		});
 	}
@@ -1023,11 +1201,13 @@ export class MitsuroClient {
 		approved: boolean,
 		idempotencyKey?: string,
 	): Promise<{ status: string }> {
+		const controlHeaders = await this.agentMutationHeaders(sessionId);
 		return this.request("/chat/tool-approval", {
 			method: "POST",
-			headers: idempotencyKey
-				? { "Idempotency-Key": idempotencyKey }
-				: undefined,
+			headers: {
+				...controlHeaders,
+				...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+			},
 			body: JSON.stringify({
 				session_id: sessionId,
 				tool_call_id: toolCallId,
@@ -1037,8 +1217,10 @@ export class MitsuroClient {
 	}
 
 	async cancelSession(sessionId: string): Promise<SimpleOkResponse> {
+		const controlHeaders = await this.agentMutationHeaders(sessionId);
 		return this.request(`/sessions/${encodeURIComponent(sessionId)}/cancel`, {
 			method: "POST",
+			headers: controlHeaders,
 		});
 	}
 
@@ -1049,8 +1231,10 @@ export class MitsuroClient {
 		fastMode = false,
 		permissionMode?: ToolResultRequest["permission_mode"],
 	): Promise<void> {
+		const controlHeaders = await this.agentMutationHeaders(sessionId);
 		await this.request("/chat/tool-result", {
 			method: "POST",
+			headers: controlHeaders,
 			body: JSON.stringify({
 				session_id: sessionId,
 				tool_call_id: toolCallId,
@@ -1888,6 +2072,11 @@ export class MitsuroClient {
 		signal?: AbortSignal,
 		options?: { idempotencyKey?: string },
 	): Promise<void> {
+		const controlHeaders =
+			request.session_id &&
+			(request.session_type === undefined || request.session_type === "code")
+				? await this.agentMutationHeaders(request.session_id)
+				: {};
 		const body = await this.encodeRequestIdentityForServer(
 			request as ChatRequest & Record<string, unknown>,
 			request.session_type,
@@ -1899,7 +2088,7 @@ export class MitsuroClient {
 			body,
 			callbacks,
 			signal,
-			options,
+			{ ...options, headers: controlHeaders },
 		);
 	}
 
@@ -1908,12 +2097,14 @@ export class MitsuroClient {
 		callbacks: StreamCallbacks,
 		signal?: AbortSignal,
 	): Promise<void> {
+		const controlHeaders = await this.agentMutationHeaders(request.session_id);
 		return this.streamSSERequest(
 			"/chat/tool-result",
 			"POST",
 			request,
 			callbacks,
 			signal,
+			{ headers: controlHeaders },
 		);
 	}
 
@@ -1923,7 +2114,10 @@ export class MitsuroClient {
 		body: object | undefined,
 		callbacks: StreamCallbacks,
 		signal?: AbortSignal,
-		options?: { idempotencyKey?: string },
+		options?: {
+			idempotencyKey?: string;
+			headers?: Record<string, string>;
+		},
 	): Promise<void> {
 		const diagnosticName = "api.stream";
 		const startedAt = monotonicNow();
@@ -1938,6 +2132,7 @@ export class MitsuroClient {
 					...(options?.idempotencyKey
 						? { "Idempotency-Key": options.idempotencyKey }
 						: {}),
+					...options?.headers,
 				},
 				body: body ? JSON.stringify(body) : undefined,
 				signal,
@@ -2106,8 +2301,10 @@ export class MitsuroClient {
 	private handleEvent(event: StreamEvent, callbacks: StreamCallbacks): void {
 		switch (event.type) {
 			case "text_delta":
-			case "text_delta_with_citations":
 				callbacks.onTextDelta(event.delta);
+				break;
+			case "text_delta_with_citations":
+				callbacks.onTextDelta(event.delta, normalizeCitations(event.citations));
 				break;
 			case "thinking_delta":
 				callbacks.onThinkingDelta(event.thinking);

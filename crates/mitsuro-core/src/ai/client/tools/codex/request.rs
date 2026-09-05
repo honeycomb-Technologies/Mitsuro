@@ -2,7 +2,10 @@ use anyhow::Result;
 use serde_json::Value;
 use url::Url;
 
-use super::super::super::config::{normalized_prompt_cache_key, CallOptions, CodexReasoningEffort};
+use super::super::super::config::{
+    apply_parallel_tool_call_policy, normalized_prompt_cache_key, CallOptions,
+    CodexReasoningEffort, ParallelToolCallTransport,
+};
 use super::super::super::core::AiClient;
 use crate::ai::format::response::extract_text_from_content;
 use crate::ai::retry::safe_provider_event_error;
@@ -149,7 +152,6 @@ impl AiClient {
             "input": codex_input,
             "tools": codex_tools,
             "tool_choice": "auto",
-            "parallel_tool_calls": options.codex_parallel_tool_calls,
             "store": false,
             "stream": true,
             "text": {
@@ -184,6 +186,11 @@ impl AiClient {
             }
         }
 
+        apply_parallel_tool_call_policy(
+            &mut body,
+            Some(options),
+            ParallelToolCallTransport::ChatGptCodex,
+        );
         body
     }
 }
@@ -228,6 +235,26 @@ mod tests {
             },
             "test-key".to_string(),
         )
+    }
+
+    #[test]
+    fn codex_tool_parallel_policy_preserves_legacy_and_shared_override() {
+        let client = openai_responses_client();
+        for legacy in [false, true] {
+            for requested in [None, Some(false), Some(true)] {
+                let options = client.canonical_call_options(
+                    "gpt-5.5",
+                    &CallOptions {
+                        parallel_tool_calls: requested,
+                        codex_parallel_tool_calls: legacy,
+                        ..Default::default()
+                    },
+                );
+                let body =
+                    client.build_codex_tool_call_body("gpt-5.5", &options, vec![], vec![], false);
+                assert_eq!(body["parallel_tool_calls"], requested.unwrap_or(legacy));
+            }
+        }
     }
 
     #[test]

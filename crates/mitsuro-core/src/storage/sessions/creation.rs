@@ -143,12 +143,76 @@ impl SessionManager {
                     session_type.to_string(),
                     user_id,
                     target_branch,
-                    permission_mode.as_str()
+            permission_mode.as_str()
                 ],
             )?;
         }
 
         Ok(id)
+    }
+
+    /// Create a session with an exact caller-chosen id for Canvas resource bind.
+    pub fn create_session_for_user_with_id_config_and_permission(
+        &self,
+        id: &str,
+        title: &str,
+        model: Option<&str>,
+        working_dir: Option<&str>,
+        project_dir: Option<&str>,
+        workspace_mode: WorkspaceMode,
+        user_id: Option<&str>,
+        target_branch: Option<&str>,
+        session_type: SessionType,
+        permission_mode: PermissionMode,
+    ) -> Result<String> {
+        if self.get_session(id)?.is_some() {
+            return Ok(id.to_string());
+        }
+        let now = Utc::now().to_rfc3339();
+        if self.has_legacy_required_provider_column()? {
+            let legacy_provider = model
+                .and_then(|value| value.split_once(':').map(|(provider, _)| provider))
+                .unwrap_or("mitsuro");
+            self.db.conn().execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, provider, model, metadata, working_dir, project_dir, workspace_mode, session_type, user_id, target_branch, permission_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '{}', ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    id,
+                    title,
+                    now,
+                    now,
+                    legacy_provider,
+                    model.unwrap_or_default(),
+                    working_dir,
+                    project_dir,
+                    workspace_mode.to_string(),
+                    session_type.to_string(),
+                    user_id,
+                    target_branch,
+                    permission_mode.as_str()
+                ],
+            )?;
+        } else {
+            self.db.conn().execute(
+                "INSERT INTO sessions (id, title, created_at, updated_at, model, working_dir, project_dir, workspace_mode, session_type, user_id, target_branch, permission_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    id,
+                    title,
+                    now,
+                    now,
+                    model,
+                    working_dir,
+                    project_dir,
+                    workspace_mode.to_string(),
+                    session_type.to_string(),
+                    user_id,
+                    target_branch,
+                    permission_mode.as_str()
+                ],
+            )?;
+        }
+        Ok(id.to_string())
     }
 
     /// Create a new session with user ownership and optional target branch.

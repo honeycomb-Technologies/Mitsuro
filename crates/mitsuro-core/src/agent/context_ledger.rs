@@ -164,7 +164,7 @@ impl ContextLedger {
 
 fn first_text(content: &[Content]) -> Option<&str> {
     content.iter().find_map(|c| {
-        if let Content::Text { text } = c {
+        if let Content::Text { text, .. } = c {
             Some(text.as_str())
         } else {
             None
@@ -179,7 +179,7 @@ fn extract_latest_user_objective(conversation: &[ModelMessage]) -> Option<String
         }
 
         message.content.iter().find_map(|content| {
-            if let Content::Text { text } = content {
+            if let Content::Text { text, .. } = content {
                 let trimmed = text.trim();
                 if trimmed.is_empty()
                     || trimmed.starts_with(super::compaction::COMPACTION_BOUNDARY_PREFIX)
@@ -235,9 +235,7 @@ mod tests {
     fn text_message(role: Role, text: &str) -> ModelMessage {
         ModelMessage {
             role,
-            content: vec![Content::Text {
-                text: text.to_string(),
-            }],
+            content: vec![Content::text(text.to_string())],
         }
     }
 

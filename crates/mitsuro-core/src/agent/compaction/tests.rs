@@ -14,9 +14,7 @@ use crate::storage::{
 fn text_message(role: Role, text: &str) -> ModelMessage {
     ModelMessage {
         role,
-        content: vec![Content::Text {
-            text: text.to_string(),
-        }],
+        content: vec![Content::text(text.to_string())],
     }
 }
 
@@ -120,13 +118,13 @@ async fn run_compaction_pipeline_replaces_history_in_place() {
         .compacted_conversation
         .iter()
         .any(|message| message.content.iter().any(|content| {
-            matches!(content, Content::Text { text } if text.contains("Conversation Compacted"))
+            matches!(content, Content::Text { text, .. } if text.contains("Conversation Compacted"))
         })));
     let summary_text = result.compacted_conversation[1]
         .content
         .iter()
         .find_map(|content| match content {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .expect("summary text");
@@ -365,7 +363,7 @@ async fn compaction_carries_prior_semantics_without_raw_nesting_or_plan_duplicat
         .iter()
         .flat_map(|message| &message.content)
         .filter_map(|content| match content {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -465,7 +463,7 @@ async fn two_compactions_preserve_bounded_structured_prior_semantics() {
         .iter()
         .flat_map(|message| &message.content)
         .filter_map(|content| match content {
-            Content::Text { text } => Some(text.as_str()),
+            Content::Text { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -516,9 +514,7 @@ fn microcompact_strips_old_thinking_blocks() {
                     thinking: format!("reasoning {index}"),
                     signature: String::new(),
                 },
-                Content::Text {
-                    text: format!("answer {index}"),
-                },
+                Content::text(format!("answer {index}")),
             ],
         });
     }
@@ -561,4 +557,78 @@ fn microcompact_truncates_unicode_tool_results_safely() {
         .and_then(|value| value.as_str())
         .expect("truncated result");
     assert!(truncated.contains("[microcompact truncated]"));
+}
+
+#[tokio::test]
+async fn compaction_preserves_citations_on_retained_text_in_durable_storage() {
+    let temp = TempDir::new().unwrap();
+    let (db_path, session_id, mut conversation) =
+        create_persisted_conversation(&temp, "cited-tail");
+    let citation = crate::ai::types::Citation {
+        url: "https://example.org/evidence".into(),
+        title: "Evidence".into(),
+        cited_text: "verified finding".into(),
+    };
+    let cited = ModelMessage {
+        role: Role::Assistant,
+        content: vec![Content::Text {
+            text: "Verified finding with source.".into(),
+            citations: vec![citation.clone()],
+        }],
+    };
+    SessionManager::new(Database::new(&db_path).unwrap())
+        .save_message(
+            &session_id,
+            "assistant",
+            &serde_json::to_string(&cited.content).unwrap(),
+        )
+        .unwrap();
+    conversation.push(cited);
+    let result = run_compaction_pipeline(CompactionRequest {
+        db_path: &db_path,
+        session_id: &session_id,
+        conversation: &conversation,
+        working_dir: temp.path(),
+        ai_client: None,
+        model: None,
+        trigger: CompactionTrigger::Manual {
+            preservation_hints: None,
+            direction: None,
+        },
+        compaction_manager: CompactionManager::default(),
+        request_budget: None,
+        last_usage_prompt_tokens: None,
+        messages_after_usage: 0,
+        project_dir: None,
+        user_id: None,
+        summary_override: Some(crate::agent::SummarizationResult {
+            work_summary: "Prior work".into(),
+            key_decisions: Vec::new(),
+            pending_tasks: Vec::new(),
+            important_files: Vec::new(),
+        }),
+    })
+    .await
+    .unwrap();
+    let has_source = |messages: &[ModelMessage]| {
+        messages.iter().flat_map(|message| &message.content).any(|content| matches!(content,
+        Content::Text { text, citations } if text == "Verified finding with source." && citations == &vec![citation.clone()]
+    ))
+    };
+    assert!(has_source(&result.compacted_conversation));
+    let db = Database::new(&db_path).unwrap();
+    let reloaded = MessageStore::new(&db)
+        .load_session_message_records(&session_id)
+        .unwrap()
+        .into_iter()
+        .map(|record| ModelMessage {
+            role: if record.role == "assistant" {
+                Role::Assistant
+            } else {
+                Role::User
+            },
+            content: serde_json::from_str(&record.content_json).unwrap(),
+        })
+        .collect::<Vec<_>>();
+    assert!(has_source(&reloaded));
 }

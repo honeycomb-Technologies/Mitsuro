@@ -2,8 +2,8 @@ use serde_json::Value;
 
 use super::OpenAIFormat;
 use crate::ai::client::config::{
-    normalized_prompt_cache_key, openai_prompt_cache_options, openai_prompt_cache_retention,
-    OpenAiPromptCacheMode,
+    apply_parallel_tool_call_policy, normalized_prompt_cache_key, openai_prompt_cache_options,
+    openai_prompt_cache_retention, OpenAiPromptCacheMode, ParallelToolCallTransport,
 };
 use crate::ai::format::RequestOptions;
 use crate::ai::types::AiTool;
@@ -97,6 +97,48 @@ impl OpenAIFormat {
             }
         }
 
+        if self.is_responses_format() {
+            apply_parallel_tool_call_policy(
+                &mut body,
+                options.call_options,
+                ParallelToolCallTransport::Responses,
+            );
+        }
         body
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::client::CallOptions;
+    use crate::ai::format::FormatHandler;
+    use crate::ai::models::ApiFormat;
+
+    #[test]
+    fn generic_responses_builder_preserves_parallel_override() {
+        let options = CallOptions {
+            parallel_tool_calls: Some(false),
+            ..Default::default()
+        };
+        let tool = AiTool {
+            name: "read".into(),
+            description: String::new(),
+            input_schema: serde_json::json!({"type":"object"}),
+            prompt: None,
+        };
+        let format = OpenAIFormat::new(ApiFormat::OpenAIResponses);
+        for (call_options, expected) in [(None, true), (Some(&options), false)] {
+            let body = format.build_request_body(
+                "grok-4.6",
+                vec![],
+                &RequestOptions {
+                    tools: Some(std::slice::from_ref(&tool)),
+                    call_options,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(body["parallel_tool_calls"], expected);
+        }
     }
 }

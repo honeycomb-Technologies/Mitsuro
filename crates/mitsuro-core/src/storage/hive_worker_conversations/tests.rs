@@ -905,9 +905,9 @@ fn onboarding_fallback_commits_through_the_standard_response_boundary() {
              )",
             params![
                 SESSION_ID,
-                serde_json::to_string(&vec![crate::ai::types::Content::Text {
-                    text: "What should I help with?".to_string(),
-                }])
+                serde_json::to_string(&vec![crate::ai::types::Content::text(
+                    "What should I help with?".to_string()
+                )])
                 .unwrap(),
                 crate::hive::canonical_timestamp(now()),
             ],
@@ -3331,12 +3331,8 @@ fn repeatedly_stopped_materialized_successors_keep_the_original_staged_chain_liv
 fn user_input_supersedes_a_running_pre_provider_introduction_review_and_materializes() {
     let (db, temp) = fixture();
     let at = crate::hive::canonical_timestamp(now());
-    let content = |text: &str| {
-        serde_json::to_string(&vec![Content::Text {
-            text: text.to_string(),
-        }])
-        .unwrap()
-    };
+    let content =
+        |text: &str| serde_json::to_string(&vec![Content::text(text.to_string())]).unwrap();
     db.conn()
         .execute(
             "INSERT INTO messages (session_id, role, content, created_at)

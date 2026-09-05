@@ -1,8 +1,10 @@
 import type {
+	Citation,
 	PlanItem,
 	SessionContinuationEvent,
 	StreamCallbacks,
 } from "@mitsuro/api";
+import { mergeCitations } from "@mitsuro/api";
 import {
 	MAX_LIVE_MESSAGE_CONTENT_LENGTH,
 	MAX_LIVE_THINKING_CONTENT_LENGTH,
@@ -78,8 +80,8 @@ function appendRenderPart(ref: AssistantMessageRef, part: ChatRenderPart) {
 	ref.current.renderParts = [...(ref.current.renderParts || []), part];
 }
 
-function appendTextRenderPart(ref: AssistantMessageRef, content: string) {
-	if (!content) return;
+function appendTextRenderPart(ref: AssistantMessageRef, content: string, citations?: Citation[]) {
+	if (!content && !citations?.length) return;
 
 	const parts = [...(ref.current.renderParts || [])];
 	const lastPart = parts[parts.length - 1];
@@ -87,6 +89,7 @@ function appendTextRenderPart(ref: AssistantMessageRef, content: string) {
 		parts[parts.length - 1] = {
 			...lastPart,
 			content: lastPart.content + content,
+			...(citations?.length ? { citations: mergeCitations(lastPart.citations, citations) } : {}),
 		};
 	} else {
 		const textCount = parts.filter((part) => part.type === "text").length;
@@ -94,6 +97,7 @@ function appendTextRenderPart(ref: AssistantMessageRef, content: string) {
 			type: "text",
 			id: `text-${textCount}`,
 			content,
+			...(citations?.length ? { citations } : {}),
 		});
 	}
 	ref.current.renderParts = parts;
@@ -164,6 +168,7 @@ export function createStreamCallbacks(
 	let compactedInPlace = false;
 	let streamLagged = false;
 	let pendingTextDelta = "";
+	let pendingTextCitations: Citation[] | undefined;
 	let pendingThinkingDelta = "";
 	const pendingToolOutputDeltas = new Map<string, string>();
 	let streamFlushScheduled = false;
@@ -178,8 +183,13 @@ export function createStreamCallbacks(
 
 	function clearPendingPresentationDeltas() {
 		pendingTextDelta = "";
+		pendingTextCitations = undefined;
 		pendingThinkingDelta = "";
 		pendingToolOutputDeltas.clear();
+	}
+
+	function hasPendingText() {
+		return pendingTextDelta.length > 0 || Boolean(pendingTextCitations?.length);
 	}
 
 	function noteFirstEvent() {
@@ -202,9 +212,7 @@ export function createStreamCallbacks(
 
 	function flushPendingDeltas() {
 		if (!isActive()) {
-			pendingTextDelta = "";
-			pendingThinkingDelta = "";
-			pendingToolOutputDeltas.clear();
+			clearPendingPresentationDeltas();
 			return;
 		}
 		const finishFlushSpan = beginMitsuroPerformanceSpan("stream.flush");
@@ -212,14 +220,15 @@ export function createStreamCallbacks(
 		let flushedText = false;
 		let flushedThinking = false;
 
-		if (pendingTextDelta) {
+		if (hasPendingText()) {
 			ref.current.content = appendBounded(
 				ref.current.content,
 				pendingTextDelta,
 				MAX_LIVE_MESSAGE_CONTENT_LENGTH,
 			);
-			appendTextRenderPart(ref, pendingTextDelta);
+			appendTextRenderPart(ref, pendingTextDelta, pendingTextCitations);
 			pendingTextDelta = "";
+			pendingTextCitations = undefined;
 			changed = true;
 			flushedText = true;
 		}
@@ -316,9 +325,7 @@ export function createStreamCallbacks(
 		schedule(() => {
 			streamFlushScheduled = false;
 			if (!isActive()) {
-				pendingTextDelta = "";
-				pendingThinkingDelta = "";
-				pendingToolOutputDeltas.clear();
+				clearPendingPresentationDeltas();
 				return;
 			}
 			flushPendingDeltas();
@@ -339,18 +346,19 @@ export function createStreamCallbacks(
 	}
 
 	return {
-		onTextDelta: (delta) => {
+		onTextDelta: (delta, citations) => {
 			noteFirstEvent();
 			if (pendingThinkingDelta || pendingToolOutputDeltas.size > 0) {
 				flushPendingDeltas();
 			}
 			pendingTextDelta += delta;
+			pendingTextCitations = mergeCitations(pendingTextCitations, citations);
 			scheduleStreamFlush();
 		},
 
 		onThinkingDelta: (thinking) => {
 			noteFirstEvent();
-			if (pendingTextDelta || pendingToolOutputDeltas.size > 0) {
+			if (hasPendingText() || pendingToolOutputDeltas.size > 0) {
 				flushPendingDeltas();
 			}
 			pendingThinkingDelta += thinking;
@@ -454,7 +462,7 @@ export function createStreamCallbacks(
 
 		onToolOutputDelta: (id, delta) => {
 			noteFirstEvent();
-			if (pendingTextDelta || pendingThinkingDelta) {
+			if (hasPendingText() || pendingThinkingDelta) {
 				flushPendingDeltas();
 			}
 			pendingToolOutputDeltas.set(

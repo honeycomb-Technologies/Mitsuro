@@ -92,7 +92,6 @@ pub struct McpClient {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpClientStatus {
     Connected,
-    Disconnected,
     Error,
 }
 
@@ -402,14 +401,6 @@ impl McpClient {
 
     pub async fn status(&self) -> McpClientStatus {
         *self.status.read().await
-    }
-
-    pub async fn is_alive(&self) -> bool {
-        if *self.status.read().await != McpClientStatus::Connected {
-            return false;
-        }
-        // Reuse bounded discovery rather than issuing an unchecked list call.
-        self.list_tools().await.is_ok()
     }
 
     async fn request<T, E, F>(&self, operation: &str, request: F) -> Result<T, McpClientError>

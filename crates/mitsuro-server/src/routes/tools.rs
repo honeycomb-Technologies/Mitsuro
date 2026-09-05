@@ -11,7 +11,6 @@ use axum::{
 use serde::Serialize;
 
 use super::session_access::{request_workspace_scope, RequestWorkspaceScope};
-use mitsuro_core::agent::AgentConfig as RuntimeAgentConfig;
 use mitsuro_core::tools::registry::{FilesystemAccess, PermissionMode, ToolContext};
 
 use crate::auth::CurrentUser;
@@ -61,7 +60,14 @@ async fn execute_tool(
         .as_ref()
         .and_then(|current_user| current_user.0.user_id.as_deref());
 
-    // Create tool context
+    // Direct execution is an explicit operator surface: there is no session
+    // to inherit a permission mode from, so the endpoint's contract is
+    // autonomous execution inside the authenticated workspace scope (the
+    // classifier hook and registry policy still apply). Delegated turn
+    // budgets come from the shared project-settings contract, exactly as the
+    // orchestrated path resolves them.
+    let project_settings =
+        mitsuro_core::storage::ProjectSettings::load(workspace_scope.allowed_root.as_path());
     let ctx = ToolContext {
         working_dir,
         process_registry: Some(state.process_registry.clone()),
@@ -72,7 +78,7 @@ async fn execute_tool(
     .with_filesystem_access(FilesystemAccess::scoped(
         workspace_scope.allowed_root.clone(),
     ))
-    .with_subagent_max_turns(RuntimeAgentConfig::default().subagent_max_turns)
+    .with_subagent_max_turns(project_settings.subagent_max_turns)
     .with_mcp_manager(state.mcp_manager.clone())
     .with_skills_manager(state.skills_manager.clone())
     .with_tool_registry(Arc::clone(&state.tool_registry));
@@ -121,6 +127,7 @@ fn resolve_tool_working_dir(
 
 #[cfg(test)]
 mod tests {
+    use crate::routes::test_support::current_user;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -141,7 +148,6 @@ mod tests {
     use mitsuro_core::tools::ProcessesTool;
 
     use super::{execute_tool, resolve_tool_working_dir};
-    use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
     use crate::types::ToolExecuteRequest;
     use crate::AppState;
@@ -172,6 +178,12 @@ mod tests {
                 session_locks: Arc::new(RwLock::new(HashMap::new())),
                 session_inputs: Arc::new(RwLock::new(HashMap::new())),
                 session_presence: Arc::new(RwLock::new(HashMap::new())),
+                session_control_leases: Arc::new(RwLock::new(
+                    crate::control_leases::SessionControlLeaseRegistry::default(),
+                )),
+                agent_streams: Arc::new(RwLock::new(
+                    crate::agent_streams::AgentStreamHub::default(),
+                )),
                 delegated_state: Arc::new(RwLock::new(HashMap::new())),
                 remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                     enabled: true,
@@ -187,13 +199,6 @@ mod tests {
             },
             temp_dir,
         )
-    }
-
-    fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
-        CurrentUser(AuthenticatedUser {
-            user_id: Some(user_id.to_string()),
-            home_dir: Some(home_dir.to_path_buf()),
-        })
     }
 
     #[tokio::test]

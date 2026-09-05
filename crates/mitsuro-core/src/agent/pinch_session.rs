@@ -134,9 +134,7 @@ pub async fn create_pinched_session(
         .map(str::trim)
         .filter(|message| !message.is_empty())
     {
-        let content_json = serde_json::to_string(&vec![Content::Text {
-            text: message.to_string(),
-        }])?;
+        let content_json = serde_json::to_string(&vec![Content::text(message.to_string())])?;
         session_manager.save_message(&new_session_id, "user", &content_json)?;
         saved_initial_user_message = true;
     }
@@ -293,9 +291,9 @@ mod tests {
             .save_message(
                 &session_id,
                 "user",
-                &serde_json::to_string(&vec![Content::Text {
-                    text: "Keep working on the refactor.".to_string(),
-                }])
+                &serde_json::to_string(&vec![Content::text(
+                    "Keep working on the refactor.".to_string(),
+                )])
                 .expect("user json"),
             )
             .expect("save source message");
@@ -316,9 +314,7 @@ mod tests {
             source_session_title: "Pinch Source",
             conversation: &[ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: "Keep working on the refactor.".to_string(),
-                }],
+                content: vec![Content::text("Keep working on the refactor.".to_string())],
             }],
             working_dir: temp.path(),
             model: Some("test-model"),
@@ -374,9 +370,9 @@ mod tests {
             .save_message(
                 &session_id,
                 "user",
-                &serde_json::to_string(&vec![Content::Text {
-                    text: "Keep going after compaction.".to_string(),
-                }])
+                &serde_json::to_string(&vec![Content::text(
+                    "Keep going after compaction.".to_string(),
+                )])
                 .expect("user json"),
             )
             .expect("save source message");
@@ -402,9 +398,7 @@ mod tests {
             source_session_title: "Auto Pinch Source",
             conversation: &[ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: "Keep going after compaction.".to_string(),
-                }],
+                content: vec![Content::text("Keep going after compaction.".to_string())],
             }],
             working_dir: temp.path(),
             model: Some("test-model"),
@@ -468,9 +462,9 @@ mod tests {
             .save_message(
                 &session_id,
                 "user",
-                &serde_json::to_string(&vec![Content::Text {
-                    text: "Continue in the mobile project.".to_string(),
-                }])
+                &serde_json::to_string(&vec![Content::text(
+                    "Continue in the mobile project.".to_string(),
+                )])
                 .expect("user json"),
             )
             .expect("save source message");
@@ -482,9 +476,7 @@ mod tests {
             source_session_title: "Workspace Pinch Source",
             conversation: &[ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: "Continue in the mobile project.".to_string(),
-                }],
+                content: vec![Content::text("Continue in the mobile project.".to_string())],
             }],
             working_dir: &working_dir,
             model: Some("test-model"),

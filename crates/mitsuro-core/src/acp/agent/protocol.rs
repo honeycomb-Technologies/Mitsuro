@@ -466,10 +466,22 @@ impl MitsuroAgent {
                 continue;
             }
 
+            let mut references = crate::acp::source_references::SourceReferences::default();
             for content in message.content {
                 let update = match content {
-                    Content::Text { text } => {
-                        let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
+                    Content::Text {
+                        mut text,
+                        citations,
+                    } => {
+                        if message.role == Role::Assistant {
+                            references.extend(&citations);
+                            if let Some(sources) = references.take_text() {
+                                text.push_str(&sources);
+                            }
+                        }
+                        let content =
+                            crate::acp::source_references::cited_text_content(text, &citations);
+                        let chunk = ContentChunk::new(ContentBlock::Text(content));
                         match message.role {
                             Role::User => SessionUpdate::UserMessageChunk(chunk),
                             Role::Assistant | Role::Tool => SessionUpdate::AgentMessageChunk(chunk),

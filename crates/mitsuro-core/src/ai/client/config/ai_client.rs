@@ -76,28 +76,22 @@ impl AiClientConfig {
                 .is_some_and(|url| url.contains("chatgpt.com"))
     }
 
+    pub(crate) fn parallel_tool_call_transport(&self) -> super::ParallelToolCallTransport {
+        if self.uses_chatgpt_codex_format() {
+            super::ParallelToolCallTransport::ChatGptCodex
+        } else if matches!(self.api_format, ApiFormat::OpenAIResponses) {
+            super::ParallelToolCallTransport::Responses
+        } else {
+            super::ParallelToolCallTransport::Uncontrolled
+        }
+    }
+
     /// Check if this provider uses Anthropic-compatible API
     ///
     /// All providers (OpenRouter, Z.ai, MiniMax) use Anthropic Messages API
     /// Exception: OpenAI uses its own format
     pub fn uses_anthropic_api(&self) -> bool {
         !self.uses_openai_format() && !self.uses_google_format()
-    }
-
-    /// Create config for OpenAI with automatic auth type detection
-    ///
-    /// Detects whether OAuth token or API key is being used and routes to
-    /// the correct endpoint:
-    /// - OAuth (ChatGPT): chatgpt.com/backend-api/codex/v1/responses (Responses API)
-    /// - API Key: api.openai.com/v1/chat/completions (Chat Completions API)
-    pub fn for_openai_with_auth_detection(
-        model: &str,
-        credentials: &crate::storage::CredentialStore,
-    ) -> Self {
-        use crate::auth::resolve_openai_auth;
-
-        let auth_resolution = resolve_openai_auth(credentials, model);
-        Self::for_openai_with_auth_resolution(model, auth_resolution)
     }
 
     /// Create an OpenAI config from a model-catalog-selected auth surface.

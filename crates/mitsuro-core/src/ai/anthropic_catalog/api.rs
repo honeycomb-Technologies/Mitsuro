@@ -1,8 +1,7 @@
 use anyhow::{bail, Result};
 use reqwest::{Client, RequestBuilder};
-use tracing::debug;
 
-use crate::ai::catalog::{next_catalog_cursor, MAX_CATALOG_PAGES};
+use crate::ai::catalog::fetch_catalog_pages;
 use crate::ai::models::ModelMetadata;
 
 use super::mapping::parse_model;
@@ -39,43 +38,12 @@ pub async fn fetch_models_with_client(
         }
     };
 
-    let mut cursor: Option<String> = None;
-    let mut seen_cursors = std::collections::HashSet::new();
-    let mut models = Vec::new();
-    let mut page_count = 0usize;
-    loop {
-        page_count += 1;
-        if page_count > MAX_CATALOG_PAGES {
-            bail!("Anthropic model catalog exceeded {MAX_CATALOG_PAGES} pages");
-        }
-        let response = build_request(client, credential, oauth, cursor.as_deref())
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response.text().await.unwrap_or_default();
-            bail!("Anthropic models API error: {status} - {detail}");
-        }
-
-        let page = response.json::<ModelsResponse>().await?;
-        let next_cursor = next_catalog_cursor(
-            "Anthropic",
-            page.has_more,
-            page.last_id.as_deref(),
-            &mut seen_cursors,
-        )?;
-        models.extend(page.data.into_iter().filter_map(parse_model));
-
-        match next_cursor {
-            Some(next_cursor) => cursor = Some(next_cursor),
-            None => break,
-        }
-    }
-
-    models.sort_by(|left, right| left.id.cmp(&right.id));
-    models.dedup_by(|left, right| left.id == right.id);
-    debug!(count = models.len(), "Fetched Anthropic model catalog");
-    Ok(models)
+    fetch_catalog_pages::<ModelsResponse, _>(
+        "Anthropic",
+        |after_id| build_request(client, credential, oauth, after_id),
+        parse_model,
+    )
+    .await
 }
 
 fn build_request(

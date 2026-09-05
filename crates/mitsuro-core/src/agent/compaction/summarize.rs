@@ -181,7 +181,7 @@ pub(crate) fn extract_previous_summary(
 
     messages.iter().rev().find_map(|message: &ModelMessage| {
         message.content.iter().find_map(|content| {
-            if let Content::Text { text } = content {
+            if let Content::Text { text, .. } = content {
                 if text.starts_with(COMPACTION_SUMMARY_PREFIX) {
                     Some(text.clone())
                 } else {

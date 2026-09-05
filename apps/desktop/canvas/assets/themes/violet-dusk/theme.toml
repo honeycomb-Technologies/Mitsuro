@@ -1,0 +1,20 @@
+schema_version = 1
+id = "violet-dusk"
+display_name = "Violet Dusk"
+shareable = true
+
+[background]
+kind = "gradient"
+angle_deg = 142.0
+
+[[background.stops]]
+offset = 0.0
+color = "#0e0e11"
+
+[[background.stops]]
+offset = 0.58
+color = "#15121b"
+
+[[background.stops]]
+offset = 1.0
+color = "#1c1428"

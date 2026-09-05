@@ -78,7 +78,7 @@ impl WorkflowManager {
         validate_operation(operation_id, actor)?;
         validate_goal_input(&input)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "create_goal")? {
                 return Ok(previous);
             }
             ensure_session_exists(tx, session_id)?;
@@ -118,6 +118,7 @@ impl WorkflowManager {
             insert_criteria(tx, &goal_id, &input.criteria)?;
             finish_changed(
                 tx,
+                "create_goal",
                 session_id,
                 &goal_id,
                 1,
@@ -146,7 +147,9 @@ impl WorkflowManager {
         validate_goal_input(&goal_input)?;
         validate_plan_input(&plan_input)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) =
+                load_idempotent(tx, session_id, operation_id, "create_goal_with_plan")?
+            {
                 return Ok(previous);
             }
             ensure_session_exists(tx, session_id)?;
@@ -205,6 +208,7 @@ impl WorkflowManager {
             insert_steps(tx, &plan_id, &plan_input)?;
             finish_changed(
                 tx,
+                "create_goal_with_plan",
                 session_id,
                 &goal_id,
                 1,
@@ -232,7 +236,9 @@ impl WorkflowManager {
         validate_operation(operation_id, actor)?;
         validate_goal_input(&goal_input)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) =
+                load_idempotent(tx, session_id, operation_id, "import_legacy_plan")?
+            {
                 return Ok(previous);
             }
             ensure_session_exists(tx, session_id)?;
@@ -359,6 +365,7 @@ impl WorkflowManager {
 
             finish_changed(
                 tx,
+                "import_legacy_plan",
                 session_id,
                 &goal_id,
                 1,
@@ -381,7 +388,7 @@ impl WorkflowManager {
     ) -> Result<WorkflowMutation, WorkflowError> {
         validate_operation(operation_id, actor)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "edit_goal")? {
                 return Ok(previous);
             }
             let current = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -463,6 +470,7 @@ impl WorkflowManager {
             }
             finish_changed(
                 tx,
+                "edit_goal",
                 session_id,
                 goal_id,
                 new_revision,
@@ -486,7 +494,7 @@ impl WorkflowManager {
         validate_operation(operation_id, actor)?;
         validate_plan_input(&input)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "propose_plan")? {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -554,6 +562,7 @@ impl WorkflowManager {
             }
             finish_changed(
                 tx,
+                "propose_plan",
                 session_id,
                 goal_id,
                 new_revision,
@@ -576,7 +585,7 @@ impl WorkflowManager {
     ) -> Result<WorkflowMutation, WorkflowError> {
         validate_operation(operation_id, actor)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "approve_plan")? {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -610,6 +619,7 @@ impl WorkflowManager {
             )?;
             finish_changed(
                 tx,
+                "approve_plan",
                 session_id,
                 goal_id,
                 new_revision,
@@ -631,7 +641,8 @@ impl WorkflowManager {
     ) -> Result<WorkflowMutation, WorkflowError> {
         validate_operation(operation_id, actor)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "activate_goal")?
+            {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -683,6 +694,7 @@ impl WorkflowManager {
             )?;
             finish_changed(
                 tx,
+                "activate_goal",
                 session_id,
                 goal_id,
                 new_revision,
@@ -726,7 +738,7 @@ impl WorkflowManager {
     ) -> Result<WorkflowMutation, WorkflowError> {
         validate_operation(operation_id, actor)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "resume_goal")? {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -748,6 +760,7 @@ impl WorkflowManager {
             )?;
             finish_changed(
                 tx,
+                "resume_goal",
                 session_id,
                 goal_id,
                 new_revision,
@@ -778,7 +791,7 @@ impl WorkflowManager {
             ));
         }
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "block_goal")? {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -821,6 +834,7 @@ impl WorkflowManager {
             }
             finish_changed(
                 tx,
+                "block_goal",
                 session_id,
                 goal_id,
                 new_revision,
@@ -843,7 +857,7 @@ impl WorkflowManager {
     ) -> Result<WorkflowMutation, WorkflowError> {
         validate_operation(operation_id, actor)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "cancel_goal")? {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -894,6 +908,7 @@ impl WorkflowManager {
             )?;
             finish_changed(
                 tx,
+                "cancel_goal",
                 session_id,
                 goal_id,
                 new_revision,
@@ -917,7 +932,8 @@ impl WorkflowManager {
         validate_operation(operation_id, actor)?;
         validate_attempt_input(&input)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "start_attempt")?
+            {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -943,8 +959,12 @@ impl WorkflowManager {
             let plan_id: String = tx
                 .query_row(
                     "SELECT id FROM workflow_plan_revisions
-                     WHERE goal_id = ?1 AND status = 'active'",
-                    [goal_id],
+                     WHERE goal_id = ?1
+                       AND (status = 'active' OR (?2 = 1 AND status = 'completed'))
+                     ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END,
+                              revision_number DESC
+                     LIMIT 1",
+                    params![goal_id, input.step_id.is_none()],
                     |row| row.get(0),
                 )
                 .optional()?
@@ -992,6 +1012,7 @@ impl WorkflowManager {
             }
             finish_changed(
                 tx,
+                "start_attempt",
                 session_id,
                 goal_id,
                 new_revision,
@@ -1019,7 +1040,7 @@ impl WorkflowManager {
     ) -> Result<WorkflowMutation, WorkflowError> {
         validate_operation(operation_id, actor)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "claim_step")? {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -1089,6 +1110,7 @@ impl WorkflowManager {
             )?;
             finish_changed(
                 tx,
+                "claim_step",
                 session_id,
                 goal_id,
                 new_revision,
@@ -1100,6 +1122,10 @@ impl WorkflowManager {
         })
     }
 
+    /// Account the exact attempt admitted for a provider batch. Running
+    /// attempts evaluate progress and limits. Already terminal attempts accept
+    /// only monotonic counter settlement; their lifecycle, blocker history,
+    /// and any successor attempt remain unchanged.
     pub fn record_attempt_progress(
         &self,
         session_id: &str,
@@ -1112,21 +1138,17 @@ impl WorkflowManager {
     ) -> Result<WorkflowMutation, WorkflowError> {
         validate_operation(operation_id, actor)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) =
+                load_idempotent(tx, session_id, operation_id, "record_attempt_progress")?
+            {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
-            if goal.status != GoalStatus::Active {
-                return Err(WorkflowError::InvalidTransition(format!(
-                    "cannot record execution against {} goal",
-                    goal.status
-                )));
-            }
             let attempt = load_attempt(tx, goal_id, attempt_id)?;
-            if attempt.status != AttemptStatus::Running {
+            if goal.status != GoalStatus::Active && attempt.status == AttemptStatus::Running {
                 return Err(WorkflowError::InvalidTransition(format!(
-                    "attempt is {}, not running",
-                    attempt.status
+                    "cannot record running execution against {} goal",
+                    goal.status
                 )));
             }
             if input.turn_count < attempt.turn_count
@@ -1136,6 +1158,44 @@ impl WorkflowManager {
                 return Err(WorkflowError::Validation(
                     "attempt counters must be monotonic".to_string(),
                 ));
+            }
+            // A lifecycle tool may finish this attempt (and even start its
+            // successor) inside the provider batch being accounted. Settle
+            // usage on the admitted attempt without reopening it or applying
+            // its limits/blocker state to the successor.
+            if attempt.status != AttemptStatus::Running {
+                if input.turn_count == attempt.turn_count
+                    && input.tool_call_count == attempt.tool_call_count
+                    && input.research_action_count == attempt.research_action_count
+                {
+                    return finish_noop(tx, session_id, operation_id, "settle_attempt_usage");
+                }
+                let revision = bump_goal_revision(tx, session_id, goal_id, expected_revision)?;
+                tx.execute(
+                    "UPDATE workflow_execution_attempts
+                        SET turn_count = ?1, tool_call_count = ?2, research_action_count = ?3,
+                            updated_at = ?4
+                      WHERE id = ?5 AND goal_id = ?6",
+                    params![
+                        input.turn_count,
+                        input.tool_call_count,
+                        input.research_action_count,
+                        now(),
+                        attempt_id,
+                        goal_id
+                    ],
+                )?;
+                return finish_changed(
+                    tx,
+                    "record_attempt_progress",
+                    session_id,
+                    goal_id,
+                    revision,
+                    operation_id,
+                    "terminal_attempt_usage_settled",
+                    actor,
+                    Some(attempt_id),
+                );
             }
             let blocker_streak = match (
                 input.blocker_fingerprint.as_deref(),
@@ -1223,6 +1283,7 @@ impl WorkflowManager {
             };
             finish_changed(
                 tx,
+                "record_attempt_progress",
                 session_id,
                 goal_id,
                 new_revision,
@@ -1251,7 +1312,8 @@ impl WorkflowManager {
             ));
         }
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "complete_step")?
+            {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -1336,6 +1398,7 @@ impl WorkflowManager {
             }
             finish_changed(
                 tx,
+                "complete_step",
                 session_id,
                 goal_id,
                 new_revision,
@@ -1365,7 +1428,8 @@ impl WorkflowManager {
             ));
         }
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "finish_attempt")?
+            {
                 return Ok(previous);
             }
             let _goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -1390,6 +1454,7 @@ impl WorkflowManager {
             release_attempt_step(tx, attempt_id, WorkflowStepStatus::Pending)?;
             finish_changed(
                 tx,
+                "finish_attempt",
                 session_id,
                 goal_id,
                 new_revision,
@@ -1433,7 +1498,8 @@ impl WorkflowManager {
             ));
         }
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "set_criterion")?
+            {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -1472,6 +1538,7 @@ impl WorkflowManager {
             )?;
             finish_changed(
                 tx,
+                "set_criterion",
                 session_id,
                 goal_id,
                 new_revision,
@@ -1493,7 +1560,8 @@ impl WorkflowManager {
     ) -> Result<WorkflowMutation, WorkflowError> {
         validate_operation(operation_id, actor)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "complete_goal")?
+            {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -1509,13 +1577,13 @@ impl WorkflowManager {
                     goal.status
                 )));
             }
-            let running_attempts: i64 = tx.query_row(
+            let running_step_attempts: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM workflow_execution_attempts
-                 WHERE goal_id = ?1 AND status = 'running'",
+                 WHERE goal_id = ?1 AND status = 'running' AND step_id IS NOT NULL",
                 [goal_id],
                 |row| row.get(0),
             )?;
-            if running_attempts > 0 {
+            if running_step_attempts > 0 {
                 return Err(WorkflowError::InvalidTransition(
                     "cannot complete a goal while an attempt is running".to_string(),
                 ));
@@ -1550,6 +1618,16 @@ impl WorkflowManager {
             }
             let new_revision = bump_goal_revision(tx, session_id, goal_id, expected_revision)?;
             let timestamp = now();
+            // Final verification is a bounded step-less attempt. Once all
+            // required work and evidence pass, settle that attempt in the same
+            // transaction as the Goal; it cannot block its own completion.
+            tx.execute(
+                "UPDATE workflow_execution_attempts
+                    SET status = 'succeeded', stop_reason = 'goal_verified',
+                        ended_at = ?1, updated_at = ?1
+                  WHERE goal_id = ?2 AND status = 'running' AND step_id IS NULL",
+                params![timestamp, goal_id],
+            )?;
             tx.execute(
                 "UPDATE workflow_goals
                     SET status = 'completed', status_reason = 'verified',
@@ -1559,6 +1637,7 @@ impl WorkflowManager {
             )?;
             finish_changed(
                 tx,
+                "complete_goal",
                 session_id,
                 goal_id,
                 new_revision,
@@ -1665,6 +1744,28 @@ impl WorkflowManager {
         session_id: &str,
         token_delta: u64,
     ) -> Result<Option<WorkflowMutation>, WorkflowError> {
+        self.record_token_usage_scoped(session_id, None, token_delta)
+    }
+
+    /// Bind provider usage to the Goal that admitted the request. A replaced
+    /// Goal cannot inherit charges from an older in-flight provider call.
+    /// Matching inactive Goals accept late usage without changing lifecycle
+    /// state or reapplying a budget transition.
+    pub fn record_token_usage_for_goal(
+        &self,
+        session_id: &str,
+        goal_id: &str,
+        token_delta: u64,
+    ) -> Result<Option<WorkflowMutation>, WorkflowError> {
+        self.record_token_usage_scoped(session_id, Some(goal_id), token_delta)
+    }
+
+    fn record_token_usage_scoped(
+        &self,
+        session_id: &str,
+        admitted_goal_id: Option<&str>,
+        token_delta: u64,
+    ) -> Result<Option<WorkflowMutation>, WorkflowError> {
         if token_delta == 0 {
             return Ok(None);
         }
@@ -1672,7 +1773,12 @@ impl WorkflowManager {
             let Some(goal) = load_current_goal(tx, session_id)? else {
                 return Ok(None);
             };
-            if goal.status != GoalStatus::Active {
+            if admitted_goal_id.is_some_and(|goal_id| goal_id != goal.id) {
+                return Err(WorkflowError::Conflict(
+                    "the admitted Goal changed before provider usage could be settled".into(),
+                ));
+            }
+            if goal.status != GoalStatus::Active && admitted_goal_id.is_none() {
                 return Ok(None);
             }
             let tokens_used = goal.tokens_used.saturating_add(token_delta);
@@ -1682,9 +1788,10 @@ impl WorkflowManager {
                   WHERE id = ?3 AND session_id = ?4",
                 params![to_i64(tokens_used)?, now(), goal.id, session_id],
             )?;
-            if goal
-                .token_budget
-                .is_none_or(|token_budget| tokens_used < token_budget)
+            if goal.status != GoalStatus::Active
+                || goal
+                    .token_budget
+                    .is_none_or(|token_budget| tokens_used < token_budget)
             {
                 return Ok(None);
             }
@@ -1709,6 +1816,7 @@ impl WorkflowManager {
             let operation_id = format!("token-budget-{}", uuid::Uuid::new_v4());
             finish_changed(
                 tx,
+                "record_token_usage",
                 session_id,
                 &goal.id,
                 new_revision,
@@ -1735,7 +1843,7 @@ impl WorkflowManager {
     ) -> Result<WorkflowMutation, WorkflowError> {
         validate_operation(operation_id, actor)?;
         self.with_transaction(|tx| {
-            if let Some(previous) = load_idempotent(tx, operation_id)? {
+            if let Some(previous) = load_idempotent(tx, session_id, operation_id, "pause_goal")? {
                 return Ok(previous);
             }
             let goal = load_goal_for_update(tx, session_id, goal_id, expected_revision)?;
@@ -1760,6 +1868,7 @@ impl WorkflowManager {
             }
             finish_changed(
                 tx,
+                "pause_goal",
                 session_id,
                 goal_id,
                 new_revision,
@@ -1879,6 +1988,7 @@ pub fn pause_worker_goals_for_archive_in_transaction(
         let operation_id = format!("worker-archive:{worker_id}:{goal_id}:{next_revision}");
         finish_changed(
             tx,
+            "pause_worker_goals_for_archive",
             session_id,
             goal_id,
             next_revision,
@@ -2195,22 +2305,67 @@ fn validate_step_claim(
 
 fn load_idempotent(
     connection: &Connection,
+    session_id: &str,
     operation_id: &str,
+    expected_action: &str,
 ) -> Result<Option<WorkflowMutation>, WorkflowError> {
-    let result: Option<String> = connection
+    let result: Option<(String, String, String)> = connection
         .query_row(
-            "SELECT result_json FROM workflow_idempotency WHERE operation_id = ?1",
+            "SELECT session_id, action, result_json FROM workflow_idempotency WHERE operation_id = ?1",
             [operation_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
     result
-        .map(|json| serde_json::from_str(&json).map_err(WorkflowError::from))
+        .map(|(stored_session, action, json)| {
+            if stored_session != session_id
+                || canonical_operation_action(&action) != Some(expected_action)
+            {
+                return Err(WorkflowError::Conflict(
+                    "workflow operation ID belongs to another session or action".into(),
+                ));
+            }
+            serde_json::from_str(&json).map_err(WorkflowError::from)
+        })
         .transpose()
+}
+
+/// Read historical event-labelled receipts, and write exact command identity
+/// going forward. `goal_paused` and `goal_blocked` were each emitted by more
+/// than one command, so those legacy receipts cannot safely authorize replay.
+fn canonical_operation_action(action: &str) -> Option<&str> {
+    if let Some(action) = action.strip_prefix("command:") {
+        return Some(action);
+    }
+    Some(match action {
+        "goal_created" => "create_goal",
+        "goal_created_with_plan" => "create_goal_with_plan",
+        "legacy_plan_imported" => "import_legacy_plan",
+        "goal_edited" => "edit_goal",
+        "plan_proposed" => "propose_plan",
+        "plan_approved" => "approve_plan",
+        "goal_activated" => "activate_goal",
+        "goal_resumed" => "resume_goal",
+        "goal_paused" | "goal_blocked" => return None,
+        "goal_cancelled" => "cancel_goal",
+        "attempt_started" => "start_attempt",
+        "step_claimed" => "claim_step",
+        "settle_attempt_usage"
+        | "terminal_attempt_usage_settled"
+        | "attempt_budget_exhausted"
+        | "attempt_progressed"
+        | "attempt_observed" => "record_attempt_progress",
+        "step_completed" => "complete_step",
+        "attempt_finished" => "finish_attempt",
+        "criterion_updated" => "set_criterion",
+        "goal_completed" => "complete_goal",
+        action => action,
+    })
 }
 
 fn finish_changed(
     tx: &Transaction<'_>,
+    operation_action: &str,
     session_id: &str,
     goal_id: &str,
     revision: u64,
@@ -2258,7 +2413,7 @@ fn finish_changed(
             timestamp
         ],
     )?;
-    store_idempotent(tx, session_id, event_type, &mutation, &timestamp)?;
+    store_idempotent(tx, session_id, operation_action, &mutation, &timestamp)?;
     Ok(mutation)
 }
 
@@ -2275,7 +2430,13 @@ fn finish_noop(
         operation_id: operation_id.to_string(),
         snapshot,
     };
-    store_idempotent(tx, session_id, action, &mutation, &now())?;
+    store_idempotent(
+        tx,
+        session_id,
+        canonical_operation_action(action).unwrap_or(action),
+        &mutation,
+        &now(),
+    )?;
     Ok(mutation)
 }
 
@@ -2293,7 +2454,7 @@ fn store_idempotent(
         params![
             mutation.operation_id,
             session_id,
-            action,
+            format!("command:{action}"),
             serde_json::to_string(mutation)?,
             created_at
         ],

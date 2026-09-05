@@ -27,15 +27,11 @@ pub(crate) fn build_compacted_conversation(
     let mut compacted = Vec::new();
     compacted.push(ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: boundary_user_text(&boundary_payload),
-        }],
+        content: vec![Content::text(boundary_user_text(&boundary_payload))],
     });
     compacted.push(ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: format_summary_message(summary_input),
-        }],
+        content: vec![Content::text(format_summary_message(summary_input))],
     });
 
     for indexed in kept_messages {

@@ -61,7 +61,7 @@ pub struct WebFetchContent {
 }
 
 /// Citation from web search or fetch
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Citation {
     pub url: String,
     pub title: String,

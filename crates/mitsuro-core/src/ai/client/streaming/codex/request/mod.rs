@@ -7,7 +7,10 @@ pub(super) use continuation::{assistant_fingerprint_from_response, prepare_codex
 use serde_json::Value;
 use tracing::debug;
 
-use super::super::super::config::{normalized_prompt_cache_key, CallOptions, CodexReasoningEffort};
+use super::super::super::config::{
+    apply_parallel_tool_call_policy, normalized_prompt_cache_key, CallOptions,
+    CodexReasoningEffort, ParallelToolCallTransport,
+};
 use super::super::super::core::AiClient;
 use crate::ai::format::openai::OpenAIFormat;
 use crate::ai::format::FormatHandler;
@@ -163,7 +166,6 @@ impl AiClient {
             "input": input_messages,
             "tools": [],
             "tool_choice": "auto",
-            "parallel_tool_calls": options.codex_parallel_tool_calls,
             "store": false,
             "stream": true,
             "include": [],
@@ -215,6 +217,11 @@ impl AiClient {
             options.tools.as_ref().map(|t| t.len()).unwrap_or(0)
         );
 
+        apply_parallel_tool_call_policy(
+            &mut body,
+            Some(options),
+            ParallelToolCallTransport::ChatGptCodex,
+        );
         apply_request_body_transform(
             body,
             self.provider_id(),
@@ -232,6 +239,56 @@ mod tests {
     use crate::ai::providers::ProviderId;
     use crate::ai::types::{Content, ModelMessage, Role};
 
+    #[test]
+    fn codex_history_preserves_citations_for_user_assistant_and_tool_preambles() {
+        let citations = vec![crate::ai::types::Citation {
+            url: "https://example.com/docs".into(),
+            title: "Docs".into(),
+            cited_text: "Answer".into(),
+        }];
+        let expected = crate::ai::format::provider_text("Answer", &citations).into_owned();
+        for role in [Role::User, Role::Assistant] {
+            let message = ModelMessage {
+                role: role.clone(),
+                content: vec![Content::Text {
+                    text: "Answer".into(),
+                    citations: citations.clone(),
+                }],
+            };
+            let (role, kind) = if role == Role::User {
+                ("user", "input_text")
+            } else {
+                ("assistant", "output_text")
+            };
+            assert_eq!(
+                super::build_codex_input_messages(&[message], None),
+                vec![
+                    serde_json::json!({"type":"message","role":role,"content":[{"type":kind,"text":expected}]})
+                ]
+            );
+        }
+        let message = ModelMessage {
+            role: Role::Assistant,
+            content: vec![
+                Content::Text {
+                    text: "Answer".into(),
+                    citations,
+                },
+                Content::ToolUse {
+                    id: "call-1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+        };
+        let items = super::build_codex_input_messages(&[message], None);
+        assert_eq!(
+            items[0],
+            serde_json::json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":expected}]})
+        );
+        assert_eq!(items[1]["type"], "function_call");
+    }
+
     fn openai_responses_client() -> AiClient {
         AiClient::new(
             AiClientConfig {
@@ -243,6 +300,35 @@ mod tests {
             },
             "test-key".to_string(),
         )
+    }
+
+    #[test]
+    fn codex_parallel_policy_matches_body_and_transport_diagnostics() {
+        let client = openai_responses_client();
+        let format = OpenAIFormat::new(ApiFormat::OpenAIResponses);
+        for legacy in [false, true] {
+            for requested in [None, Some(false), Some(true)] {
+                let options = client.canonical_call_options(
+                    "gpt-5.5",
+                    &CallOptions {
+                        parallel_tool_calls: requested,
+                        codex_parallel_tool_calls: legacy,
+                        ..Default::default()
+                    },
+                );
+                let body =
+                    client.build_chatgpt_codex_body(&[], "system", None, 128, &options, &format);
+                let expected = requested.unwrap_or(legacy);
+                assert_eq!(body["parallel_tool_calls"], expected);
+                assert_eq!(
+                    client
+                        .request_diagnostics(&[], &options)
+                        .effective_request
+                        .parallel_tool_calls,
+                    expected
+                );
+            }
+        }
     }
 
     #[test]
@@ -258,9 +344,7 @@ mod tests {
         );
         let messages = vec![ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "hello".to_string(),
-            }],
+            content: vec![Content::text("hello".to_string())],
         }];
 
         let body = client.build_chatgpt_codex_body(
@@ -284,9 +368,7 @@ mod tests {
         let options = CallOptions::default();
         let messages = vec![ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "continue".to_string(),
-            }],
+            content: vec![Content::text("continue".to_string())],
         }];
 
         let body = client.build_chatgpt_codex_body(
@@ -340,9 +422,7 @@ mod tests {
         };
         let messages = vec![ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "continue".to_string(),
-            }],
+            content: vec![Content::text("continue".to_string())],
         }];
 
         let body = client.build_chatgpt_codex_body(

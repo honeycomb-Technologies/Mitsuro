@@ -3852,9 +3852,9 @@ async fn server_created_session_gets_controller_and_waiting_runs_resume_durably(
     .await
     .unwrap();
     let now = canonical_timestamp(chrono::Utc::now());
-    let initial_content = serde_json::to_string(&vec![mitsuro_core::Content::Text {
-        text: "legacy objective".into(),
-    }])
+    let initial_content = serde_json::to_string(&vec![mitsuro_core::Content::text(
+        "legacy objective".into(),
+    )])
     .unwrap();
     let db = Database::new(&runtime_config.database_path).unwrap();
     db.conn()

@@ -152,7 +152,7 @@ pub fn build_summarization_prompt(
 
         for content in &msg.content {
             match content {
-                Content::Text { text } => {
+                Content::Text { text, .. } => {
                     // Truncate very long messages
                     let preview = if text.len() > 2000 {
                         format!(

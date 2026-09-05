@@ -3,8 +3,11 @@
 //! Prompt-family classification remains available for diagnostics and transport
 //! policy. Streaming and non-streaming calls share one base coding contract.
 
+mod context_kind;
 mod profile;
 mod prompts;
+
+pub(crate) use context_kind::ContextKind;
 
 pub use crate::ai::transport_policy::StreamDrainPolicy;
 pub use profile::{ModelProfile, PromptFamily};
@@ -25,9 +28,7 @@ mod tests {
     fn text_message(role: Role, text: &str) -> ModelMessage {
         ModelMessage {
             role,
-            content: vec![Content::Text {
-                text: text.to_string(),
-            }],
+            content: vec![Content::text(text.to_string())],
         }
     }
 

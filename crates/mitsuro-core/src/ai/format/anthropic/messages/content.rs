@@ -9,9 +9,9 @@ pub(super) fn convert_content(
     strip_images: bool,
 ) -> Option<Value> {
     match content {
-        Content::Text { text } => Some(serde_json::json!({
+        Content::Text { text, citations } => Some(serde_json::json!({
             "type": "text",
-            "text": text
+            "text": crate::ai::format::provider_text(text, citations)
         })),
         Content::ToolUse { id, name, input } => Some(serde_json::json!({
             "type": "tool_use",

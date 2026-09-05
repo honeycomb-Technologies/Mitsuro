@@ -5,17 +5,14 @@ pub(crate) mod runner;
 mod state;
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
-use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use mitsuro_core::agent::LoopInput;
@@ -64,8 +61,6 @@ const HIVE_SUBSCRIPTION_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_sec
 #[cfg(test)]
 const HIVE_SUBSCRIPTION_RECONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_millis(250);
 const WORKER_STAGED_INPUT_POLL_INTERVAL: Duration = Duration::from_millis(250);
-type SseItem = std::result::Result<Event, Infallible>;
-type HiveSse = Sse<ReceiverStream<SseItem>>;
 
 pub struct HiveRuntimeManager {
     daemon: Option<HiveDaemonControl>,
@@ -1878,31 +1873,6 @@ impl HiveRuntimeManager {
         }
     }
 
-    pub async fn observe(&self, session_id: &str) -> HiveSse {
-        let receiver = self.subscribe(session_id).await;
-
-        let (tx, rx) = mpsc::channel::<SseItem>(HIVE_EVENT_BUFFER);
-        tokio::spawn(async move {
-            let mut receiver = receiver;
-            loop {
-                match receiver.recv().await {
-                    Ok(event) => {
-                        let Ok(sse_event) = Event::default().json_data(event) else {
-                            continue;
-                        };
-                        if tx.send(Ok(sse_event)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-
-        Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
-    }
-
     pub async fn pause_session(&self, state: &AppState, session_id: &str) -> Result<()> {
         self.stop_active_run(state, session_id).await;
         persist_runtime_state(
@@ -2659,6 +2629,12 @@ mod tests {
                 session_locks: Arc::new(RwLock::new(HashMap::new())),
                 session_inputs: Arc::new(RwLock::new(HashMap::new())),
                 session_presence: Arc::new(RwLock::new(HashMap::new())),
+                session_control_leases: Arc::new(RwLock::new(
+                    crate::control_leases::SessionControlLeaseRegistry::default(),
+                )),
+                agent_streams: Arc::new(RwLock::new(
+                    crate::agent_streams::AgentStreamHub::default(),
+                )),
                 delegated_state: Arc::new(RwLock::new(HashMap::new())),
                 remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                     enabled: true,

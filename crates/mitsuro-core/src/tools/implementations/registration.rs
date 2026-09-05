@@ -11,7 +11,7 @@ use super::{
     SearchCompactionSegmentsTool, SendToWorkerTool, SendUserMessageTool, SetDependencyTool,
     SetWorkModeTool, SetWorkspaceContextTool, SkillTool, SleepTool, TaskCompleteTool,
     TaskStartTool, ToolSearchTool, WebFetchTool, WebSearchTool, WorkflowProposeTool,
-    WorkflowUpdateTool, WriteTool,
+    WorkflowReadTool, WorkflowUpdateTool, WriteTool,
 };
 
 /// Register all built-in tools (except agent which needs client)
@@ -44,6 +44,7 @@ pub async fn register_all_tools(registry: &ToolRegistry) {
     registry.register(Arc::new(EnterPlanModeTool)).await;
     registry.register(Arc::new(WorkflowProposeTool)).await;
     registry.register(Arc::new(WorkflowUpdateTool)).await;
+    registry.register(Arc::new(WorkflowReadTool)).await;
     registry.register(Arc::new(ToolSearchTool)).await;
     registry.register(Arc::new(SendUserMessageTool)).await;
     registry.register(Arc::new(SleepTool)).await;

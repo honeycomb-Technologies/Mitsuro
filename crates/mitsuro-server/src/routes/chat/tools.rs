@@ -1,10 +1,9 @@
 use std::collections::HashSet;
 
 use mitsuro_core::ai::client::{AnthropicAdaptiveEffort, CallOptions, CodexReasoningEffort};
-use mitsuro_core::ai::providers::{ProviderId, ReasoningControl};
+use mitsuro_core::ai::providers::ReasoningControl;
 use mitsuro_core::ai::types::{AiTool, ThinkingConfig};
-use mitsuro_core::storage::{SessionType, WorkMode};
-use mitsuro_core::tools::registry::{MutationToolSurface, PermissionMode, ToolRequestPolicy};
+use mitsuro_core::storage::SessionType;
 
 use crate::types::ThinkingLevel;
 
@@ -191,26 +190,7 @@ pub(super) fn filter_tools_for_session_type(
 /// Build the canonical direct Code tool surface for an effective work mode.
 /// This is used both during session setup and immediately after an HTTP mode
 /// override so per-turn allowlist validation never runs against stale schemas.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn filter_code_tools_for_mode(
-    tools: Vec<AiTool>,
-    permission_mode: PermissionMode,
-    work_mode: WorkMode,
-    has_active_plan: bool,
-    disabled_tools: &[String],
-    provider: ProviderId,
-    model: &str,
-) -> Vec<AiTool> {
-    ToolRequestPolicy::code(
-        permission_mode,
-        work_mode == WorkMode::Plan,
-        has_active_plan,
-        true,
-        disabled_tools,
-    )
-    .with_mutation_surface(MutationToolSurface::for_model(provider, model))
-    .filter(tools)
-}
+pub(super) use mitsuro_core::tools::registry::filter_code_tools_for_mode;
 
 /// Restrict an already-governed request tool surface to an explicit per-turn
 /// allowlist. The client can only remove tools: names that were not selected by
@@ -262,6 +242,7 @@ pub(super) fn restrict_tools_to_allowlist(
         options.web_fetch = None;
     }
     if options.tools.as_ref().is_none_or(|tools| tools.len() <= 1) {
+        options.parallel_tool_calls = Some(false);
         options.codex_parallel_tool_calls = false;
     }
     Ok(requested_names)
@@ -347,6 +328,9 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use mitsuro_core::ai::providers::ProviderId;
+    use mitsuro_core::storage::WorkMode;
+    use mitsuro_core::tools::registry::PermissionMode;
 
     fn tool(name: &str) -> AiTool {
         AiTool {
@@ -611,6 +595,7 @@ mod tests {
         assert!(execution_scope.is_empty());
         assert!(options.tools.is_none());
         assert!(!options.codex_parallel_tool_calls);
+        assert_eq!(options.parallel_tool_calls, Some(false));
 
         let mut options = CallOptions {
             tools: Some(vec![tool("read")]),

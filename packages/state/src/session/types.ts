@@ -1,4 +1,5 @@
 import type {
+  Citation,
   DelegatedRunStage,
   DelegatedToolKind,
   DelegationGroupState,
@@ -129,6 +130,7 @@ export type ChatRenderPart =
     type: "text";
     id: string;
     content: string;
+    citations?: Citation[];
   }
   | {
     type: "thinking";

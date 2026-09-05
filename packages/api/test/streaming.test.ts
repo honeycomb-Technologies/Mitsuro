@@ -53,16 +53,47 @@ function createCallbacks(
 function clientFor(response: Response): MitsuroClient {
 	return new MitsuroClient({
 		baseUrl: "https://mitsuro.test",
-		fetchImpl: (async () => response) as typeof fetch,
+		fetchImpl: (async (input, init) => {
+			if (new URL(String(input)).pathname.endsWith("/control") && init?.method === "GET") {
+				return Response.json({ error: "Chat does not use control" }, { status: 409 });
+			}
+			return response;
+		}) as typeof fetch,
 	});
 }
 
 describe("MitsuroClient streaming lifecycle", () => {
+	test("preserves typed citation and annotation-only events without breaking legacy text callbacks", async () => {
+		const citation = { url: "https://example.test/source", title: "Source", cited_text: "Evidence" };
+		const response = () => streamResponse(
+			`data: ${JSON.stringify({ type: "text_delta_with_citations", delta: "Evidence", citations: [citation, null, { ignored: true }] })}\n\n`,
+			`data: ${JSON.stringify({ type: "text_delta_with_citations", delta: "", citations: [citation] })}\n\n`,
+			'data: {"type":"finish","session_id":"s1","stop_reason":"completed"}\n\n',
+		);
+		const records: unknown[] = [];
+		await clientFor(response()).streamChat({ session_id: "s1", message: "inspect" }, createCallbacks({
+			onTextDelta: (delta, citations) => records.push({ delta, citations }),
+		}));
+		expect(records).toEqual([{ delta: "Evidence", citations: [citation] }, { delta: "", citations: [citation] }]);
+		let legacy = "";
+		await clientFor(response()).streamChat({ session_id: "s1", message: "inspect" }, createCallbacks({
+			onTextDelta: (delta) => { legacy += delta; },
+		}));
+		expect(legacy).toBe("Evidence");
+	});
+
 	test("sends an optional chat idempotency key without changing ordinary callers", async () => {
 		const keys: Array<string | null> = [];
 		const client = new MitsuroClient({
 			baseUrl: "https://mitsuro.test",
-			fetchImpl: (async (_input, init) => {
+			fetchImpl: (async (input, init) => {
+				const path = new URL(String(input)).pathname;
+				if (path.endsWith("/control") && init?.method === "GET") {
+					return new Response(JSON.stringify({ error: "Chat does not use control" }), {
+						status: 409,
+						headers: { "content-type": "application/json" },
+					});
+				}
 				keys.push(new Headers(init?.headers).get("Idempotency-Key"));
 				return streamResponse(
 					'data: {"type":"finish","session_id":"worker-dm","stop_reason":"completed"}\n\n',
@@ -88,7 +119,14 @@ describe("MitsuroClient streaming lifecycle", () => {
 		const keys: Array<string | null> = [];
 		const client = new MitsuroClient({
 			baseUrl: "https://mitsuro.test",
-			fetchImpl: (async (_input, init) => {
+			fetchImpl: (async (input, init) => {
+				const path = new URL(String(input)).pathname;
+				if (path.endsWith("/control") && init?.method === "GET") {
+					return new Response(JSON.stringify({ error: "Chat does not use control" }), {
+						status: 409,
+						headers: { "content-type": "application/json" },
+					});
+				}
 				keys.push(new Headers(init?.headers).get("Idempotency-Key"));
 				return Response.json({
 					status: "accepted",

@@ -193,6 +193,9 @@ pub struct SubAgentTask {
     /// Stable runtime identity kept separate from semantic task fields.
     pub identity: Option<AgentIdentity>,
     pub prompt: String,
+    /// Bounded inherited project instructions, separate from user task text.
+    /// Frozen before isolation; execution paths remain in working_dir.
+    pub project_context: String,
     pub working_dir: PathBuf,
     /// Filesystem sandbox root inherited from the parent tool context.
     pub sandbox_root: Option<PathBuf>,
@@ -242,6 +245,7 @@ impl SubAgentTask {
             name,
             identity: None,
             prompt: prompt.into(),
+            project_context: String::new(),
             working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             sandbox_root: None,
             command_environment: BTreeMap::new(),
@@ -287,6 +291,11 @@ impl SubAgentTask {
         self.identity
             .as_ref()
             .map_or_else(|| self.name.clone(), AgentIdentity::display_name)
+    }
+
+    pub fn with_project_context(mut self, context: String) -> Self {
+        self.project_context = context;
+        self
     }
 
     pub fn with_working_dir(mut self, dir: PathBuf) -> Self {

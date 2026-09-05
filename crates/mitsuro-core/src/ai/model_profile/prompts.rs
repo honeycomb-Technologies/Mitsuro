@@ -4,6 +4,7 @@ use crate::ai::types::{Content, ModelMessage, Role};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::context_kind::ContextKind;
 use super::profile::ModelProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,10 +123,9 @@ pub fn build_system_prompt_sections(
     _tool_prompts: &[(String, String)],
 ) -> SystemPromptSections {
     let profile = ModelProfile::resolve(provider, api_format, model_id);
-    let (identity_context, project_context, session_context) =
-        partition_system_messages_by_stability(messages);
-
     let base = profile.layered_system_prompt(provider, api_format, model_id, custom_system_prompt);
+    let (identity_context, project_context, session_context) =
+        partition_system_messages_with_base(messages, Some(&base));
 
     let mut sections = Vec::new();
     if let Some(section) = PromptSection::new(
@@ -182,25 +182,42 @@ pub fn partition_system_messages(messages: &[ModelMessage]) -> (String, String) 
 }
 
 fn partition_system_messages_by_stability(messages: &[ModelMessage]) -> (String, String, String) {
+    partition_system_messages_with_base(messages, None)
+}
+
+fn partition_system_messages_with_base(
+    messages: &[ModelMessage],
+    base: Option<&str>,
+) -> (String, String, String) {
     let mut identity_context = String::new();
     let mut project_context = String::new();
     let mut session_context = String::new();
 
     for message in messages.iter().filter(|m| m.role == Role::System) {
-        if let Some(text) = first_text_block(&message.content) {
-            if is_stable_identity_context(text) {
-                append_context(&mut identity_context, text);
-            } else if is_stable_project_context(text) {
-                if !project_context.is_empty() {
-                    project_context.push_str("\n\n");
-                }
-                project_context.push_str(text);
-            } else {
-                if !session_context.is_empty() {
-                    session_context.push_str("\n\n");
-                }
-                session_context.push_str(text);
+        for text in message.content.iter().filter_map(|block| match block {
+            Content::Text { text, citations } => {
+                Some(crate::ai::format::provider_text(text, citations))
             }
+            _ => None,
+        }) {
+            // Hosted Hive uses the coordinator as an explicit custom base;
+            // local callers also inject it as identity context. Keep that
+            // existing base policy, but include an exact coordinator only once.
+            // Never deduplicate arbitrary user/project instructions by substring.
+            if text.starts_with("[HIVE COORDINATOR]")
+                && base.is_some_and(|base| base.trim() == text.trim())
+            {
+                continue;
+            }
+            let kind = ContextKind::from_text(&text);
+            let target = if kind.is_stable_identity() {
+                &mut identity_context
+            } else if kind.is_stable_project() {
+                &mut project_context
+            } else {
+                &mut session_context
+            };
+            append_context(target, &text);
         }
     }
 
@@ -212,37 +229,6 @@ fn append_context(target: &mut String, text: &str) {
         target.push_str("\n\n");
     }
     target.push_str(text);
-}
-
-fn is_stable_identity_context(text: &str) -> bool {
-    [
-        "[HIVE COORDINATOR]",
-        "[HIVE SOUL",
-        "[HIVE IDENTITY",
-        "[HIVE USER",
-        "[HIVE CREW IDENTITY",
-        "[HIVE CREW SOUL",
-    ]
-    .iter()
-    .any(|prefix| text.starts_with(prefix))
-}
-
-fn is_stable_project_context(text: &str) -> bool {
-    [
-        "[PROJECT INSTRUCTIONS",
-        "[PROJECT SETTINGS]",
-        "[HIVE PROJECT OVERLAY",
-        "[DELEGATION MODE:",
-    ]
-    .iter()
-    .any(|prefix| text.starts_with(prefix))
-}
-
-fn first_text_block(content: &[Content]) -> Option<&str> {
-    content.iter().find_map(|block| match block {
-        Content::Text { text } => Some(text.as_str()),
-        _ => None,
-    })
 }
 
 #[cfg(test)]
@@ -284,15 +270,15 @@ mod tests {
         let messages = vec![
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: "[HIVE SOUL - HIVE_SOUL.md]\nWarm and exact.".to_string(),
-                }],
+                content: vec![Content::text(
+                    "[HIVE SOUL - HIVE_SOUL.md]\nWarm and exact.".to_string(),
+                )],
             },
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: "[HIVE HEARTBEAT - HIVE_HEARTBEAT.md]\nCheck work.".to_string(),
-                }],
+                content: vec![Content::text(
+                    "[HIVE HEARTBEAT - HIVE_HEARTBEAT.md]\nCheck work.".to_string(),
+                )],
             },
         ];
         let sections = build_system_prompt_sections(
@@ -315,9 +301,7 @@ mod tests {
 
         let system = |text: &str| ModelMessage {
             role: Role::System,
-            content: vec![Content::Text {
-                text: text.to_string(),
-            }],
+            content: vec![Content::text(text.to_string())],
         };
         let first = vec![
             system("[HIVE COORDINATOR]\nCoordinate deliberately."),
@@ -375,5 +359,79 @@ mod tests {
             .contains("RECALLED CONVERSATION EPISODES"));
         assert!(!first.identity_context.contains("HIVE HEARTBEAT"));
         assert!(!first.project_context.contains("HIVE CHANNELS"));
+    }
+}
+
+#[cfg(test)]
+mod assembly_regressions {
+    use super::*;
+
+    #[test]
+    fn every_system_text_block_is_retained_in_its_cache_tier() {
+        let messages = [ModelMessage {
+            role: Role::System,
+            content: vec![
+                Content::text("[PROJECT INSTRUCTIONS]\nroot contract".into()),
+                Content::text("[DURABLE GOAL - exact]\ncurrent obligation".into()),
+                Content::text("[HIVE SOUL]\nidentity contract".into()),
+                Content::text("[HIVE WORKER]\nworker contract".into()),
+            ],
+        }];
+        let sections = build_system_prompt_sections(
+            ProviderId::OpenAI,
+            ApiFormat::OpenAIResponses,
+            "gpt-5.5",
+            &messages,
+            None,
+            &[],
+        );
+        assert!(sections.project_context.contains("root contract"));
+        assert!(sections.session_context.contains("current obligation"));
+        assert!(sections.session_context.contains("worker contract"));
+        assert!(sections.identity_context.contains("identity contract"));
+        assert!(!sections.identity_context.contains("worker contract"));
+        for marker in [
+            "root contract",
+            "current obligation",
+            "identity contract",
+            "worker contract",
+        ] {
+            assert_eq!(sections.combined().matches(marker).count(), 1);
+        }
+    }
+
+    #[test]
+    fn hosted_hive_keeps_its_explicit_base_without_a_second_coordinator() {
+        let coordinator =
+            crate::agent::autonomy::coordinator_prompt::hive_coordinator_system_prompt();
+        let messages = [ModelMessage {
+            role: Role::System,
+            content: vec![
+                Content::text(coordinator.clone()),
+                Content::text("[HIVE SOUL]\nWarm and precise.".into()),
+            ],
+        }];
+        let hosted = build_system_prompt_sections(
+            ProviderId::Anthropic,
+            ApiFormat::Anthropic,
+            "claude-sonnet-4-5",
+            &messages,
+            Some(&coordinator),
+            &[],
+        );
+        assert_eq!(hosted.base_prompt, coordinator.trim());
+        assert_eq!(hosted.combined().matches("[HIVE COORDINATOR]").count(), 1);
+        assert!(hosted.identity_context.contains("Warm and precise"));
+        let local = build_system_prompt_sections(
+            ProviderId::Anthropic,
+            ApiFormat::Anthropic,
+            "claude-sonnet-4-5",
+            &messages,
+            None,
+            &[],
+        );
+        assert_eq!(local.combined().matches("[HIVE COORDINATOR]").count(), 1);
+        assert!(local.base_prompt.contains("You are Agent inside Mitsuro"));
+        assert!(local.identity_context.contains(&coordinator));
     }
 }

@@ -89,6 +89,7 @@ export interface SessionRecoveryState {
 
 export interface PartialAssistantState {
   text: string;
+  citations?: Citation[];
   thinking?: string;
   tool_calls: RecoveryToolCall[];
 }
@@ -111,6 +112,8 @@ export interface SessionStateResponse {
   delegation_events?: DelegationEventResponse[];
   delegation_event_cursor?: number | null;
   last_event_sequence?: number | null;
+  agent_stream_generation?: number;
+  agent_stream_sequence?: number;
 }
 
 export type DelegationGroupState =
@@ -481,6 +484,14 @@ export interface MessageContent {
   tool_use_id?: string;
   content?: string;
   thinking?: string;
+  citations?: Citation[];
+}
+
+/** Source annotation attached to the text block it supports. */
+export interface Citation {
+  url: string;
+  title: string;
+  cited_text: string;
 }
 
 export interface MessageResponse {
@@ -506,6 +517,7 @@ export type ChatRenderPart =
     type: "text";
     id: string;
     content: string;
+    citations?: Citation[];
   }
   | {
     type: "thinking";
@@ -598,11 +610,34 @@ export interface SteerResponse {
   successor_run_id?: string | null;
 }
 
+export interface AgentControlLeaseSummary {
+  client_id: string;
+  expires_at: string;
+}
+
+export interface AgentControlState {
+  session_id: string;
+  controller?: AgentControlLeaseSummary | null;
+  ttl_seconds: number;
+}
+
+export interface AgentControlLease {
+  resource_id: string;
+  client_id: string;
+  lease_token: string;
+  expires_at: string;
+}
+
+export interface TakeAgentControlResponse {
+  lease: AgentControlLease;
+}
+
 export type ContentBlock = TextContent | ImageContent;
 
 export interface TextContent {
   type: "text";
   text: string;
+  citations?: Citation[];
 }
 
 export type ImageSource = Base64ImageSource | UrlImageSource;
@@ -2076,7 +2111,7 @@ export interface UsageMetrics {
 
 export type StreamEvent =
   | { type: "text_delta"; delta: string }
-  | { type: "text_delta_with_citations"; delta: string; citations: unknown[] }
+  | { type: "text_delta_with_citations"; delta: string; citations: Citation[] }
   | { type: "thinking_delta"; thinking: string }
   | { type: "thinking_complete"; thinking: string; signature: string }
   | { type: "tool_call_start"; id: string; name: string }
@@ -2176,7 +2211,7 @@ export type StreamEvent =
   | { type: "teammate_cancelled"; name: string };
 
 export interface StreamCallbacks {
-  onTextDelta: (delta: string) => void;
+  onTextDelta: (delta: string, citations?: Citation[]) => void;
   onThinkingDelta: (thinking: string) => void;
   onToolCallStart: (id: string, name: string) => void;
   onToolCallPreparing?: (
@@ -2286,6 +2321,7 @@ export interface GitChangesResponse {
   in_repo: boolean;
   repo_root: string | null;
   files: GitChangedFile[];
+  truncated?: boolean;
 }
 
 export interface GitFileDiffResponse {
@@ -2489,12 +2525,35 @@ export interface BrowserCapability {
   live_stream: boolean;
   semantic_actions: boolean;
   agent_chat: boolean;
+  control_leases: boolean;
+  control_lease_version: number;
+  control_lease_ttl_seconds: number;
   reason?: string | null;
+}
+
+/** Public controller identity; mutation authority is intentionally omitted. */
+export interface BrowserControlLeaseSummary {
+  client_id: string;
+  expires_at: string;
+}
+
+/** Ephemeral, in-memory authority for one server-owned Browser session. */
+export interface BrowserControlLease {
+  resource_id: string;
+  client_id: string;
+  lease_token: string;
+  expires_at: string;
+}
+
+export interface TakeBrowserControlResponse {
+  lease: BrowserControlLease;
 }
 
 export interface BrowserSession {
   id: string;
   title: string;
+  /** Canonical project directory frozen when the server-owned session is created. */
+  project_dir: string;
   kind: BrowserSessionKind;
   status: BrowserSessionStatus;
   url?: string | null;
@@ -2504,6 +2563,7 @@ export interface BrowserSession {
   stream_url?: string | null;
   viewers: number;
   controllers: number;
+  controller?: BrowserControlLeaseSummary | null;
   last_error?: string | null;
   created_at: string;
   updated_at: string;
@@ -2517,6 +2577,8 @@ export interface BrowserSessionListResponse {
 
 export interface CreateBrowserSessionRequest {
   title?: string;
+  /** Defaults to the authenticated workspace for older clients. */
+  project_dir?: string;
   kind?: BrowserSessionKind;
   url?: string;
   launch_local?: boolean;

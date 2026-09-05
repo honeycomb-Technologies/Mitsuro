@@ -1247,10 +1247,6 @@ fn loop_event_name(event: &LoopEvent) -> &'static str {
         LoopEvent::AgentBackgroundCompleted { .. } => "agent_background_completed",
         LoopEvent::UserMessage { .. } => "user_message",
         LoopEvent::ClassifierDecision { .. } => "classifier_decision",
-        LoopEvent::TeammateSpawned { .. } => "teammate_spawned",
-        LoopEvent::TeammateTaskCompleted { .. } => "teammate_task_completed",
-        LoopEvent::TeammateTaskFailed { .. } => "teammate_task_failed",
-        LoopEvent::TeammateCancelled { .. } => "teammate_cancelled",
     }
 }
 
