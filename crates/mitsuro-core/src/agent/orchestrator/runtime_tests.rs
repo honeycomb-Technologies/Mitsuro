@@ -177,6 +177,17 @@ impl RuntimeFixture {
         mpsc::UnboundedReceiver<LoopEvent>,
         mpsc::UnboundedSender<LoopInput>,
     ) {
+        self.run_with_budget(mode, 8).await
+    }
+
+    async fn run_with_budget(
+        &self,
+        mode: WorkMode,
+        max_turns: usize,
+    ) -> (
+        mpsc::UnboundedReceiver<LoopEvent>,
+        mpsc::UnboundedSender<LoopInput>,
+    ) {
         let options = CallOptions {
             tools: Some(self.services.tool_registry.get_ai_tools_all().await),
             ..Default::default()
@@ -189,7 +200,7 @@ impl RuntimeFixture {
                 initial_work_mode: mode,
                 permission_mode: PermissionMode::Autonomous,
                 refresh_code_tools_on_mode_change: true,
-                run_budget: Some(RunBudget::with_max_turns(8)),
+                run_budget: Some(RunBudget::with_max_turns(max_turns)),
                 ..Default::default()
             },
         )
@@ -1172,5 +1183,96 @@ async fn accepted_steering_rearms_the_goal_final_correction_once() -> anyhow::Re
     respond(request, "I will continue later.", None);
     assert_eq!(finished(&mut events).await, LoopStopReason::AwaitingInput);
     assert_eq!(fixture.snapshot()?.goal.status, GoalStatus::Paused);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_edit_cue_is_consumed_by_readback_before_final_response() -> anyhow::Result<()> {
+    let fixture = RuntimeFixture::new().await?;
+    let (mut events, _inputs) = fixture.run(WorkMode::Build).await;
+    let (request, _) = fixture.request().await?;
+    respond(
+        request,
+        "",
+        Some((
+            "write-marker",
+            "write",
+            json!({"file_path":"marker.txt","content":"DONE\n"}),
+        )),
+    );
+    let (request, after_write) = fixture.request().await?;
+    assert!(after_write.to_string().contains(VALIDATION_REMINDER));
+    respond(
+        request,
+        "",
+        Some(("read-marker", "read", json!({"file_path":"marker.txt"}))),
+    );
+    let (request, after_read) = fixture.request().await?;
+    assert!(!after_read.to_string().contains(VALIDATION_REMINDER));
+    assert!(after_read
+        .to_string()
+        .contains("Carry out the authorized task and verify it."));
+    assert_eq!(
+        std::fs::read_to_string(fixture.temp.path().join("marker.txt"))?,
+        "DONE\n"
+    );
+    respond(
+        request,
+        "Wrote marker.txt and read back its contents. No executable tests were run.",
+        None,
+    );
+    assert_eq!(finished(&mut events).await, LoopStopReason::Completed);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn finite_code_budget_reserves_final_response_without_admitting_more_tools(
+) -> anyhow::Result<()> {
+    let fixture = RuntimeFixture::new().await?;
+    let (mut events, _inputs) = fixture.run_with_budget(WorkMode::Build, 2).await;
+    let (request, first) = fixture.request().await?;
+    assert!(has_tool(&first, "write"));
+    respond(
+        request,
+        "",
+        Some((
+            "write-once",
+            "write",
+            json!({"file_path":"marker.txt","content":"DONE\n"}),
+        )),
+    );
+    let (request, last) = fixture.request().await?;
+    assert!(last
+        .get("tools")
+        .is_none_or(|tools| tools.as_array().is_none_or(Vec::is_empty)));
+    assert!(last.to_string().contains("failed or unrun required checks"));
+    // Even a provider that ignores the tool-free surface cannot perform a
+    // new side effect during the reserved final response.
+    respond(
+        request,
+        "Wrote marker.txt. Tests were not run; verification is unfinished.",
+        Some((
+            "forbidden-write",
+            "write",
+            json!({"file_path":"extra.txt","content":"must not execute"}),
+        )),
+    );
+    assert_eq!(finished(&mut events).await, LoopStopReason::Completed);
+    assert_eq!(
+        std::fs::read_to_string(fixture.temp.path().join("marker.txt"))?,
+        "DONE\n"
+    );
+    assert!(!fixture.temp.path().join("extra.txt").exists());
+    assert!(
+        fixture.server.try_recv()?.is_none(),
+        "must not exceed two provider requests"
+    );
+    let messages = SessionManager::new(Database::new(&fixture.services.db_path)?)
+        .load_session_messages(&fixture.session_id)?;
+    assert!(messages
+        .last()
+        .unwrap()
+        .1
+        .contains("verification is unfinished"));
     Ok(())
 }

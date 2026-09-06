@@ -35,6 +35,11 @@ impl RunBudget {
         }
     }
 
+    pub(crate) fn has_one_turn_remaining(self, completed_turns: usize) -> bool {
+        self.max_turns
+            .is_some_and(|max| completed_turns.checked_add(1) == Some(max))
+    }
+
     pub fn is_exhausted(self, completed_turns: usize) -> bool {
         self.max_turns
             .is_some_and(|max_turns| completed_turns >= max_turns)

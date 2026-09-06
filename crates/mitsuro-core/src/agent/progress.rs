@@ -485,7 +485,8 @@ impl ProgressLedger {
         }
 
         if !accepted_evidence.is_empty() {
-            self.seen_unverified_effects.clear();
+            // New observations reset the streak, not command identity. Only a
+            // verified mutation or steering may make an old opaque effect new.
             self.consecutive_unverified_effect_turns = 0;
             self.no_progress_turns = 0;
             return None;
@@ -1468,6 +1469,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn fresh_observation_does_not_recredit_an_opaque_command() {
+        let mut ledger = ProgressLedger::new();
+        let inspect = call("inspect", "bash", json!({"command": "python3 inspect.py"}));
+        let output = result("inspect", "same bytes", false);
+        assert!(ledger
+            .record_turn(
+                std::slice::from_ref(&inspect),
+                std::slice::from_ref(&output)
+            )
+            .is_none());
+        assert!(ledger
+            .record_turn(
+                &[call("read", "read", json!({"file_path": "checkpoint.txt"}))],
+                &[result("read", "READY", false)]
+            )
+            .is_none());
+        for turn in 1..=NO_PROGRESS_TURN_THRESHOLD {
+            let telemetry = ledger
+                .record_turn(
+                    std::slice::from_ref(&inspect),
+                    std::slice::from_ref(&output),
+                )
+                .expect("read evidence must not make a known command new again");
+            assert_eq!(telemetry.no_progress_turns, turn);
+            assert_eq!(telemetry.triggered, turn == NO_PROGRESS_TURN_THRESHOLD);
+        }
+        // Re-running after a verified change is a new state and stays allowed.
+        assert!(ledger
+            .record_turn(
+                &[call("edit", "edit", json!({"file_path": "checkpoint.txt"}))],
+                &[result_with_changed("edit", true)]
+            )
+            .is_none());
+        assert!(ledger.record_turn(&[inspect], &[output]).is_none());
     }
 
     #[test]

@@ -27,7 +27,7 @@ mod title;
 mod tool_surface;
 mod workflow_runtime;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -1281,7 +1281,6 @@ impl AgenticOrchestrator {
         let mut provider_tool_activity_seen = false;
         let mut overflow_compact_retry_attempted = false;
         let mut stale_compaction_reload_attempted = false;
-        let mut mutation_needs_validation = false;
         let mut last_microcompact_history_message_count = conversation.len();
         let mut microcompaction_generation = 0usize;
         let project_dir_key = project_dir
@@ -1484,6 +1483,30 @@ impl AgenticOrchestrator {
                     LoopStopReason::BudgetExhausted,
                 );
                 return;
+            }
+            // A finite interactive Code run spends its last available response
+            // reporting evidence, not starting another tool batch. This stays
+            // inside the configured provider budget; durable Goals and workers
+            // retain their own attempt/outcome rules. A one-turn run still gets
+            // its initial tool-capable response.
+            if loop_guard_landing.is_none()
+                && !active_goal
+                && !context_mode.is_isolated_worker()
+                && session_type == SessionType::Code
+                && iteration > 0
+                && run_budget.budget.has_one_turn_remaining(iteration)
+            {
+                let landing = LoopGuardLanding {
+                    diagnostic: "This is the last response available within this run's configured turn budget. Report what the existing evidence proves, any unfinished work, and any failed or unrun required checks. Reaching the limit does not prove task completion; do not invent verification or promise another action in this run.".into(),
+                    block_goal: false,
+                };
+                conversation.push(ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::text(loop_guard_landing_instruction(&landing))],
+                });
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
+                loop_guard_landing = Some(landing);
             }
             // Soft pressure for unlimited interactive runs only. Goal/project
             // budgets already hard-stop; this keeps long thrash visible without
@@ -3743,11 +3766,6 @@ impl AgenticOrchestrator {
                 role: Role::User,
                 content: tool_results,
             };
-            let validation_reminder_needed = update_validation_state(
-                &mut mutation_needs_validation,
-                &result.tool_calls,
-                &tool_msg.content,
-            );
             conversation.push(tool_msg.clone());
             if let Some(instruction) = progress_replan_instruction {
                 conversation.push(ModelMessage {
@@ -3761,15 +3779,12 @@ impl AgenticOrchestrator {
                     content: vec![Content::text(instruction)],
                 });
             }
-            if !mutation_needs_validation {
-                remove_validation_reminders(&mut conversation);
-            }
-            if validation_reminder_needed && session_type == SessionType::Code {
-                conversation.push(ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::text(VALIDATION_REMINDER.to_string())],
-                });
-            }
+            refresh_validation_reminder(
+                &mut conversation,
+                session_type,
+                &result.tool_calls,
+                &tool_msg.content,
+            );
             context_ledger.update_from_conversation(&conversation);
             persist_context_state(&db_path, &session_id, &context_ledger);
             save_message(&db_path, &session_id, &tool_msg);
@@ -4128,40 +4143,41 @@ fn reload_persisted_conversation(
         .collect()
 }
 
-fn update_validation_state(
-    mutation_needs_validation: &mut bool,
+/// A post-mutation cue lasts for one provider response. It is an advisory,
+/// not a ledger of required checks: consuming it must not depend on recognizing
+/// the next command, or imply that user/Goal verification requirements passed.
+fn refresh_validation_reminder(
+    conversation: &mut Vec<ModelMessage>,
+    session_type: SessionType,
     tool_calls: &[crate::ai::types::AiToolCall],
     tool_results: &[Content],
-) -> bool {
-    let successful_results = tool_results
+) {
+    remove_validation_reminders(conversation);
+    if session_type != SessionType::Code {
+        return;
+    }
+    let changed_ids = tool_results
         .iter()
         .filter_map(|result| match result {
             Content::ToolResult {
                 tool_use_id,
                 output,
                 is_error,
-            } if !is_error.unwrap_or(false) => {
-                Some((tool_use_id.as_str(), trusted_changed(output)))
+            } if !is_error.unwrap_or(false) && trusted_changed(output) == Some(true) => {
+                Some(tool_use_id.as_str())
             }
             _ => None,
         })
-        .collect::<HashMap<_, _>>();
-    let was_pending = *mutation_needs_validation;
-
-    for call in tool_calls
+        .collect::<HashSet<_>>();
+    if tool_calls
         .iter()
-        .filter(|call| successful_results.contains_key(call.id.as_str()))
+        .any(|call| changed_ids.contains(call.id.as_str()) && is_mutation_call(call))
     {
-        if failure::is_validation_call(call) {
-            *mutation_needs_validation = false;
-        } else if successful_results.get(call.id.as_str()) == Some(&Some(true))
-            && is_mutation_call(call)
-        {
-            *mutation_needs_validation = true;
-        }
+        conversation.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::text(VALIDATION_REMINDER.into())],
+        });
     }
-
-    !was_pending && *mutation_needs_validation
 }
 
 fn successful_task_completion_needs_goal_followthrough(
@@ -4320,13 +4336,13 @@ mod tests {
     use super::message_builder::finalize_explore_only_turn;
     use super::no_tool_completion_should_continue;
     use super::provider_options_for_turn;
+    use super::refresh_validation_reminder;
     use super::remove_validation_reminders;
     use super::resolve_project_permission_mode;
     use super::should_retry_empty_stream_interruption;
     use super::split_single_pending_ask_user_call;
     use super::successful_task_completion_needs_goal_followthrough;
     use super::terminal_agent_state_after_interruption;
-    use super::update_validation_state;
     use super::worker_response_commit_terminal_outcome;
     use super::AttemptProgressTracker;
     use super::CanonicalSessionPersistenceBoundary;
@@ -5283,154 +5299,101 @@ mod tests {
     }
 
     #[test]
-    fn successful_mutation_requires_validation_and_successful_check_clears_it() {
+    fn validation_cue_expires_without_claiming_required_checks_passed() {
         let mutation = AiToolCall {
-            id: "edit-1".into(),
+            id: "edit".into(),
             name: "edit".into(),
-            arguments: json!({"file_path": "src/lib.rs"}),
+            arguments: json!({"file_path": "app.py"}),
         };
-        let validation = AiToolCall {
-            id: "check-1".into(),
-            name: "bash".into(),
-            arguments: json!({"command": "cargo test -p mitsuro-core"}),
-        };
-        let success = |id: &str, changed: Option<bool>| Content::ToolResult {
-            tool_use_id: id.into(),
-            output: match changed {
-                Some(changed) => json!({"ok": true, "changed": changed}),
-                None => json!({"ok": true}),
-            },
+        let changed = Content::ToolResult {
+            tool_use_id: "edit".into(),
+            output: json!({"ok": true, "changed": true}),
             is_error: None,
         };
-        let mut pending = false;
-
-        assert!(update_validation_state(
-            &mut pending,
+        let obligation = ModelMessage {
+            role: Role::User,
+            content: vec![Content::text(
+                "Run the required tests; native acceptance remains pending.".into(),
+            )],
+        };
+        let mut conversation = vec![obligation.clone()];
+        refresh_validation_reminder(
+            &mut conversation,
+            SessionType::Code,
             std::slice::from_ref(&mutation),
-            &[success("edit-1", Some(true))],
-        ));
-        assert!(pending);
-        assert!(!update_validation_state(
-            &mut pending,
-            std::slice::from_ref(&validation),
-            &[success("check-1", None)],
-        ));
-        assert!(!pending);
-    }
+            std::slice::from_ref(&changed),
+        );
+        assert_eq!(conversation.len(), 2);
 
-    #[test]
-    fn opaque_or_noop_mutation_results_do_not_invent_validation_work() {
-        let python = AiToolCall {
-            id: "bash-1".into(),
+        // A custom inspection need not match a test-command keyword. Its result
+        // consumes the cue, but neither alters the obligation nor claims success.
+        let inspection = AiToolCall {
+            id: "inspect".into(),
             name: "bash".into(),
-            arguments: json!({"command": "python3 probe.py"}),
+            arguments: json!({"command": "python3 -c 'print(open(\"app.py\", \"rb\").read())'"}),
         };
-        let edit = AiToolCall {
-            id: "edit-1".into(),
-            name: "edit".into(),
-            arguments: json!({"file_path": "src/lib.rs"}),
-        };
-        let result = |id: &str, output| Content::ToolResult {
-            tool_use_id: id.into(),
-            output,
-            is_error: None,
-        };
-        let mut pending = false;
-
-        assert!(!update_validation_state(
-            &mut pending,
-            &[python],
-            &[result("bash-1", json!({"ok": true}))],
-        ));
-        assert!(!pending);
-        assert!(!update_validation_state(
-            &mut pending,
-            &[edit],
-            &[result("edit-1", json!({"ok": true, "changed": false}))],
-        ));
-        assert!(!pending);
-    }
-
-    #[test]
-    fn failed_validation_does_not_clear_pending_mutation() {
-        let validation = AiToolCall {
-            id: "check-1".into(),
-            name: "bash".into(),
-            arguments: json!({"command": "cargo check --workspace"}),
-        };
-        let mut pending = true;
         let failed = Content::ToolResult {
-            tool_use_id: "check-1".into(),
-            output: json!({"error": true}),
+            tool_use_id: "inspect".into(),
+            output: json!({"error": "inspection failed"}),
             is_error: Some(true),
         };
-
-        assert!(!update_validation_state(
-            &mut pending,
-            &[validation],
+        conversation.push(ModelMessage {
+            role: Role::User,
+            content: vec![failed.clone()],
+        });
+        refresh_validation_reminder(
+            &mut conversation,
+            SessionType::Code,
+            &[inspection],
             &[failed],
+        );
+        assert_eq!(conversation.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&conversation[0]).unwrap(),
+            serde_json::to_value(obligation).unwrap()
+        );
+        assert!(matches!(
+            &conversation[1].content[0],
+            Content::ToolResult {
+                is_error: Some(true),
+                ..
+            }
         ));
-        assert!(pending);
+
+        // A subsequent real change independently earns another one-response cue.
+        refresh_validation_reminder(
+            &mut conversation,
+            SessionType::Code,
+            &[mutation],
+            &[changed],
+        );
+        assert_eq!(conversation.len(), 3);
     }
 
     #[test]
-    fn external_validation_reminder_preserves_readback_and_unmet_requirements() {
-        // A read/edit-only run can verify the requested file contents without
-        // having the ability or authority to execute the user's external check.
-        let readback = AiToolCall {
-            id: "readback".into(),
-            name: "read".into(),
-            arguments: json!({"file_path": "calculator.py"}),
+    fn validation_cue_requires_a_successful_proven_mutation() {
+        let call = AiToolCall {
+            id: "edit".into(),
+            name: "edit".into(),
+            arguments: json!({"file_path": "app.py"}),
         };
-        let result = Content::ToolResult {
-            tool_use_id: readback.id.clone(),
-            output: json!({"ok": true, "data": {"content": "return a + b"}}),
-            is_error: None,
-        };
-        let mut pending = true;
-        assert!(!update_validation_state(
-            &mut pending,
-            &[readback],
-            std::slice::from_ref(&result),
-        ));
-        // Inspection must not silently mark required executable checks passed.
-        assert!(pending);
-
-        let conversation = vec![
-            ModelMessage {
-                role: Role::User,
-                content: vec![Content::text(
-                    "Read back the change. The external harness will execute Python.".into(),
-                )],
-            },
-            ModelMessage {
-                role: Role::System,
-                content: vec![Content::text(VALIDATION_REMINDER.into())],
-            },
-            ModelMessage {
-                role: Role::User,
-                content: vec![result],
-            },
-        ];
-        let sections = crate::ai::model_profile::build_system_prompt_sections(
-            crate::ai::providers::ProviderId::Grok,
-            crate::ai::models::ApiFormat::OpenAIResponses,
-            "grok-4.6",
-            &conversation,
-            None,
-            &[],
-        );
-        let reminder = sections.session_context;
-        for obligation in [
-            "available through your authorized tools",
-            "perform requested inspection",
-            "report external checks as pending",
-            "If a required check is unavailable, say so",
-            "do not substitute repeated reads or invent test results",
-            "Explicit required checks and Goal verification criteria remain requirements",
-            "report the change, evidence, and any remaining verification gaps",
+        for (output, is_error) in [
+            (json!({"ok": true}), None),
+            (json!({"changed": false}), None),
+            (json!({"changed": true}), Some(true)),
         ] {
-            assert!(reminder.contains(obligation), "missing: {obligation}");
+            let mut conversation = vec![];
+            refresh_validation_reminder(
+                &mut conversation,
+                SessionType::Code,
+                std::slice::from_ref(&call),
+                &[Content::ToolResult {
+                    tool_use_id: call.id.clone(),
+                    output,
+                    is_error,
+                }],
+            );
+            assert!(conversation.is_empty());
         }
     }
 

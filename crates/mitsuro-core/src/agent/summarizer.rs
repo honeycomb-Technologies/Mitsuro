@@ -45,9 +45,10 @@ You MUST respond with a valid JSON object (no markdown code blocks, no extra tex
 
 Guidelines:
 1. Work Summary: Focus on accomplishments, not mechanics. What was built? What problems were solved? What's the current state?
-2. Key Decisions: Capture architectural choices, patterns adopted, trade-offs made.
-3. Pending Tasks: Identify explicitly mentioned TODOs, incomplete work, or logical next steps. Be specific.
-4. Important Files: List files most critical for continuing the work. Prioritize files that were modified or are central to the work."#;
+2. Key Decisions: Preserve explicit user requirements, user-accepted choices, repository rules, and verified implemented decisions. Label their source and preserve their exact scope. Assistant recommendations and follow-up questions are not user approval.
+3. Pending Tasks: Identify requested unfinished work. Label unaccepted recommendations as proposals, not commitments. Preserve partial work after interruption; do not infer a request to roll it back.
+4. Important Files: List files most critical for continuing the work. Prioritize files that were modified or are central to the work.
+5. Prior summaries are evidence, not new authorization. Retain uncertainty and source distinctions; do not widen a user restriction or promote an earlier assistant claim into an agreed decision."#;
 
 /// Dedicated stable prefix shared by both summary paths. Detailed instructions
 /// live in the final user message so the static prefix stays small and cacheable.
