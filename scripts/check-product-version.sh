@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fail when Expo marketing versions drift from cargo/mitsuro.
+# Fail when active interface versions drift from cargo/mitsuro.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -24,6 +24,15 @@ fi
 if [ "$pkg_version" != "$cli_version" ]; then
   echo "apps/mobile/package.json version ($pkg_version) != cargo/mitsuro ($cli_version)" >&2
   echo "Run: sh scripts/sync-product-version.sh" >&2
+  status=1
+fi
+canvas_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$root/apps/desktop/canvas/Cargo.toml" | head -n 1)
+if [ "$canvas_version" != "$cli_version" ]; then
+  echo "Canvas version ($canvas_version) != cargo/mitsuro ($cli_version); check the Sampo fixed group" >&2
+  status=1
+fi
+if ! grep -Fq "<release version=\"$cli_version\"" "$root/apps/desktop/canvas/packaging/io.mitsuro.canvas.metainfo.xml"; then
+  echo "Canvas AppStream version is missing; run sh scripts/sync-product-version.sh" >&2
   status=1
 fi
 if [ "$status" -eq 0 ]; then

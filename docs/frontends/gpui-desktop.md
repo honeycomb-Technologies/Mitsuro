@@ -1,6 +1,6 @@
-# GPUI desktop status and continuation
+# GPUI desktop status and continuation — ABANDONED
 
-The GPUI desktop client is maintained in `apps/desktop/gpui` on the same Rust
+Abandoned historical implementation. Do not develop, build, or release this target. Use Native Canvas (`apps/desktop/canvas`); the remaining text describes the former implementation.
 workspace as the Mitsuro server and client contracts. The transport boundary is
 `crates/mitsuro-desktop-backend`.
 

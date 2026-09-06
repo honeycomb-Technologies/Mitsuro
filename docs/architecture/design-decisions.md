@@ -75,28 +75,25 @@ This document covers the major architectural decisions behind Mitsuro — what w
 
 **The trade-off:** React Native has overhead compared to native. The web build uses Metro instead of a more optimized web bundler. Some platform features (iOS widgets, Live Activities) still need native code. But the development velocity gain from one codebase far outweighs these costs.
 
-## 6. Why GPUI for Desktop?
+## 6. Why Native Canvas for Desktop?
 
-**The choice:** Implement the canonical desktop workspace directly in Rust with GPUI
-and GPUI Component.
+**The choice:** Build the desktop product in `apps/desktop/canvas`, using GPUI and
+GPUI Component for native spatial interaction. Expo owns mobile and web; the
+CLI/TUI owns terminal interaction.
 
-**Alternatives considered:** Electron, the earlier Tauri/Expo shell, GTK/Qt, and
-remaining TUI-only.
+**Shared authority:** Canvas uses `mitsuro-client` and the Mitsuro server. Agent and
+Hive execution, tool permissions, conversations, resource leases, and recovery
+remain in shared core/server contracts. Native presentation belongs in Canvas.
 
-**Why GPUI won:** The desktop is a product client, not a wrapper around the mobile UI:
+**Retired alternatives:** The earlier dual-backend GPUI application and Tauri/Expo
+desktop shell are abandoned. Their source is historical; new features must not
+split back into those applications. This decision does not remove the GPUI
+framework or the active Expo mobile/web app.
 
-- **Native interaction model** — transcript, approvals, terminal, files, settings,
-  Work, and Scheduled surfaces use GPUI components and Rust state directly.
-- **Two first-class transports** — one normalized product contract can switch between
-  Mitsuro HTTP/SSE and a managed Codex app-server without restarting the app.
-- **Truthful capability boundaries** — unsupported server operations remain disabled
-  or return typed errors; they are never filled with demo records.
-- **Focused web isolation** — WebKitGTK is used only for sandboxed interactive MCP
-  Apps (and an optional browser bridge), not as the main application renderer.
-
-**The trade-off:** GPUI currently makes Linux the packaged desktop target and requires
-native parity work that a shared web shell avoided. The legacy Tauri/Expo source remains
-available for migration evidence, but tagged Linux releases build the GPUI client.
+**The trade-off:** Native Canvas requires its own interaction and platform QA.
+The current packaging path is a Linux alpha archive; primary product status does
+not establish complete GUI acceptance or macOS/Windows desktop packaging.
+See the [desktop transition contract](../frontends/desktop-transition.md).
 
 ## 7. Why WASM for Extensions?
 

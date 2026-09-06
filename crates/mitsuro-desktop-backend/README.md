@@ -1,3 +1,10 @@
+# Abandoned desktop backend adapter
+
+This adapter belongs to the abandoned desktop application and is excluded from
+the active workspace and releases. Native Canvas uses `mitsuro-client` and shared
+core/server contracts. Do not develop this target. The following is historical
+reference; see [desktop transition](../../docs/frontends/desktop-transition.md).
+
 # mitsuro-desktop-backend
 
 Protocol types and agent backends for the Mitsuro desktop shell.

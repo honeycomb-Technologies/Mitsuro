@@ -40,10 +40,10 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
   - `src/updater/`: Auto-updater for dev/release modes.
 - `crates/mitsuro-server`: Self-host API plus embedded web bundle for external clients.
 - `apps/mobile`: Expo app that serves as the primary mobile client and React-based web surface.
-- `apps/desktop/shell`: Tauri wrapper around the Expo web build.
-- `apps/desktop/gpui`: Experimental native GPUI client. It may implement native presentation
-  independently, but must use shared Mitsuro client/server contracts and keep backend-specific
-  behavior behind explicit capabilities.
+- `apps/desktop/canvas`: Primary desktop GUI, using shared Mitsuro contracts.
+- Desktop targets `apps/desktop/{gpui,shell,ui}` and `crates/mitsuro-desktop-backend`
+  are abandoned historical references: do not develop, build, package, or release them.
+- Interfaces: Canvas desktop, Expo mobile/web, CLI/TUI terminal; ACP for editors.
 
 ## Design Patterns
 - **Event Bus**: AgentEventBus as central dispatcher.
@@ -193,15 +193,13 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 ### Apps (`apps/`)
 - Preserve strict separation between app surfaces and core runtime internals.
 - Do not duplicate business logic that already exists in `mitsuro-core` or `mitsuro-server`.
-- Keep desktop and Expo web behavior aligned where features overlap.
+- Keep Canvas and Expo behavior aligned through shared server contracts where features overlap.
 - Keep model-speed and reasoning controls driven by shared client state or server contracts rather than ad-hoc component-local mappings.
 - Notification and Live Activity actions that mutate session state must carry explicit session context; never assume the currently focused chat is the correct target.
 - Keep knowledge surfaces server-backed and shared across modes; reports and memories should behave like one project knowledge substrate rather than separate client-local feature stacks.
-- The shipped Tauri desktop shell remains a host for the Expo web build. The experimental GPUI
-  client is an explicitly approved alternate native surface; keep business logic in shared
-  crates, make unsupported backend capabilities honest, and do not imply that it has replaced
-  the shipped shell without an explicit migration decision.
-- Treat Tauri permissions, deep links, and updater config as security-sensitive.
+- Canvas uses `mitsuro-client` and shared core/server logic. Keep Expo independent of abandoned desktop packages.
+- Preserve installed data, compatibility readers, and service artifacts during retirement.
+- Canvas still requires GUI acceptance and deployment validation; see `docs/frontends/desktop-transition.md`.
 
 ### Mobile and Shared Client Performance (`apps/mobile`, `packages/state`, `packages/ui`)
 - Keep the interaction path independent from background synchronization. Navigation, opening the composer, switching modes, and creating an optimistic chat shell must not await full catalogs, session lists, or transcript hydration.

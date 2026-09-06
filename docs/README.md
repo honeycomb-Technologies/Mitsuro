@@ -27,7 +27,7 @@ audits are intentionally kept out of the public repository.
 | Document | Covers |
 | --- | --- |
 | [Mobile app](frontends/mobile-app.md) | Expo and React Native client |
-| [Desktop app](frontends/desktop-app.md) | Native GPUI dual-backend client |
+| [Desktop app](frontends/desktop-app.md) | Native Canvas desktop GUI |
 | [Shared frontend packages](frontends/shared-packages.md) | API, state, and UI packages |
 | [Web server and API](interfaces/server-api.md) | HTTP, streaming, and client endpoints |
 | [Terminal UI](interfaces/tui.md) | Terminal client behavior |

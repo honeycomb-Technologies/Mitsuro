@@ -1,6 +1,6 @@
-# Desktop Shell (Tauri)
+# Desktop Shell (Tauri) — ABANDONED
 
-Native host for the Mitsuro desktop UI (`apps/desktop/ui`).
+Abandoned historical implementation. Do not develop, build, or release this target. Use Native Canvas (`apps/desktop/canvas`); the remaining text describes the former implementation.
 
 ## Dev Flow
 

@@ -1,6 +1,6 @@
-# Mitsuro GPUI Desktop
+# Mitsuro GPUI Desktop — ABANDONED
 
-Canonical native desktop client built with GPUI and GPUI Component.
+Abandoned historical implementation. Do not develop, build, or release this target. Use Native Canvas (`apps/desktop/canvas`); the remaining text describes the former implementation.
 
 This directory contains the maintained source imported from the earlier standalone
 prototype. The original local directory remains an unchanged forensic snapshot;

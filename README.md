@@ -35,7 +35,7 @@ the Mitsuro server rather than split across client-only copies.
 | --- | --- |
 | **iPhone** | Conversations, code sessions, Hive runs, reports, and remote tools |
 | **Web** | The full Mitsuro workspace in a browser |
-| **Desktop** | A native GPUI workspace for Mitsuro and Codex app-server |
+| **Desktop** | Native Canvas, the primary desktop GUI |
 | **Terminal** | Interactive coding via the modern Mitsuro TUI (`mitsuro` / `krusty` alias) |
 | **Editor** | Connecting compatible editors through ACP |
 
@@ -100,7 +100,7 @@ requirements and client build instructions.
 | --- | --- |
 | [`crates/`](crates/) | Shared Rust engine, command-line app, and server |
 | [`apps/mobile/`](apps/mobile/) | Expo app used by the iPhone and web clients |
-| [`apps/desktop/gpui/`](apps/desktop/gpui/) | Native dual-backend desktop client |
+| [`apps/desktop/canvas/`](apps/desktop/canvas/) | Native Canvas desktop GUI |
 | [`packages/`](packages/) | Shared TypeScript API, state, and UI packages |
 | [`docs/`](docs/README.md) | Stable architecture and contributor documentation |
 

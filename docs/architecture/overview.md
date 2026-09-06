@@ -85,16 +85,16 @@ apps/
   mobile/          Expo/React Native app. Serves as both the mobile app (iOS/Android)
                    and the web frontend that gets embedded into the server binary.
 
-  desktop/gpui/    Native GPUI desktop. Renders product state from the normalized
-                   Mitsuro HTTP/SSE or Codex app-server backend.
+  desktop/canvas/  Canonical native desktop GUI. Consumes shared Mitsuro client/server
+                   contracts for Agent, Hive, resources, and durable recovery.
 
-  desktop/shell/   Legacy Tauri/Expo host retained during desktop migration; it is
-                   not the canonical tagged Linux desktop artifact.
+  desktop/gpui/    Abandoned earlier desktop application, retained as historical source.
+  desktop/shell/   Abandoned Tauri host; desktop/ui is also abandoned.
 
 packages/
-  api/             TypeScript API client shared between mobile and desktop.
-  state/           State management (Zustand) shared between mobile and desktop.
-  ui/              Design tokens and theme definitions shared between mobile and desktop.
+  api/             TypeScript API client shared between mobile and web.
+  state/           State management (Zustand) shared between mobile and web.
+  ui/              Design tokens and theme definitions shared between mobile and web.
 ```
 
 The key insight is that `mitsuro-core` is the shared brain, and everything else is a presentation layer. The CLI, the server, the ACP server, and Hive all import `mitsuro-core` and use the same orchestrator, the same tools, and the same storage.

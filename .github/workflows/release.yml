@@ -74,6 +74,11 @@ jobs:
             exit 1
           fi
 
+          if ! gh api "repos/${GITHUB_REPOSITORY}/contents/apps/desktop/canvas/Cargo.toml?ref=$tag_commit" --silent; then
+            echo "This tag predates Native Canvas. Existing releases remain immutable; use the original release tooling under a separate recovery approval." >&2
+            exit 1
+          fi
+
           comparison=$(gh api "repos/${GITHUB_REPOSITORY}/compare/${tag_commit}...${main_commit}")
           comparison_status=$(jq -er .status <<<"$comparison")
           base_commit=$(jq -er .base_commit.sha <<<"$comparison")
@@ -234,7 +239,7 @@ jobs:
             krusty-${{ matrix.target }}.*
 
   desktop-linux:
-    name: Build Native GPUI Desktop Linux Bundles
+    name: Build Native Canvas Linux Archive
     needs: [release-authority, client-quality]
     runs-on: ubuntu-latest
     steps:
@@ -242,39 +247,48 @@ jobs:
         with:
           ref: ${{ needs.release-authority.outputs.tag_commit }}
 
-      - name: Install desktop bundling dependencies
+      - name: Install Canvas build and metadata dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libudev-dev \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libxkbcommon-x11-dev \
-            rpm
-
-      - name: Test native desktop contracts
+            libudev-dev libgtk-3-dev libxcb1-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libfontconfig1-dev libssl-dev \
+            pkg-config desktop-file-utils appstream jq
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.18
+      - name: Build the companion web surface
+        working-directory: apps/mobile
         run: |
-          cargo test --locked -p mitsuro-desktop-backend --lib
-          cargo test --locked -p mitsuro-gpui-desktop --bin mitsuro-gpui-desktop
-
-      - name: Build native GPUI desktop
-        run: cargo build --release --locked -p mitsuro-gpui-desktop
-
-      - name: Build Linux desktop packages
+          bun install --frozen-lockfile
+          bunx expo export --platform web
+      - name: Test Canvas contracts and packaging
         run: |
-          scripts/package-gpui-desktop.sh \
-            target/release/mitsuro-gpui-desktop \
-            artifacts/gpui-desktop
-          dpkg-deb --info artifacts/gpui-desktop/*.deb
-          rpm -qip artifacts/gpui-desktop/*.rpm
-
-      - name: Upload desktop Linux artifacts
+          cargo test --locked -p mitsuro-canvas
+          apps/desktop/canvas/packaging/test-package-linux-alpha.sh
+          python3 -m unittest scripts/test_check_canvas_release.py scripts/test_interface_versions.py
+      - name: Build Native Canvas and server companion
+        env:
+          MITSURO_CANVAS_SOURCE_COMMIT: ${{ needs.release-authority.outputs.tag_commit }}
+        run: cargo build --release --locked -p mitsuro-canvas -p mitsuro
+      - name: Package the exact Canvas source
+        run: |
+          apps/desktop/canvas/packaging/package-linux-alpha.sh \
+            --canvas-bin "$PWD/target/release/mitsuro-canvas" \
+            --server-bin "$PWD/target/release/mitsuro" \
+            --output-dir "$PWD/artifacts/canvas"
+          python3 scripts/check-canvas-release.py artifacts/canvas "${RELEASE_TAG#v}" "$(git rev-parse HEAD)"
+      - name: Upload Canvas Linux archive and checksum
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: mitsuro-desktop-linux
+          name: mitsuro-canvas-linux
+          if-no-files-found: error
           path: |
-            artifacts/gpui-desktop/*.deb
-            artifacts/gpui-desktop/*.rpm
+            artifacts/canvas/*.tar.gz
+            artifacts/canvas/*.tar.gz.sha256
 
   release:
     name: Create Release
@@ -406,8 +420,7 @@ jobs:
           fi
 
           declare -A expected_by_name=()
-          desktop_deb_count=0
-          desktop_rpm_count=0
+          canvas_archive=$(python3 scripts/check-canvas-release.py artifacts "${TAG_NAME#v}" "$(git rev-parse HEAD)")
           for asset in "${release_assets[@]}"; do
             asset_name=${asset##*/}
             if [[ -n "${expected_by_name[$asset_name]+present}" ]]; then
@@ -430,11 +443,7 @@ jobs:
               krusty-x86_64-pc-windows-msvc.zip.sha256 | \
               mitsuro.rb)
                 ;;
-              *.deb)
-                desktop_deb_count=$((desktop_deb_count + 1))
-                ;;
-              *.rpm)
-                desktop_rpm_count=$((desktop_rpm_count + 1))
+              "$canvas_archive" | "$canvas_archive.sha256")
                 ;;
               *)
                 echo "Unexpected release asset: $asset_name" >&2
@@ -457,6 +466,8 @@ jobs:
             krusty-x86_64-pc-windows-msvc.zip
             krusty-x86_64-pc-windows-msvc.zip.sha256
             mitsuro.rb
+            "$canvas_archive"
+            "$canvas_archive.sha256"
           )
           for asset_name in "${required_assets[@]}"; do
             if [[ -z "${expected_by_name[$asset_name]+present}" ]]; then
@@ -464,10 +475,6 @@ jobs:
               exit 1
             fi
           done
-          if [[ "$desktop_deb_count" -ne 1 || "$desktop_rpm_count" -ne 1 ]]; then
-            echo "Expected exactly one desktop .deb and one .rpm asset." >&2
-            exit 1
-          fi
 
           notes_file=$(mktemp)
           changelog=crates/mitsuro-cli/CHANGELOG.md

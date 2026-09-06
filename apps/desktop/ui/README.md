@@ -1,6 +1,6 @@
-# Mitsuro Desktop UI
+# Mitsuro Desktop UI — ABANDONED
 
-Desktop-first product surface for Mitsuro Desktop.
+Abandoned historical implementation. Do not develop, build, or release this target. Use Native Canvas (`apps/desktop/canvas`); the remaining text describes the former implementation.
 
 - Hosted by `apps/desktop/shell` (Tauri)
 - Reuses production chat/code/hive/settings components from `apps/mobile`

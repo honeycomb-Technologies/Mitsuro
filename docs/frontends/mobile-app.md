@@ -130,7 +130,7 @@ The `hooks/` directory contains ten hooks that manage the app's reactive behavio
 
 ## State Management
 
-Application state is managed with **Zustand**, with store factory functions defined in the shared `packages/state` package. The mobile app imports these factories and instantiates them inside the `StoresProvider`. This architecture means the same state logic is shared with any other frontend (such as the Tauri desktop app) that uses the same packages.
+Application state is managed with **Zustand**, with store factory functions defined in the shared `packages/state` package. The mobile app imports these factories and instantiates them inside the `StoresProvider`. This architecture shares client state between the Expo mobile and web targets. Native Canvas uses Rust client/server contracts.
 
 The five stores are:
 

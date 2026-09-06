@@ -31,6 +31,8 @@ ignore = [
   "examples/*",
   "cargo/mitsuro-native-rust-demo",
   "cargo/grok-auth",
+  "cargo/mitsuro-gpui-desktop",
+  "cargo/mitsuro-desktop-backend",
   "npm/*",
 ]
 fixed = [
@@ -40,8 +42,7 @@ fixed = [
     "cargo/mitsuro-server",
     "cargo/mitsuro-client",
     "cargo/mitsuro-client-state",
-    "cargo/mitsuro-desktop-backend",
-    "cargo/mitsuro-gpui-desktop",
+    "cargo/mitsuro-canvas",
   ],
   [
     "cargo/mitsuro-hive",
