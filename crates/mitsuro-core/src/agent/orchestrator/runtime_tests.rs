@@ -1276,3 +1276,53 @@ async fn finite_code_budget_reserves_final_response_without_admitting_more_tools
         .contains("verification is unfinished"));
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_read_feedback_reaches_provider_and_expires_after_a_change() -> anyhow::Result<()>
+{
+    let fixture = RuntimeFixture::new().await?;
+    std::fs::write(fixture.temp.path().join("evidence.txt"), "original")?;
+    let (mut events, _inputs) = fixture.run(WorkMode::Build).await;
+    for index in 0..2 {
+        let (request, body) = fixture.request().await?;
+        assert!(!body.to_string().contains("[PROGRESS GUARD]"));
+        respond(
+            request,
+            "",
+            Some((
+                if index == 0 {
+                    "first-read"
+                } else {
+                    "repeat-read"
+                },
+                "read",
+                json!({"file_path":"evidence.txt"}),
+            )),
+        );
+    }
+    let (request, warned) = fixture.request().await?;
+    assert!(warned.to_string().contains("specific unresolved question"));
+    assert!(warned.to_string().contains("does not establish success"));
+    respond(
+        request,
+        "The requested correction is still needed.",
+        Some((
+            "change",
+            "write",
+            json!({"file_path":"evidence.txt","content":"corrected"}),
+        )),
+    );
+    let (request, after_change) = fixture.request().await?;
+    assert!(!after_change.to_string().contains("[PROGRESS GUARD]"));
+    respond(
+        request,
+        "Correction written; acceptance tests remain unrun.",
+        None,
+    );
+    assert_eq!(finished(&mut events).await, LoopStopReason::Completed);
+    assert_eq!(
+        std::fs::read_to_string(fixture.temp.path().join("evidence.txt"))?,
+        "corrected"
+    );
+    Ok(())
+}

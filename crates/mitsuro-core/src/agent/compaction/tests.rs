@@ -409,6 +409,21 @@ async fn two_compactions_preserve_bounded_structured_prior_semantics() {
     .await
     .expect("first compaction");
 
+    assert_eq!(
+        first.compacted_conversation[1].role,
+        Role::Assistant,
+        "generated context must not impersonate a user instruction"
+    );
+    assert!(super::cut_point::is_compaction_summary(
+        &first.compacted_conversation[1]
+    ));
+    let mut legacy = first.compacted_conversation[1].clone();
+    legacy.role = Role::User;
+    assert!(
+        super::cut_point::is_compaction_summary(&legacy),
+        "existing checkpoints remain readable"
+    );
+
     let appended = vec![
         text_message(Role::User, "new objective after first compaction"),
         text_message(Role::Assistant, "new work after first compaction"),

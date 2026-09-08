@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::ai::types::{AiToolCall, Content};
+use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::storage::DelegationMode;
 use crate::tools::registry::{
     agent_call_action, agent_call_requests_write, effective_tool_call, tool_policy_for_call,
@@ -94,9 +94,36 @@ impl ProgressGuardTelemetry {
     }
 
     pub fn replan_instruction(&self) -> Option<&'static str> {
-        matches!(self.action, ProgressGuardAction::Replan).then_some(
-            "[PROGRESS GUARD]\nThe last actions repeated existing evidence or produced no state change. Do not repeat the same command with cosmetic variations. Reassess the current evidence, choose a materially different action, finish with the answer if the task is already complete, or ask for missing input.",
-        )
+        (!self.triggered).then_some(if self.guard == "evidence_reuse" {
+            EVIDENCE_REUSE_FEEDBACK
+        } else {
+            PROGRESS_FEEDBACK
+        })
+    }
+}
+
+const EVIDENCE_REUSE_FEEDBACK: &str = "[EVIDENCE REUSE]\nSome observations repeat evidence already in this conversation. Retain new findings, but do not reread unchanged facts merely to reconfirm them. Before further tools, identify a specific unresolved requirement that needs fresh evidence. If requirements are satisfied, report the verified outcome and any limitations. Do not repeat inspection announcements. This advisory does not mark any requirement satisfied.";
+
+const PROGRESS_FEEDBACK: &str = "[PROGRESS GUARD]\nThe last tool batch added no new evidence or verified change. Use the results already in this conversation; do not restart inspection or repeat equivalent checks. If work remains, identify the specific unresolved question and use a check that can resolve it. Otherwise give the final answer with verified results and any unfinished or unavailable checks. This notice does not establish success. Avoid another generic announcement of inspection.";
+
+/// Feedback describes only the latest batch; never leave a stale continuation
+/// instruction in the model context after productive work resumes.
+pub(crate) fn refresh_progress_feedback(
+    messages: &mut Vec<ModelMessage>,
+    telemetry: Option<&ProgressGuardTelemetry>,
+) {
+    messages.retain(|message| {
+        !(message.role == Role::System
+            && message.content.iter().any(|content| {
+                matches!(content,
+            Content::Text { text, .. } if text == PROGRESS_FEEDBACK || text == EVIDENCE_REUSE_FEEDBACK)
+            }))
+    });
+    if let Some(instruction) = telemetry.and_then(ProgressGuardTelemetry::replan_instruction) {
+        messages.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::text(instruction.into())],
+        });
     }
 }
 
@@ -337,6 +364,7 @@ pub struct ProgressLedger {
     seen_evidence: HashSet<String>,
     seen_changed_effects: HashSet<String>,
     seen_unverified_effects: HashSet<String>,
+    seen_unverified_outputs: HashSet<String>,
     outcome_variants: HashMap<String, HashSet<String>>,
     outcome_intents: HashMap<String, HashSet<String>>,
     consecutive_unverified_effect_turns: usize,
@@ -353,6 +381,7 @@ impl ProgressLedger {
         self.seen_evidence.clear();
         self.seen_changed_effects.clear();
         self.seen_unverified_effects.clear();
+        self.seen_unverified_outputs.clear();
         self.outcome_variants.clear();
         self.outcome_intents.clear();
         self.consecutive_unverified_effect_turns = 0;
@@ -381,6 +410,7 @@ impl ProgressLedger {
         let mut action_classes = Vec::new();
         let mut discovered_new_changed_effect = false;
         let mut discovered_new_unverified_effect = false;
+        let mut unverified_effect_has_new_output = false;
 
         for (call, fingerprint) in tool_calls.iter().zip(&fingerprints) {
             let Some(result) = results.get(call.id.as_str()) else {
@@ -425,6 +455,17 @@ impl ProgressLedger {
                     .insert(fingerprint.intent.clone())
             {
                 discovered_new_unverified_effect = true;
+                let (name, _) = effective_tool_call(&call.name, &call.arguments);
+                // Do not infer shell permissions or successful effects from stdout.
+                // Only deny extra novelty to same-output command variants mixed
+                // with already-known observations. Empty-output build steps keep
+                // their existing bounded runway.
+                unverified_effect_has_new_output |= !matches!(name, "bash" | "shell" | "execute")
+                    || extract_output_text(&result.output)
+                        .is_none_or(|text| text.trim().is_empty())
+                    || self
+                        .seen_unverified_outputs
+                        .insert(bash_output_signature(result));
             }
 
             // Intent spelling never proves progress by itself. Successful
@@ -454,13 +495,16 @@ impl ProgressLedger {
             self.outcome_variants.clear();
             self.outcome_intents.clear();
             self.seen_unverified_effects.clear();
+            self.seen_unverified_outputs.clear();
             self.consecutive_unverified_effect_turns = 0;
         }
 
         let mut accepted_evidence = Vec::new();
+        let mut repeated_observations = 0;
         for (intent, evidence, bound_cross_intent_churn) in &evidence_candidates {
             let evidence_identity = format!("{intent}:{evidence}");
             if self.seen_evidence.contains(&evidence_identity) {
+                repeated_observations += 1;
                 continue;
             }
             let variants = self.outcome_variants.entry(intent.clone()).or_default();
@@ -489,15 +533,17 @@ impl ProgressLedger {
             // verified mutation or steering may make an old opaque effect new.
             self.consecutive_unverified_effect_turns = 0;
             self.no_progress_turns = 0;
-            return None;
+            return self.evidence_reuse_advisory(repeated_observations, action_classes);
         }
 
-        if discovered_new_unverified_effect {
+        if discovered_new_unverified_effect
+            && (evidence_candidates.is_empty() || unverified_effect_has_new_output)
+        {
             self.consecutive_unverified_effect_turns =
                 self.consecutive_unverified_effect_turns.saturating_add(1);
             if self.consecutive_unverified_effect_turns <= MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS {
                 self.no_progress_turns = 0;
-                return None;
+                return self.evidence_reuse_advisory(repeated_observations, action_classes);
             }
         }
 
@@ -524,6 +570,25 @@ impl ProgressLedger {
         };
 
         Some(self.telemetry(action_classes, &diagnostic))
+    }
+
+    /// Overlap can be wasteful even when a batch discovers one new fact.
+    /// Preserve that progress and offer reuse guidance, never a terminal stop.
+    fn evidence_reuse_advisory(
+        &self,
+        repeated: usize,
+        classes: Vec<ActionClass>,
+    ) -> Option<ProgressGuardTelemetry> {
+        (repeated >= 2).then(|| ProgressGuardTelemetry {
+            guard: "evidence_reuse".into(),
+            no_progress_turns: 0,
+            threshold: NO_PROGRESS_TURN_THRESHOLD,
+            mutation_epoch: self.mutation_epoch,
+            action_classes: classes,
+            evidence_signature: hash_text("overlapping_observations"),
+            action: ProgressGuardAction::Warn,
+            triggered: false,
+        })
     }
 
     fn telemetry(
@@ -1469,6 +1534,132 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn overlapping_observations_advise_reuse_without_discarding_new_progress() {
+        let mut ledger = ProgressLedger::new();
+        let a = call("a", "read", json!({"file_path":"a"}));
+        let b = call("b", "read", json!({"file_path":"b"}));
+        ledger.record_turn(
+            &[a.clone(), b.clone()],
+            &[result("a", "one", false), result("b", "two", false)],
+        );
+        for index in 0..8 {
+            let fresh = call("new", "read", json!({"file_path":format!("new-{index}")}));
+            let feedback = ledger
+                .record_turn(
+                    &[a.clone(), b.clone(), fresh],
+                    &[
+                        result("a", "one", false),
+                        result("b", "two", false),
+                        result("new", &format!("new evidence {index}"), false),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(feedback.guard, "evidence_reuse");
+            assert_eq!(feedback.no_progress_turns, 0);
+            assert!(!feedback.triggered);
+            assert!(feedback.diagnostic().is_none());
+        }
+        // New facts are retained; seeing the last one again is a duplicate.
+        assert_eq!(
+            ledger
+                .record_turn(
+                    &[call("new", "read", json!({"file_path":"new-7"}))],
+                    &[result("new", "new evidence 7", false)]
+                )
+                .unwrap()
+                .no_progress_turns,
+            1
+        );
+    }
+
+    #[test]
+    fn equivalent_shell_rechecks_cannot_hide_repeated_file_evidence() {
+        let mut ledger = ProgressLedger::new();
+        for index in 0..=NO_PROGRESS_TURN_THRESHOLD {
+            let calls = [
+                call("read", "read", json!({"file_path":"complete.txt"})),
+                call(
+                    "inspect",
+                    "bash",
+                    json!({"command":format!("python3 inspect_{index}.py")}),
+                ),
+            ];
+            let results = [
+                result("read", "DONE", false),
+                result("inspect", "complete.txt: b'DONE\\n'", false),
+            ];
+            let telemetry = ledger.record_turn(&calls, &results);
+            if index == 0 {
+                assert!(telemetry.is_none());
+            } else {
+                let telemetry = telemetry.expect("same evidence is not new work");
+                assert_eq!(telemetry.no_progress_turns, index);
+                assert_eq!(telemetry.triggered, index == NO_PROGRESS_TURN_THRESHOLD);
+                if index == 1 {
+                    assert!(telemetry
+                        .replan_instruction()
+                        .unwrap()
+                        .contains("specific unresolved question"));
+                }
+            }
+        }
+        // A changed read is new evidence even when the shell output is unchanged.
+        assert!(ledger
+            .record_turn(
+                &[call("read", "read", json!({"file_path":"complete.txt"}))],
+                &[result("read", "external change", false)],
+            )
+            .is_none());
+        // Verified edits and explicit steering each rearm the original check.
+        for steering in [false, true] {
+            if steering {
+                ledger.reset_for_steering();
+            } else {
+                ledger.record_turn(
+                    &[call("write", "write", json!({"file_path":"complete.txt"}))],
+                    &[result_with_changed("write", true)],
+                );
+            }
+            assert!(ledger
+                .record_turn(
+                    &[
+                        call("read", "read", json!({"file_path":"complete.txt"})),
+                        call("inspect", "bash", json!({"command":"python3 inspect_0.py"}))
+                    ],
+                    &[
+                        result("read", "DONE", false),
+                        result("inspect", "complete.txt: b'DONE\\n'", false)
+                    ],
+                )
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn progress_feedback_expires_and_never_replaces_user_requirements() {
+        let mut ledger = ProgressLedger::new();
+        let calls = [call("read", "read", json!({"file_path":"app.py"}))];
+        let results = [result("read", "same code", false)];
+        ledger.record_turn(&calls, &results);
+        let warning = ledger.record_turn(&calls, &results).unwrap();
+        let mut messages = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::text(
+                "Run the acceptance tests before claiming success.".into(),
+            )],
+        }];
+        refresh_progress_feedback(&mut messages, Some(&warning));
+        refresh_progress_feedback(&mut messages, Some(&warning));
+        assert_eq!(messages.len(), 2, "feedback must not accumulate");
+        assert!(messages[1].content.iter().any(
+            |c| matches!(c, Content::Text{text,..} if text.contains("does not establish success"))
+        ));
+        refresh_progress_feedback(&mut messages, None);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, Role::User);
     }
 
     #[test]

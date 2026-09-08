@@ -3675,10 +3675,6 @@ impl AgenticOrchestrator {
             let progress_diagnostic = progress_telemetry
                 .as_ref()
                 .and_then(|telemetry| telemetry.diagnostic());
-            let progress_replan_instruction = progress_telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.replan_instruction())
-                .map(ToString::to_string);
             let guard_loop_landing = fail_diagnostic
                 .as_ref()
                 .or(explore_diagnostic.as_ref())
@@ -3736,7 +3732,7 @@ impl AgenticOrchestrator {
                 .map(ToString::to_string);
             let goal_runtime_stop =
                 goal_token_stop.or_else(|| attempt_progress_result.ok().flatten());
-            if let Some(telemetry) = progress_telemetry {
+            if let Some(telemetry) = &progress_telemetry {
                 if telemetry.triggered {
                     tracing::warn!(
                         iteration,
@@ -3758,7 +3754,9 @@ impl AgenticOrchestrator {
                         "Semantic no-progress guard warning"
                     );
                 }
-                let _ = event_tx.send(LoopEvent::ProgressGuard { telemetry });
+                let _ = event_tx.send(LoopEvent::ProgressGuard {
+                    telemetry: telemetry.clone(),
+                });
             }
 
             // Save tool results
@@ -3767,12 +3765,10 @@ impl AgenticOrchestrator {
                 content: tool_results,
             };
             conversation.push(tool_msg.clone());
-            if let Some(instruction) = progress_replan_instruction {
-                conversation.push(ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::text(instruction)],
-                });
-            }
+            super::progress::refresh_progress_feedback(
+                &mut conversation,
+                progress_telemetry.as_ref(),
+            );
             if let Some(instruction) = delegation_nudge_instruction {
                 conversation.push(ModelMessage {
                     role: Role::System,

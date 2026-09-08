@@ -2057,15 +2057,10 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
             );
             continue;
         }
-        if let Some(instruction) = progress_telemetry
-            .as_ref()
-            .and_then(|telemetry| telemetry.replan_instruction())
-        {
-            messages.push(ModelMessage {
-                role: Role::User,
-                content: vec![Content::text(instruction.to_string())],
-            });
-        }
+        crate::agent::progress::refresh_progress_feedback(
+            &mut messages,
+            progress_telemetry.as_ref(),
+        );
         if let Some(completion) = validation_completion {
             info!(
                 task_id = %task_id,

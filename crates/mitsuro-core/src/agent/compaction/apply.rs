@@ -30,7 +30,8 @@ pub(crate) fn build_compacted_conversation(
         content: vec![Content::text(boundary_user_text(&boundary_payload))],
     });
     compacted.push(ModelMessage {
-        role: Role::User,
+        // A generated summary is Agent-authored context, never a new user instruction.
+        role: Role::Assistant,
         content: vec![Content::text(format_summary_message(summary_input))],
     });
 
