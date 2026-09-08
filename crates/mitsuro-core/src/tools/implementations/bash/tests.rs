@@ -588,7 +588,7 @@ async fn worker_goal_shell_hides_sensitive_env_host_files_processes_and_routes()
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn delegated_shell_sandbox_blocks_absolute_writes_outside_its_root() {
+async fn delegated_shell_sandbox_cannot_modify_host_files_outside_its_root() {
     if !linux_bubblewrap_user_namespaces_work() {
         eprintln!(
             "skipping delegated shell sandbox test: bubblewrap user namespaces are unavailable"
@@ -600,6 +600,7 @@ async fn delegated_shell_sandbox_blocks_absolute_writes_outside_its_root() {
     let working_dir = parent.path().join("assigned");
     let outside = parent.path().join("outside.txt");
     std::fs::create_dir(&working_dir).expect("assigned workspace");
+    std::fs::write(&outside, "unchanged").expect("host sentinel");
     let working_dir = working_dir.canonicalize().expect("canonical workspace");
     let ctx = ToolContext {
         working_dir: working_dir.clone(),
@@ -617,8 +618,15 @@ async fn delegated_shell_sandbox_blocks_absolute_writes_outside_its_root() {
             &ctx,
         )
         .await;
-    assert!(escaped.is_error, "{}", escaped.output);
-    assert!(!outside.exists());
+    // /tmp is private writable scratch inside bubblewrap. When the fixture
+    // itself lives under /tmp, this command may succeed in that private mount;
+    // the security invariant is that the host sentinel cannot be modified.
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("host sentinel"),
+        "unchanged",
+        "{}",
+        escaped.output
+    );
 
     let inside = BashTool
         .execute(
