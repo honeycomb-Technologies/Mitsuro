@@ -9038,6 +9038,39 @@ impl Database {
             resource_tx.commit()?;
         }
 
+        // Device enrollment is additive: existing shared tokens and clients
+        // remain valid until an explicit migration retirement decision.
+        if current_version < 81 {
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS paired_devices (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),
+                    token_hash TEXT NOT NULL UNIQUE CHECK(length(token_hash)=64),
+                    created_at INTEGER NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    revoked_at INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS device_pairing_invites (
+                    id TEXT PRIMARY KEY,
+                    secret_hash TEXT NOT NULL UNIQUE CHECK(length(secret_hash)=64),
+                    origin TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    state TEXT NOT NULL DEFAULT 'available'
+                        CHECK(state IN ('available','pending','approved','denied')),
+                    claim_hash TEXT UNIQUE CHECK(claim_hash IS NULL OR length(claim_hash)=64),
+                    device_name TEXT CHECK(device_name IS NULL OR length(device_name) BETWEEN 1 AND 80),
+                    comparison_code TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_device_pairing_expiry ON device_pairing_invites(expires_at);",
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO schema_version(version) VALUES (81)",
+                [],
+            )?;
+            tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -9160,7 +9193,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 80);
+        assert_eq!(database.get_schema_version(), 81);
         database
             .conn()
             .execute(
@@ -9241,7 +9274,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 80);
+        assert_eq!(database.get_schema_version(), 81);
         let create_sql: String = database
             .conn()
             .query_row(

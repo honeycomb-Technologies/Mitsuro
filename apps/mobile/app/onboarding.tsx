@@ -112,6 +112,7 @@ export default function OnboardingScreen() {
             <Text style={[styles.error, { color: t.error }]}>{error}</Text>
           )}
 
+          <Pressable accessibilityRole="button" onPress={() => router.push('/pair')} style={{ paddingVertical: 16 }}><Text style={{ color: theme.colors.foreground }}>Pair using a QR code</Text></Pressable>
           <Pressable
             accessibilityLabel="Connect to server"
             accessibilityRole="button"

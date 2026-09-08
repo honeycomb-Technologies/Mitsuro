@@ -1,3 +1,5 @@
+import { platformFetch } from '../../platform/fetch';
+import { authorizeDeviceStream } from '@mitsuro/api';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import {
@@ -551,8 +553,11 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
     void runNavigationAction({ type: 'viewport', mode });
   }, [runNavigationAction, selected?.viewport_mode]);
 
-  const streamHtml = useMemo(() => {
-    if (!client || !selected?.stream_url) return null;
+  const [streamHtml, setStreamHtml] = useState<string | null>(null);
+  useEffect(() => {
+    const abort = new AbortController(); setStreamHtml(null);
+    const load = async () => {
+    if (!client || !selected?.stream_url) return;
     try {
       const url = client.browserStreamUrl(
         selected.stream_url,
@@ -560,13 +565,15 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
         browserClientId,
         hasSelectedControl ? selectedLease ?? undefined : undefined,
       );
-      return streamDocument(
-        withBrowserStreamAuthQuery(url, serverToken),
-        hasSelectedControl,
-      );
+      const authorized = serverToken?.startsWith('mitsuro_device_')
+        ? await authorizeDeviceStream(url, serverToken, abort.signal, platformFetch as typeof fetch | undefined)
+        : withBrowserStreamAuthQuery(url, serverToken);
+      if (!abort.signal.aborted) setStreamHtml(streamDocument(authorized, hasSelectedControl));
     } catch {
-      return null;
+      if (!abort.signal.aborted) setError('Stream authorization failed. Reopen the browser tab to retry.');
     }
+    };
+    void load(); return () => abort.abort();
   }, [
     browserClientId,
     client,

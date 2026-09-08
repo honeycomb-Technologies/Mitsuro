@@ -1,3 +1,4 @@
+import { pairingOrigin, type PairingInvitation, type PairingOverview, type PairedDevice } from "./pairing";
 import { normalizeCitations } from "./citations";
 import type {
 	AgentMemory,
@@ -280,7 +281,19 @@ export class MitsuroClient {
 	constructor(config: MitsuroClientConfig) {
 		this.baseUrl = config.baseUrl.replace(/\/+$/, "");
 		this.token = config.token;
-		this.fetchFn = config.fetchImpl ?? globalThis.fetch.bind(globalThis);
+		const fetchImpl = config.fetchImpl ?? globalThis.fetch.bind(globalThis);
+		if (this.token?.startsWith("mitsuro_device_")) {
+			const origin = pairingOrigin(this.baseUrl);
+			this.fetchFn = (input, options) => {
+				const destination = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, origin);
+				if (destination.origin !== origin || destination.username || destination.password) {
+					return Promise.reject(new Error("Device credentials cannot be sent to another server"));
+				}
+				return fetchImpl(input, { ...options, redirect: "error", credentials: "omit" });
+			};
+		} else {
+			this.fetchFn = fetchImpl;
+		}
 		this.requestObserver = config.requestObserver;
 		this.resolvedHiveTransport =
 			config.hiveTransport === "legacy" || config.hiveTransport === "canonical"
@@ -573,14 +586,18 @@ export class MitsuroClient {
 	}
 
 	// Health & Auth
-	async checkHealth(): Promise<boolean> {
+	async checkHealth(signal?: AbortSignal): Promise<boolean> {
 		const diagnosticName = "api.health";
 		const startedAt = monotonicNow();
 		this.observeRequest(diagnosticName, "start");
 		try {
-			const resp = await this.fetchFn(`${this.baseUrl}/health`, {
+			let resp = await this.fetchFn(`${this.baseUrl}/health`, {
+				signal,
 				headers: this.headers(),
 			});
+			if (resp.ok && this.token?.startsWith("mitsuro_device_")) {
+				resp = await this.fetchFn(`${this.baseUrl}/api/device-session`, { signal, headers: this.headers() });
+			}
 			this.observeRequest(
 				diagnosticName,
 				resp.ok ? "complete" : "error",
@@ -957,9 +974,25 @@ export class MitsuroClient {
 		return this.request(`/files?path=${encodeURIComponent(path)}`);
 	}
 
+	async listPairedDevices(signal?: AbortSignal): Promise<PairingOverview> {
+		return this.request("/device-pairing", { signal });
+	}
+	async createPairingInvitation(origin: string, signal?: AbortSignal): Promise<PairingInvitation> {
+		return this.request("/device-pairing/invitations", { method: "POST", body: JSON.stringify({ origin }), signal });
+	}
+	async approvePairing(id: string): Promise<PairedDevice> {
+		return this.request(`/device-pairing/invitations/${encodeURIComponent(id)}/approve`, { method: "POST" });
+	}
+	async cancelPairing(id: string): Promise<{ ok: boolean }> {
+		return this.request(`/device-pairing/invitations/${encodeURIComponent(id)}`, { method: "DELETE" });
+	}
+	async revokePairedDevice(id: string): Promise<{ ok: boolean }> {
+		return this.request(`/device-pairing/devices/${encodeURIComponent(id)}`, { method: "DELETE" });
+	}
+
 	// Server
-	async getServerAccess(): Promise<ServerAccessResponse> {
-		return this.request("/server/access");
+	async getServerAccess(signal?: AbortSignal): Promise<ServerAccessResponse> {
+		return this.request("/server/access", { signal });
 	}
 
 	// Preview / Ports

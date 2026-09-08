@@ -20,6 +20,7 @@ mod database;
 mod database_tests;
 mod delegated_runs;
 mod delegation;
+pub mod device_access;
 mod episodes;
 pub mod expo_push_devices;
 mod file_activity;

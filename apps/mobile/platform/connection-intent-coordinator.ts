@@ -12,6 +12,7 @@ export interface CredentialOperationQueue {
 
 export interface ConnectionIntentCoordinator {
   begin(): ConnectionIntent;
+  current(): ConnectionIntent;
   isCurrent(intent: ConnectionIntent): boolean;
   runCredentialOperation<T>(operation: () => Promise<T>): Promise<T>;
   runCurrentCredentialOperation<T>(
@@ -64,6 +65,8 @@ export function createConnectionIntentCoordinator(
       generation += 1;
       return { generation };
     },
+
+    current: () => ({ generation }),
 
     isCurrent,
 

@@ -141,7 +141,14 @@
           }
         }
       ],
-      "./plugins/withGhosttyHostAccessory"
+      "./plugins/withGhosttyHostAccessory",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Mitsuro to scan a server pairing QR code",
+          "recordAudioAndroid": false
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

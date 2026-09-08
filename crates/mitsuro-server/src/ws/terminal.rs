@@ -83,13 +83,15 @@ impl OutputEncoding {
     }
 }
 
-pub async fn handler(
+pub(crate) async fn handler(
+    identity: Option<axum::Extension<crate::device_access::DeviceIdentity>>,
     ws: WebSocketUpgrade,
     user: Option<CurrentUser>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     let user_id = user.and_then(|current_user| current_user.0.user_id);
-    ws.on_upgrade(move |socket| handle_socket(socket, state, user_id))
+    let guard = crate::device_access::DeviceConnectionGuard::new(&state, identity.map(|i| i.0));
+    ws.on_upgrade(move |socket| handle_socket(socket, state, user_id, guard))
 }
 
 async fn send_ws_error(sink: &mut futures::stream::SplitSink<WebSocket, Message>, msg: &str) {
@@ -114,7 +116,12 @@ fn terminal_command(shell: &str, working_dir: &Path) -> CommandBuilder {
     cmd
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, user_id: Option<String>) {
+async fn handle_socket(
+    socket: WebSocket,
+    state: AppState,
+    user_id: Option<String>,
+    mut guard: crate::device_access::DeviceConnectionGuard,
+) {
     let (mut ws_sink, mut ws_stream) = socket.split();
     let pty_system = native_pty_system();
 
@@ -130,7 +137,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: Option<Strin
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let cmd = terminal_command(&shell, &state.working_dir);
 
-    let child = match pair.slave.spawn_command(cmd) {
+    let mut child = match pair.slave.spawn_command(cmd) {
         Ok(child) => child,
         Err(e) => {
             tracing::error!("Failed to spawn shell: {}", e);
@@ -281,13 +288,31 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: Option<Strin
         })
     };
 
+    // Keep revocation independent of a PTY write blocked by the child. Closing
+    // the sender and killing this socket-owned child also releases that write.
+    let sender_abort = ws_sender_handle.abort_handle();
+    let mut killer = child.clone_killer();
+    let (revoked_tx, mut revoked_rx) = tokio::sync::oneshot::channel();
+    let revocation_watchdog = tokio::spawn(async move {
+        guard.revoked().await;
+        sender_abort.abort();
+        let _ = killer.kill();
+        let _ = revoked_tx.send(());
+    });
     let master = Arc::new(tokio::sync::Mutex::new(pair.master));
+    let mut device_revoked = false;
     {
         let master = Arc::clone(&master);
         let ws_sink = Arc::clone(&ws_sink);
         let output_encoding = Arc::clone(&output_encoding);
         let mut writer = writer;
-        while let Some(Ok(msg)) = ws_stream.next().await {
+        loop {
+            let msg = tokio::select! {
+                biased;
+                _ = &mut revoked_rx => { device_revoked = true; break; },
+                msg = ws_stream.next() => msg,
+            };
+            let Some(Ok(msg)) = msg else { break };
             match msg {
                 Message::Text(ref text) if text.len() > MAX_INPUT_SIZE => {
                     tracing::warn!(
@@ -381,6 +406,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, user_id: Option<Strin
         }
     }
 
+    revocation_watchdog.abort();
+    if device_revoked {
+        // Legacy terminals belong to this socket. Stop their detached sender
+        // and child too, so revocation cannot leave an output-only attachment.
+        ws_sender_handle.abort();
+        let _ = child.kill();
+    }
     drop(output_tx);
     // PTY reader runs blocking I/O that cannot be gracefully cancelled, so abort is appropriate.
     reader_handle.abort();

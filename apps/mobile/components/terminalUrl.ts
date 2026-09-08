@@ -1,3 +1,5 @@
+import { platformFetch } from '../platform/fetch';
+import { authorizeDeviceStream } from '@mitsuro/api';
 /**
  * Build the terminal WebSocket URL for the current connection.
  *
@@ -21,4 +23,9 @@ export function buildTerminalWebSocketUrl(
   }
 
   return `${base}/ws/terminal?token=${encodeURIComponent(trimmedToken)}`;
+}
+
+export async function authorizedTerminalWebSocketUrl(serverUrl: string, token?: string | null, signal?: AbortSignal): Promise<string> {
+  if (token?.startsWith('mitsuro_device_')) return authorizeDeviceStream(buildTerminalWebSocketUrl(serverUrl), token, signal, platformFetch as typeof fetch | undefined);
+  return buildTerminalWebSocketUrl(serverUrl, token);
 }

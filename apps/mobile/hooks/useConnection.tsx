@@ -1,3 +1,4 @@
+import { AppState } from "react-native";
 import {
   createContext,
   type ReactNode,
@@ -368,6 +369,56 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     }
     if (connectionIntents.isCurrent(intent)) setLoaded(true);
   }, [connectionIntents, doConnect]);
+
+  useEffect(() => {
+    if (
+      !client || status !== "connected" ||
+      !serverToken?.startsWith("mitsuro_device_")
+    ) return;
+    const intent = connectionIntents.current();
+    let stopped = false;
+    let checking = false;
+    let request: AbortController | null = null;
+    let timer: ReturnType<typeof setTimeout>;
+    const check = async () => {
+      if (stopped || checking || AppState.currentState !== "active") return;
+      checking = true;
+      request = new AbortController();
+      const abort = request;
+      const timeout = setTimeout(() => abort.abort(), 10_000);
+      try {
+        const healthy = await client.checkHealth(abort.signal);
+        if (
+          !stopped && AppState.currentState === "active" &&
+          connectionIntents.isCurrent(intent) && !healthy
+        ) {
+          setClient(null);
+          setServerToken(null);
+          setRecoveryConnectionScope(null);
+          setStatus("error");
+          setError(
+            "Connection lost or device access revoked. Reconnect or pair again.",
+          );
+        }
+      } finally {
+        clearTimeout(timeout);
+        checking = false;
+        if (!stopped) timer = setTimeout(check, 30_000);
+      }
+    };
+    timer = setTimeout(check, 30_000);
+    const lifecycle = AppState.addEventListener("change", (state) => {
+      clearTimeout(timer);
+      if (state === "active") void check();
+      else request?.abort();
+    });
+    return () => {
+      stopped = true;
+      request?.abort();
+      clearTimeout(timer);
+      lifecycle.remove();
+    };
+  }, [client, status, serverToken, connectionIntents]);
 
   return (
     <ConnectionContext.Provider

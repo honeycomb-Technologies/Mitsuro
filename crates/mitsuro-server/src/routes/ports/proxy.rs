@@ -130,9 +130,16 @@ async fn proxy_request(input: ProxyRequest) -> Result<Response<axum::body::Body>
                 "WebSocket upgrade requested but upgrade failed".to_string(),
             ));
         };
+        let guard = crate::device_access::DeviceConnectionGuard::new(
+            &state,
+            request
+                .extensions()
+                .get::<crate::device_access::DeviceIdentity>()
+                .cloned(),
+        );
         let upstream_ws_url = format!("ws://127.0.0.1:{}{}", port, upstream_path);
         return Ok(ws
-            .on_upgrade(move |socket| proxy_websocket(socket, upstream_ws_url))
+            .on_upgrade(move |socket| guard.run(proxy_websocket(socket, upstream_ws_url)))
             .into_response());
     }
 

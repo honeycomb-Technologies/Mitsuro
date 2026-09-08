@@ -10,3 +10,5 @@ export {
 } from './client';
 export * from './compatibility';
 export * from './thinking';
+
+export * from './pairing';

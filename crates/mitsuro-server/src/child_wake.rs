@@ -2368,6 +2368,7 @@ mod tests {
             )),
             agent_streams: Arc::new(RwLock::new(crate::agent_streams::AgentStreamHub::default())),
             delegated_state: Arc::new(RwLock::new(HashMap::new())),
+            device_access: Default::default(),
             remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                 enabled: true,
                 token: String::new(),

@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useState,
+  useRef,
 } from "react";
 import {
   createGitStore,
@@ -56,6 +57,7 @@ interface StoresProviderProps {
   client: MitsuroClient | null;
   recoveryConnectionScope: string | null;
   children: ReactNode;
+  onHandoffComplete?: () => void;
 }
 
 interface ScopedStoreGraph {
@@ -136,7 +138,10 @@ export function StoresProvider({
   client,
   recoveryConnectionScope,
   children,
+  onHandoffComplete,
 }: StoresProviderProps) {
+  const handoffCompleteRef = useRef(onHandoffComplete);
+  handoffCompleteRef.current = onHandoffComplete;
   const [scopedStoreGraph, setScopedStoreGraph] = useState<
     ScopedStoreGraph | null
   >(null);
@@ -150,6 +155,10 @@ export function StoresProvider({
   const isConnectionHandoff = Boolean(
     client && recoveryConnectionScope && !stores,
   );
+
+  useEffect(() => {
+    if (stores) handoffCompleteRef.current?.();
+  }, [stores]);
 
   useEffect(() => {
     let cancelled = false;

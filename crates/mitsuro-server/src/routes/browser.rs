@@ -1040,6 +1040,8 @@ async fn run_actions(
 }
 
 async fn stream_session(
+    State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::device_access::DeviceIdentity>>,
     CurrentUser(user): CurrentUser,
     Path(id): Path<String>,
     Query(query): Query<StreamQuery>,
@@ -1083,7 +1085,10 @@ async fn stream_session(
         record.state.read().await.stream_port.ok_or_else(|| {
             api_error(StatusCode::CONFLICT, "Browser live stream is not available")
         })?;
-    Ok(upgrade.on_upgrade(move |socket| proxy_stream(socket, stream_port, record, control_token)))
+    let guard = crate::device_access::DeviceConnectionGuard::new(&state, identity.map(|i| i.0));
+    Ok(upgrade.on_upgrade(move |socket| {
+        guard.run(proxy_stream(socket, stream_port, record, control_token))
+    }))
 }
 
 async fn proxy_stream(

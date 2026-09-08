@@ -13,7 +13,7 @@ import * as Haptics from "../../platform/haptics";
 import * as Clipboard from "../../platform/clipboard";
 import { useConnection } from "../../hooks/useConnection";
 import { useThemeContext } from "../../hooks/useTheme";
-import { buildTerminalWebSocketUrl } from "../terminalUrl";
+import { authorizedTerminalWebSocketUrl } from "../terminalUrl";
 import { TerminalQuickBar } from "../toolbox/TerminalQuickBar";
 
 const MAX_RECONNECT_ATTEMPTS = 8;
@@ -329,6 +329,7 @@ function TerminalPane({
   const lastColsRef = useRef(0);
   const lastRowsRef = useRef(0);
   const manualDisconnectRef = useRef(false);
+  const ticketRequestRef = useRef<AbortController | null>(null);
 
   const sendQuickInput = useCallback((data: string) => {
     const ws = wsRef.current;
@@ -453,7 +454,7 @@ function TerminalPane({
   }, []);
 
   const connectToTerminal = useCallback(
-    (isReconnect: boolean) => {
+    async (isReconnect: boolean) => {
       if (!terminalRef.current || !serverUrlRef.current) return;
 
       manualDisconnectRef.current = false;
@@ -479,10 +480,12 @@ function TerminalPane({
         onStatusChange(tab.id, { connected: false, error: null });
       }
 
-      const wsUrl = buildTerminalWebSocketUrl(
-        serverUrlRef.current,
-        serverTokenRef.current,
-      );
+      ticketRequestRef.current?.abort();
+      const ticketRequest = new AbortController(); ticketRequestRef.current = ticketRequest;
+      let wsUrl: string;
+      try { wsUrl = await authorizedTerminalWebSocketUrl(serverUrlRef.current, serverTokenRef.current, ticketRequest.signal); }
+      catch { if (!ticketRequest.signal.aborted) onStatusChange(tab.id, { connected: false, error: "Stream authorization failed. Retry connection." }); return; }
+      if (ticketRequest.signal.aborted || !terminalRef.current) return;
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";
       wsRef.current = ws;
@@ -708,6 +711,7 @@ function TerminalPane({
     return () => {
       cancelled = true;
       manualDisconnectRef.current = true;
+      ticketRequestRef.current?.abort();
       clearReconnectTimer();
       clearStableResetTimer();
       clearHeartbeat();

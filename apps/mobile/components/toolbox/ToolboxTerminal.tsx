@@ -9,7 +9,7 @@ import * as Clipboard from '../../platform/clipboard';
 import { useThemeContext } from '../../hooks/useTheme';
 import { useConnection } from '../../hooks/useConnection';
 import { Terminal } from '../desktop/Terminal';
-import { buildTerminalWebSocketUrl } from '../terminalUrl';
+import { authorizedTerminalWebSocketUrl } from '../terminalUrl';
 import { TerminalQuickBar } from './TerminalQuickBar';
 
 type NativeTerminalViewProps = TerminalViewProps & { ref?: Ref<TerminalViewRef> };
@@ -186,6 +186,7 @@ function NativeGhosttyPane({ serverToken, serverUrl, tab, themeColors, onStatusC
   const reconnectAttemptsRef = useRef(0);
   const lastSizeRef = useRef({ cols: 80, rows: 24 });
   const manualCloseRef = useRef(false);
+  const ticketRequestRef = useRef<AbortController | null>(null);
   const outputQueueRef = useRef<Array<{ data: string; base64: boolean }>>([]);
   const outputQueueBytesRef = useRef(0);
   const outputWriteActiveRef = useRef(false);
@@ -242,13 +243,19 @@ function NativeGhosttyPane({ serverToken, serverUrl, tab, themeColors, onStatusC
     }, HEARTBEAT_TIMEOUT_MS);
   }, []);
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     const current = socketRef.current;
     if (current?.readyState === WebSocket.OPEN || current?.readyState === WebSocket.CONNECTING) return;
     clearTimers();
     manualCloseRef.current = false;
     onStatusChange(tab.id, { connected: false, error: null });
-    const socket = new WebSocket(buildTerminalWebSocketUrl(serverUrl, serverToken));
+    ticketRequestRef.current?.abort();
+    const ticketRequest = new AbortController(); ticketRequestRef.current = ticketRequest;
+    let url: string;
+    try { url = await authorizedTerminalWebSocketUrl(serverUrl, serverToken, ticketRequest.signal); }
+    catch { if (!ticketRequest.signal.aborted) onStatusChange(tab.id, { connected: false, error: 'Stream authorization failed. Retry connection.' }); return; }
+    if (ticketRequest.signal.aborted || !mountedRef.current) return;
+    const socket = new WebSocket(url);
     socketRef.current = socket;
 
     socket.onopen = () => {
@@ -302,6 +309,7 @@ function NativeGhosttyPane({ serverToken, serverUrl, tab, themeColors, onStatusC
     connect();
     return () => {
       mountedRef.current = false;
+      ticketRequestRef.current?.abort();
       manualCloseRef.current = true;
       clearTimers();
       outputQueueRef.current = [];

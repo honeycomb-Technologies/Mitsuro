@@ -158,3 +158,18 @@ Deno.test("Reconnect read becomes stale when Disconnect is newer", async () => {
     "an already-started read may finish, but only Disconnect may publish",
   );
 });
+
+Deno.test("liveness snapshots observe an intent without superseding it", () => {
+  const coordinator = createConnectionIntentCoordinator();
+  const connection = coordinator.begin();
+  const liveness = coordinator.current();
+  assert(
+    coordinator.isCurrent(connection) && coordinator.isCurrent(liveness),
+    "reading current intent must not invalidate credential persistence",
+  );
+  coordinator.begin();
+  assert(
+    !coordinator.isCurrent(liveness),
+    "an old liveness result must not clear a newer connection",
+  );
+});

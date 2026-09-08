@@ -65,6 +65,7 @@ type SessionPresenceMap = presence::SessionPresenceMap;
 type DelegatedStateMap = HashMap<String, Vec<types::DelegatedToolStateResponse>>;
 pub mod apns;
 pub mod auth;
+pub(crate) mod device_access;
 pub mod error;
 pub mod hive_execution_host;
 pub mod hive_runtime;
@@ -203,6 +204,7 @@ pub struct AppState {
     pub delegated_state: Arc<RwLock<DelegatedStateMap>>,
     /// Cached remote-access authority configuration.
     pub remote_access: Arc<RwLock<remote_access::RemoteAccessConfig>>,
+    pub(crate) device_access: Arc<device_access::DeviceAccessRuntime>,
     /// Count of currently active agent SSE streams.
     pub active_agent_streams: Arc<AtomicUsize>,
     /// Peak observed RSS bytes for this server process.
@@ -650,6 +652,7 @@ async fn build_app_state_with_hive_runtime(
         agent_streams: Arc::new(RwLock::new(agent_streams::AgentStreamHub::default())),
         delegated_state: Arc::new(RwLock::new(HashMap::new())),
         remote_access,
+        device_access: Default::default(),
         active_agent_streams: Arc::new(AtomicUsize::new(0)),
         peak_rss_bytes: Arc::new(AtomicU64::new(0)),
         peak_virtual_bytes: Arc::new(AtomicU64::new(0)),
@@ -720,7 +723,9 @@ async fn build_router_with_runtime_mode(
     let public_routes = if isolated_evaluation {
         public_routes
     } else {
-        public_routes.merge(routes::oauth::callback_router())
+        public_routes
+            .merge(routes::oauth::callback_router())
+            .merge(routes::device_pairing::public_router())
     };
 
     let app = public_routes

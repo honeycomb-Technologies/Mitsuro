@@ -1,3 +1,5 @@
+import { router } from 'expo-router';
+import { receivePairingIntent, requestPairingScreen, clearPairingIntent } from '../platform/pairing-intent';
 import { useEffect, useRef } from 'react';
 import * as Linking from '../platform/linking';
 import { parseConnectionLaunchUrl } from '../platform/identity-compatibility';
@@ -36,7 +38,12 @@ export function useDeepLink() {
     if (handledRef.current === url) return;
     handledRef.current = url;
 
+    if (receivePairingIntent(url)) { router.replace('/pair'); return; }
+    try {
+      const initial = new URL(url);
+      if ((initial.protocol === 'http:' || initial.protocol === 'https:') && initial.pathname === '/pair') requestPairingScreen();
+    } catch { /* Legacy readers handle their own URL formats. */ }
     const launch = parseConnectionLaunchUrl(url);
-    if (launch) connectRef.current(launch.serverUrl, launch.token);
+    if (launch) { clearPairingIntent(); connectRef.current(launch.serverUrl, launch.token); }
   }
 }

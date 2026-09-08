@@ -1,3 +1,4 @@
+import { DevicePairingSection } from "./DevicePairingSection";
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, Text, View } from "react-native";
 import {
@@ -627,6 +628,7 @@ export function SettingsPanel({
 					onReconnect={() => void reconnect()}
 					onDisconnect={handleDisconnect}
 				/>
+				{active && openSection === "connection" && <DevicePairingSection />}
 			</SettingsDisclosure>
 
 			<SettingsDisclosure

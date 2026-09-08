@@ -1084,6 +1084,8 @@ fn optional_control_lease_header(headers: &HeaderMap) -> Result<Option<&str>, Ap
 }
 
 async fn stream_terminal(
+    State(state): State<AppState>,
+    identity: Option<axum::Extension<crate::device_access::DeviceIdentity>>,
     CurrentUser(user): CurrentUser,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<AttachQuery>,
@@ -1092,8 +1094,11 @@ async fn stream_terminal(
     let session = manager()
         .owned_session(&OwnerKey::from_user(&user), &id)
         .await?;
+    let guard = crate::device_access::DeviceConnectionGuard::new(&state, identity.map(|i| i.0));
     Ok(upgrade
-        .on_upgrade(move |socket| handle_terminal_socket(socket, session, query.after_offset))
+        .on_upgrade(move |socket| {
+            guard.run(handle_terminal_socket(socket, session, query.after_offset))
+        })
         .into_response())
 }
 

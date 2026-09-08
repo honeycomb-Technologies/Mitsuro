@@ -97,6 +97,73 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Response {
+    let supplied_token = bearer_token(request.headers())
+        .map(str::to_owned)
+        .or_else(|| websocket_query_token(request.headers(), request.uri()));
+    if let Some(token) = supplied_token.as_deref().filter(|value| {
+        value.starts_with(mitsuro_core::storage::device_access::DEVICE_TOKEN_PREFIX)
+            || value.starts_with(mitsuro_core::storage::device_access::STREAM_TICKET_PREFIX)
+    }) {
+        // A supplied device credential must never fall through to implicit
+        // loopback administrator access, even when invalid or revoked.
+        if !state.remote_access.read().await.enabled {
+            return (StatusCode::FORBIDDEN, "Remote API access is disabled").into_response();
+        }
+        if request.headers().contains_key(USER_ID_HEADER)
+            || request.headers().contains_key(WORKSPACE_DIR_HEADER)
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                "Device credentials cannot select a user or workspace",
+            )
+                .into_response();
+        }
+        if addr.ip().is_loopback()
+            && request
+                .headers()
+                .get(header::HOST)
+                .and_then(|h| h.to_str().ok())
+                .is_some_and(is_local_host)
+        {
+            if let Err(rejection) = authorize_local_browser_origin(request.headers()) {
+                return rejection.into_response();
+            }
+        }
+        let device_id = match state.device_access.with_store(&state.db_path, |s| {
+            if token.starts_with(mitsuro_core::storage::device_access::STREAM_TICKET_PREFIX) {
+                if websocket_query_token(request.headers(), request.uri()).is_none() {
+                    return Ok(None);
+                }
+                s.consume_stream_ticket(token, request.uri().path(), crate::device_access::now())
+            } else if bearer_token(request.headers()).is_some() {
+                s.authenticate(token, crate::device_access::now())
+            } else {
+                Ok(None)
+            }
+        }) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    "Device credential is invalid or revoked",
+                )
+                    .into_response()
+            }
+            Err(rejection) => return rejection.into_response(),
+        };
+        if !device_request_allowed(request.method(), request.uri().path()) {
+            return (
+                StatusCode::FORBIDDEN,
+                "This action requires the server owner",
+            )
+                .into_response();
+        }
+        let identity = crate::device_access::DeviceIdentity(device_id);
+        request.extensions_mut().insert(identity.clone());
+        request.extensions_mut().insert(AuthenticatedUser::local());
+        let response = next.run(request).await;
+        return crate::device_access::guard_sse(&state, identity, response);
+    }
     let surface =
         match authorize_request_surface(&state, addr, request.headers(), request.uri()).await {
             Ok(surface) => surface,
@@ -122,6 +189,31 @@ pub async fn auth_middleware(
 
     request.extensions_mut().insert(user);
     next.run(request).await
+}
+
+fn device_request_allowed(method: &axum::http::Method, path: &str) -> bool {
+    let under = |prefix: &str| {
+        path == prefix
+            || path
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    if under("/api/device-pairing") {
+        return false;
+    }
+    if method != axum::http::Method::GET
+        && (under("/api/server/access")
+            || under("/api/credentials")
+            || under("/api/auth/oauth")
+            || under("/api/extensions")
+            || under("/api/mcp")
+            || under("/api/plugins")
+            || under("/api/skills")
+            || under("/api/hooks"))
+    {
+        return false;
+    }
+    true
 }
 
 async fn authorize_request_surface(
@@ -463,7 +555,7 @@ mod tests {
         assert_eq!(result, project_dir);
     }
 
-    fn test_state() -> AppState {
+    pub(super) fn test_state() -> AppState {
         let temp_dir =
             std::env::temp_dir().join(format!("mitsuro-auth-test-{}", uuid::Uuid::new_v4()));
         let db_path = temp_dir.join("test.db");
@@ -491,6 +583,7 @@ mod tests {
             )),
             agent_streams: Arc::new(RwLock::new(crate::agent_streams::AgentStreamHub::default())),
             delegated_state: Arc::new(RwLock::new(HashMap::new())),
+            device_access: Default::default(),
             remote_access: Arc::new(RwLock::new(RemoteAccessConfig {
                 enabled: true,
                 token: "secret".to_string(),
@@ -683,3 +776,6 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+
+#[cfg(test)]
+mod device_pairing_tests;

@@ -1,3 +1,4 @@
+import { getPairingIntent } from '../platform/pairing-intent';
 import { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
 import { Stack, useRouter, useSegments } from 'expo-router';
@@ -63,6 +64,7 @@ function RootNavigator() {
 
   useEffect(() => {
     if (!hasLoadedConnection) return;
+    if (segments[0] === 'pair') return;
     const inOnboarding = segments[0] === 'onboarding';
 
     if (!isConfigured && !inOnboarding) {
@@ -84,6 +86,7 @@ function RootNavigator() {
       >
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="connect" />
+        <Stack.Screen name="pair" />
         <Stack.Screen name="onboarding" />
         <Stack.Screen
           name="agent/[sessionId]/[groupId]/[taskId]"
@@ -103,6 +106,9 @@ function RootNavigator() {
       <StoresProvider
         client={client}
         recoveryConnectionScope={recoveryConnectionScope}
+        onHandoffComplete={() => {
+          if (getPairingIntent()) router.replace('/pair');
+        }}
       >
         {content}
       </StoresProvider>

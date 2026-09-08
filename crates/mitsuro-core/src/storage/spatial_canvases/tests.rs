@@ -43,7 +43,7 @@ fn changes_node(id: &str) -> CanvasNode {
 fn migration_80_creates_canvas_snapshot_event_and_resource_intent_tables() {
     let temp_dir = TempDir::new().expect("temp dir");
     let db = Database::new(&temp_dir.path().join("migration.db")).expect("database");
-    assert_eq!(db.get_schema_version(), 80);
+    assert_eq!(db.get_schema_version(), 81);
     for table in [
         "spatial_canvases",
         "spatial_canvas_events",

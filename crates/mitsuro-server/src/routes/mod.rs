@@ -13,6 +13,7 @@ mod canvas_resources;
 mod canvases;
 pub(crate) mod chat;
 mod credentials;
+pub(crate) mod device_pairing;
 mod extensions;
 mod files;
 mod git;
@@ -83,6 +84,15 @@ pub fn api_router() -> Router<AppState> {
         .nest("/apns", apns::router())
         .nest("/reports", reports::router())
         .nest("/server", server::router())
+        .route(
+            "/device-session",
+            axum::routing::get(device_pairing::device_session),
+        )
+        .nest("/device-pairing", device_pairing::owner_router())
+        .route(
+            "/stream-ticket",
+            axum::routing::post(device_pairing::stream_ticket),
+        )
         .nest("/terminals", terminals::router())
         .nest("/auth/oauth", oauth::router())
         .merge(shared_extensibility)
