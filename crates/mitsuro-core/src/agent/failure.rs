@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::agent::hooks::shell_policy::{
-    classify_bash_command, is_proven_read_only_bash_command, semantic_bash_signature,
-    BashFileOperationKind,
+    classify_bash_command, is_proven_read_only_bash_command, BashFileOperationKind,
 };
+use crate::agent::loop_kernel::action_intent;
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::tools::registry::{
     agent_call_execution_profile, agent_call_is_research, agent_call_starts_run,
@@ -61,34 +61,6 @@ fn bash_command_text(arguments: &serde_json::Value) -> Option<&str> {
         .or_else(|| arguments.get("cmd").and_then(|value| value.as_str()))
 }
 
-fn exploration_signature(call: &AiToolCall) -> String {
-    let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
-    if matches!(name, "bash" | "shell" | "execute") {
-        if let Some(command) = bash_command_text(arguments) {
-            return format!("bash:{}", semantic_bash_signature(command));
-        }
-    }
-
-    let mut arguments = arguments.clone();
-
-    // Increasing only an output cap is not a new exploration strategy. Treat
-    // these calls as equivalent so agents cannot evade the loop guard by
-    // repeatedly widening the same directory or glob result.
-    if let Some(object) = arguments.as_object_mut() {
-        match name {
-            "list" => {
-                object.remove("limit");
-            }
-            "glob" => {
-                object.remove("max_results");
-            }
-            _ => {}
-        }
-    }
-
-    format!("{}:{}", name, hash_arguments(&arguments))
-}
-
 /// Check tool results for repeated failures. Returns a diagnostic message
 /// if the same tool+error signature has been seen `threshold` or more times.
 ///
@@ -98,12 +70,22 @@ pub fn detect_repeated_failures(
     tool_calls: &[AiToolCall],
     tool_results: &[Content],
 ) -> Option<String> {
-    let mut call_meta: HashMap<&str, (String, u64)> = HashMap::new();
+    let mut call_meta = HashMap::new();
     for call in tool_calls {
-        call_meta.insert(
-            call.id.as_str(),
-            (call.name.clone(), hash_arguments(&call.arguments)),
-        );
+        let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+        let mut intent = action_intent(call);
+        // Observation normalization can discard shell redirections and order.
+        // Failed effectful commands need their exact scope so a new target or
+        // changed repair cannot be mistaken for an unchanged failed action.
+        if matches!(name, "bash" | "shell" | "execute") {
+            if let Some(command) = bash_command_text(arguments)
+                .filter(|command| !is_proven_read_only_bash_command(command))
+            {
+                let scope = hash_arguments(&serde_json::Value::String(command.to_string()));
+                intent.push_str(&format!(":effect:{scope}"));
+            }
+        }
+        call_meta.insert(call.id.as_str(), (name, intent, arguments));
     }
 
     let mut recovered_calls = Vec::new();
@@ -119,14 +101,14 @@ pub fn detect_repeated_failures(
         };
 
         if !is_error.unwrap_or(false) {
-            let Some((tool_name, args_hash)) = call_meta.get(tool_use_id.as_str()) else {
+            let Some((_, intent, _)) = call_meta.get(tool_use_id.as_str()) else {
                 continue;
             };
-            recovered_calls.push((tool_name.clone(), *args_hash));
+            recovered_calls.push(format!("{intent}|"));
             continue;
         }
 
-        let Some((tool_name, args_hash)) = call_meta.get(tool_use_id.as_str()) else {
+        let Some((tool_name, intent, arguments)) = call_meta.get(tool_use_id.as_str()) else {
             continue;
         };
 
@@ -135,10 +117,26 @@ pub fn detect_repeated_failures(
             other => other.to_string(),
         };
         let (error_code, error_fingerprint) = extract_error_signature(&output_str);
-        let signature = format!(
-            "{}|{}|{}|{}",
-            tool_name, error_code, error_fingerprint, args_hash
-        );
+        // More time can be a real recovery strategy for an actual timeout,
+        // but it cannot cure access denial, bad parameters or a failed check.
+        // Use Bash's effective timeout (including its default and cap), so
+        // spelling an equivalent timeout differently cannot evade convergence.
+        let timeout_recovery = if matches!(*tool_name, "bash" | "shell" | "execute")
+            && (error_code.contains("timeout")
+                || classify_error_code(&error_fingerprint) == "timeout")
+        {
+            format!(
+                "|timeout:{}",
+                arguments
+                    .get("timeout")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(30_000)
+                    .min(600_000)
+            )
+        } else {
+            String::new()
+        };
+        let signature = format!("{intent}|{error_code}|{error_fingerprint}{timeout_recovery}");
         let count = counters
             .entry(signature)
             .and_modify(|c| *c += 1)
@@ -156,7 +154,7 @@ pub fn detect_repeated_failures(
         counters.retain(|signature, _| {
             !recovered_calls
                 .iter()
-                .any(|(tool_name, args_hash)| matches_signature(signature, tool_name, *args_hash))
+                .any(|prefix| signature.starts_with(prefix))
         });
     }
 
@@ -209,7 +207,7 @@ pub fn detect_repeated_read_only_sequence(
             let (output, _) = results
                 .get(call.id.as_str())
                 .expect("completed read-only call has a result");
-            format!("{}:{}", exploration_signature(call), hash_arguments(output))
+            format!("{}:{}", action_intent(call), hash_arguments(output))
         })
         .collect::<Vec<_>>()
         .join("|");
@@ -546,17 +544,6 @@ fn hash_arguments(arguments: &serde_json::Value) -> u64 {
     hasher.finish()
 }
 
-fn matches_signature(signature: &str, tool_name: &str, args_hash: u64) -> bool {
-    let mut parts = signature.split('|');
-    let Some(sig_tool_name) = parts.next() else {
-        return false;
-    };
-    let Some(sig_args_hash) = signature.rsplit('|').next() else {
-        return false;
-    };
-    sig_tool_name == tool_name && sig_args_hash == args_hash.to_string()
-}
-
 fn extract_error_signature(output_str: &str) -> (String, String) {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(output_str) {
         if let Some(error) = value.get("error") {
@@ -675,6 +662,113 @@ mod tests {
                 is_error: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn failed_action_cosmetics_converge_without_merging_recovery_or_new_targets() {
+        let cases = [
+            (
+                "bash",
+                json!({"command":"rg -n needle src", "timeout":1000, "description":"first"}),
+                "bash",
+                json!({"command":"cd . && command rg --line-number needle ./src/", "timeout":2000, "description":"again"}),
+                json!({"command":"rg needle tests"}),
+            ),
+            (
+                "list",
+                json!({"path":"missing", "limit":1}),
+                "tool_search",
+                json!({"action":"execute", "tool":"list", "arguments":{"path":"missing", "limit":20}}),
+                json!({"path":"other", "limit":1}),
+            ),
+            (
+                "bash",
+                json!({"command":"echo fixed > first.txt", "timeout":1000, "description":"first repair"}),
+                "tool_search",
+                json!({"action":"execute", "tool":"bash", "arguments":{"command":"echo fixed > first.txt", "timeout":2000, "description":"same repair"}}),
+                json!({"command":"echo fixed > other.txt"}),
+            ),
+        ];
+        for (name, first, retry_name, retry, other) in cases {
+            let call = |id: &str, name: &str, arguments| AiToolCall {
+                id: id.into(),
+                name: name.into(),
+                arguments,
+            };
+            let failure = |id: &str| Content::ToolResult {
+                tool_use_id: id.into(),
+                output: json!({"error":"access denied"}),
+                is_error: Some(true),
+            };
+            let first = call("first", name, first);
+            let retry = call("retry", retry_name, retry);
+            let other = call("other", name, other);
+            let mut guard = crate::agent::progress::LoopGuard::new();
+            assert!(guard
+                .evaluate(std::slice::from_ref(&first), &[failure("first")])
+                .repeated_failure
+                .is_none());
+            assert!(
+                guard
+                    .evaluate(&[other], &[failure("other")])
+                    .repeated_failure
+                    .is_none(),
+                "new target: {name}"
+            );
+            assert!(
+                guard
+                    .evaluate(std::slice::from_ref(&retry), &[failure("retry")])
+                    .repeated_failure
+                    .is_some(),
+                "cosmetic retry: {name}"
+            );
+
+            // A success through the same normalized action clears its failures,
+            // including when the successful call uses the wrapper surface.
+            let mut guard = crate::agent::progress::LoopGuard::new();
+            guard.evaluate(std::slice::from_ref(&first), &[failure("first")]);
+            let success = successful_results(std::slice::from_ref(&retry), json!({"ok":true}));
+            guard.evaluate(std::slice::from_ref(&retry), &success);
+            assert!(
+                guard
+                    .evaluate(&[first], &[failure("first")])
+                    .repeated_failure
+                    .is_none(),
+                "recovery: {name}"
+            );
+        }
+
+        // Timeout changes are meaningful only for timeout failures. Equivalent
+        // defaults/capped values still converge, while a genuinely larger
+        // window gets its own recovery opportunity.
+        for (first_timeout, retry_timeout, should_stop) in [
+            (Some(1000), Some(2000), false),
+            (None, Some(30_000), true),
+            (Some(600_000), Some(700_000), true),
+        ] {
+            let mut counters = HashMap::new();
+            for (index, timeout) in [first_timeout, retry_timeout].into_iter().enumerate() {
+                let mut arguments = json!({"command":"cargo test"});
+                if let Some(timeout) = timeout {
+                    arguments["timeout"] = json!(timeout);
+                }
+                let calls = [AiToolCall {
+                    id: "timeout".into(),
+                    name: "bash".into(),
+                    arguments,
+                }];
+                let results = [Content::ToolResult {
+                    tool_use_id: "timeout".into(),
+                    output: json!({"error":{"code":"timeout","message":"command timed out"}}),
+                    is_error: Some(true),
+                }];
+                assert_eq!(
+                    detect_repeated_failures(&mut counters, &calls, &results).is_some(),
+                    index == 1 && should_stop,
+                    "timeout recovery: {first_timeout:?} -> {retry_timeout:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -858,27 +952,68 @@ mod tests {
     }
 
     #[test]
-    fn repeated_read_only_sequence_trips_threshold() {
-        let calls = vec![
-            AiToolCall {
-                id: "call_1".to_string(),
-                name: "glob".to_string(),
-                arguments: json!({"pattern":"src/**/*.rs"}),
-            },
-            AiToolCall {
-                id: "call_2".to_string(),
-                name: "grep".to_string(),
-                arguments: json!({"pattern":"TODO"}),
-            },
+    fn repeated_read_only_batches_converge_across_tool_surfaces() {
+        let call = |name: &str, arguments| AiToolCall {
+            id: name.into(),
+            name: name.into(),
+            arguments,
+        };
+        let cases = [
+            (
+                "native",
+                vec![
+                    call("glob", json!({"pattern":"src/**/*.rs"})),
+                    call("grep", json!({"pattern":"TODO"})),
+                ],
+                json!({"status":"unchanged"}),
+            ),
+            (
+                "shell",
+                vec![call(
+                    "bash",
+                    json!({"command":"git show abc123:apps/mobile/components/chat/ChatBar.tsx | rg -n 'shouldGrow' | head -40"}),
+                )],
+                json!({"output":"unchanged"}),
+            ),
+            (
+                "mixed",
+                vec![
+                    call(
+                        "bash",
+                        json!({"command":"git log --oneline -5 -- apps/mobile"}),
+                    ),
+                    call(
+                        "read",
+                        json!({"path":"apps/mobile/components/chat/ChatBar.tsx"}),
+                    ),
+                ],
+                json!({"ok":true}),
+            ),
+            (
+                "wrapped",
+                vec![call(
+                    "tool_search",
+                    json!({"action":"execute", "tool":"list", "arguments":{"path":"/home/example", "depth":1, "limit":100}}),
+                )],
+                json!({"ok":true}),
+            ),
         ];
-        let results = successful_results(&calls, json!({"status": "unchanged"}));
-
-        let mut counters = HashMap::new();
-        for _ in 0..(REPEATED_READ_ONLY_SEQUENCE_THRESHOLD - 1) {
-            assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_none());
+        for (label, mut calls, output) in cases {
+            assert!(calls.iter().all(is_exploration_probe), "{label}");
+            let mut counters = HashMap::new();
+            for turn in 1..=REPEATED_READ_ONLY_SEQUENCE_THRESHOLD {
+                if label == "wrapped" {
+                    calls[0].arguments["arguments"]["limit"] = json!(100 * turn);
+                }
+                let results = successful_results(&calls, output.clone());
+                assert_eq!(
+                    detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_some(),
+                    turn == REPEATED_READ_ONLY_SEQUENCE_THRESHOLD,
+                    "{label}, turn {turn}"
+                );
+                assert!(!counters.is_empty(), "{label}, turn {turn}");
+            }
         }
-
-        assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_some());
     }
 
     #[test]
@@ -919,45 +1054,6 @@ mod tests {
 
         assert!(detect_repeated_read_only_sequence(&mut counters, &write, &[]).is_none());
         assert!(counters.is_empty());
-    }
-
-    #[test]
-    fn repeated_observational_bash_sequence_trips_threshold() {
-        let calls = vec![AiToolCall {
-            id: "call_1".to_string(),
-            name: "bash".to_string(),
-            arguments: json!({
-                "command": "git show abc123:apps/mobile/components/chat/ChatBar.tsx | rg -n 'shouldGrow' | head -40"
-            }),
-        }];
-        let results = successful_results(&calls, json!({"output": "unchanged"}));
-
-        let mut counters = HashMap::new();
-        for _ in 0..(REPEATED_READ_ONLY_SEQUENCE_THRESHOLD - 1) {
-            assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_none());
-        }
-        assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_some());
-    }
-
-    #[test]
-    fn observational_bash_and_native_reads_count_as_exploration_batch() {
-        let calls = vec![
-            AiToolCall {
-                id: "call_1".to_string(),
-                name: "bash".to_string(),
-                arguments: json!({"command": "git log --oneline -5 -- apps/mobile"}),
-            },
-            AiToolCall {
-                id: "call_2".to_string(),
-                name: "read".to_string(),
-                arguments: json!({"path": "apps/mobile/components/chat/ChatBar.tsx"}),
-            },
-        ];
-        assert!(calls.iter().all(is_exploration_probe));
-        let mut counters = HashMap::new();
-        let results = successful_results(&calls, json!({"ok": true}));
-        assert!(detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_none());
-        assert!(!counters.is_empty());
     }
 
     #[test]
@@ -1032,33 +1128,6 @@ mod tests {
         };
         assert!(detect_repeated_validation_sequence(&mut counters, &[edit], &[]).is_none());
         assert!(counters.is_empty());
-    }
-
-    #[test]
-    fn repeated_wrapped_list_calls_ignore_only_the_result_limit() {
-        let wrapped = |id: &str, limit: usize| AiToolCall {
-            id: id.to_string(),
-            name: "tool_search".to_string(),
-            arguments: json!({
-                "action": "execute",
-                "tool": "list",
-                "arguments": {
-                    "path": "/home/example",
-                    "depth": 1,
-                    "limit": limit
-                }
-            }),
-        };
-
-        let mut counters = HashMap::new();
-        for (id, limit, should_stop) in [("1", 100, false), ("2", 200, false), ("3", 300, true)] {
-            let calls = [wrapped(id, limit)];
-            let results = successful_results(&calls, json!({"ok": true}));
-            assert_eq!(
-                detect_repeated_read_only_sequence(&mut counters, &calls, &results).is_some(),
-                should_stop
-            );
-        }
     }
 
     #[test]

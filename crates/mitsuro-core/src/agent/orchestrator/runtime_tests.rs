@@ -1326,3 +1326,51 @@ async fn repeated_read_feedback_reaches_provider_and_expires_after_a_change() ->
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_list_limit_drift_enters_tool_free_landing_after_two_attempts() -> anyhow::Result<()>
+{
+    let fixture = RuntimeFixture::new().await?;
+    fixture
+        .services
+        .tool_registry
+        .register(Arc::new(crate::tools::ListTool))
+        .await;
+    fixture
+        .services
+        .tool_registry
+        .register(Arc::new(crate::tools::ToolSearchTool))
+        .await;
+    let (mut events, _inputs) = fixture.run(WorkMode::Build).await;
+    for (id, limit) in [("missing-first", 1), ("missing-again", 20)] {
+        let (request, body) = fixture.request().await?;
+        assert!(has_tool(&body, "tool_search"));
+        assert!(!has_tool(&body, "list"), "list uses the deferred surface");
+        respond(
+            request,
+            "",
+            Some((
+                id,
+                "tool_search",
+                json!({"action":"execute", "tool":"list", "arguments":{"path":"missing", "limit":limit}}),
+            )),
+        );
+    }
+    let (request, landing) = fixture.request().await?;
+    assert!(landing.to_string().contains("[LOOP GUARD LANDING]"));
+    assert!(landing.to_string().contains("failed 2 times"));
+    assert!(landing.get("tools").is_none_or(Value::is_null));
+    respond(
+        request,
+        "The requested directory is missing; repeated listing cannot resolve that.",
+        None,
+    );
+    assert_eq!(
+        finished(&mut events).await,
+        LoopStopReason::LoopGuardTriggered
+    );
+    let messages = SessionManager::new(Database::new(&fixture.services.db_path)?)
+        .load_session_messages(&fixture.session_id)?;
+    assert!(messages.last().unwrap().1.contains("directory is missing"));
+    Ok(())
+}

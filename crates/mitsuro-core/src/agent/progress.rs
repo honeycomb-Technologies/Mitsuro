@@ -19,7 +19,8 @@ use crate::tools::registry::{
 };
 
 use super::failure;
-use super::hooks::shell_policy::{classify_bash_command, semantic_bash_signature};
+use super::hooks::shell_policy::classify_bash_command;
+use super::loop_kernel::action_intent;
 
 /// Consecutive evidence-free passive turns allowed before stopping.
 pub const NO_PROGRESS_TURN_THRESHOLD: usize = 3;
@@ -784,30 +785,9 @@ fn progress_change_key(output: &Value) -> Option<String> {
 
 pub fn action_fingerprint(call: &AiToolCall) -> ActionFingerprint {
     let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
-    let class = action_class(name, arguments, call);
-    let normalized = if matches!(name, "bash" | "shell" | "execute") {
-        let command = arguments
-            .get("command")
-            .and_then(Value::as_str)
-            .map(semantic_bash_signature)
-            .unwrap_or_else(|| "missing-command".to_string());
-        let mode = if arguments
-            .get("run_in_background")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            "background"
-        } else {
-            "foreground"
-        };
-        format!("{mode}:{command}")
-    } else {
-        normalized_arguments(name, arguments)
-    };
-
     ActionFingerprint {
-        class,
-        intent: hash_text(&format!("{name}:{normalized}")),
+        class: action_class(name, arguments, call),
+        intent: action_intent(call),
     }
 }
 
@@ -853,24 +833,6 @@ fn action_class(name: &str, arguments: &Value, call: &AiToolCall) -> ActionClass
             ToolCategory::Interactive => ActionClass::Control,
         },
     }
-}
-
-fn normalized_arguments(name: &str, arguments: &Value) -> String {
-    let mut normalized = arguments.clone();
-    if let Some(object) = normalized.as_object_mut() {
-        // Output size/presentation changes can reveal more evidence, which is
-        // captured by the result signature. They are not a new action intent.
-        match name {
-            "list" => {
-                object.remove("limit");
-            }
-            "glob" => {
-                object.remove("max_results");
-            }
-            _ => {}
-        }
-    }
-    normalized.to_string()
 }
 
 fn hash_value(value: &Value) -> String {

@@ -6,8 +6,57 @@
 //! one place so the two kernels cannot drift apart.
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
+use crate::ai::types::AiToolCall;
 use crate::tools::registry::{effective_tool_call, tool_policy_for_call, ToolCategory};
+
+use super::hooks::shell_policy::semantic_bash_signature;
+
+/// Shared action identity for failure, exploration and semantic-progress
+/// accounting. Presentation fields and deferred wrappers cannot mint a new
+/// strategy, while observation targets and foreground/background mode remain
+/// part of the intent. Failure policy preserves exact effectful shell scope
+/// separately; outcomes and timeout recovery are also evaluated there.
+pub(crate) fn action_intent(call: &AiToolCall) -> String {
+    let (name, arguments) = effective_tool_call(&call.name, &call.arguments);
+    let normalized = if matches!(name, "bash" | "shell" | "execute") {
+        let command = arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .or_else(|| arguments.get("cmd").and_then(Value::as_str))
+            .map(semantic_bash_signature)
+            .unwrap_or_else(|| "missing-command".to_string());
+        let mode = if arguments
+            .get("run_in_background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "background"
+        } else {
+            "foreground"
+        };
+        format!("{mode}:{command}")
+    } else {
+        let mut normalized = arguments.clone();
+        if let Some(object) = normalized.as_object_mut() {
+            match name {
+                "list" => {
+                    object.remove("limit");
+                }
+                "glob" => {
+                    object.remove("max_results");
+                }
+                _ => {}
+            }
+        }
+        normalized.to_string()
+    };
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{name}:{normalized}").as_bytes())
+    )
+}
 
 /// Audience for a loop-guard landing turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
