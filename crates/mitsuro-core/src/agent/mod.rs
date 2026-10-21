@@ -49,7 +49,6 @@ pub(crate) mod loop_kernel;
 mod observability;
 mod orchestrator;
 pub mod pinch_context;
-pub mod pinch_session;
 pub mod plan_handler;
 pub mod progress;
 pub mod provider_governance;
@@ -88,9 +87,6 @@ pub use loop_events::{LoopEvent, LoopInput, PlanTaskInfo, ProviderRequestSnapsho
 pub use observability::{ProviderCallTraceContext, ProviderCallTraceOutcome};
 pub use orchestrator::OrchestratorServices;
 pub use pinch_context::{PinchContext, PinchContextInput};
-pub use pinch_session::{
-    create_pinched_session, CreatePinchedSessionRequest, CreatePinchedSessionResult,
-};
 pub use progress::{ActionClass, ProgressGuardAction, ProgressGuardTelemetry, ProgressLedger};
 pub use provider_governance::{
     bounded_reservation, conservative_text_token_reservation, freeze_worker_model_pricing,
