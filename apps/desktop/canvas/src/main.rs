@@ -1,4 +1,3 @@
-mod acceptance;
 mod agent;
 mod app;
 mod browser_surface;

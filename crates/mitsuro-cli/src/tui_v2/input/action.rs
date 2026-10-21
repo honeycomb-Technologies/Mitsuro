@@ -58,7 +58,6 @@ pub enum KeySymbol {
     Char(char),
     Esc,
     Enter,
-    Tab,
     Up,
     Down,
     Left,
@@ -145,7 +144,6 @@ impl KeySymbol {
             (self, code),
             (Self::Esc, KeyCode::Esc)
                 | (Self::Enter, KeyCode::Enter)
-                | (Self::Tab, KeyCode::Tab)
                 | (Self::Up, KeyCode::Up)
                 | (Self::Down, KeyCode::Down)
                 | (Self::Left, KeyCode::Left)
@@ -161,7 +159,6 @@ impl KeySymbol {
             Self::Char(character) => output.push(character.to_ascii_uppercase()),
             Self::Esc => output.push_str("Esc"),
             Self::Enter => output.push_str("Enter"),
-            Self::Tab => output.push_str("Tab"),
             Self::Up => output.push_str("Up"),
             Self::Down => output.push_str("Down"),
             Self::Left => output.push_str("Left"),
@@ -574,10 +571,6 @@ impl ActionRegistry {
             .filter(move |definition| definition.active_in(context))
     }
 
-    pub fn footer_hints(context: ActionContext, max_width: usize) -> String {
-        Self::footer_hints_with_separator(context, max_width, " · ")
-    }
-
     pub fn footer_hints_with_separator(
         context: ActionContext,
         max_width: usize,
@@ -666,8 +659,10 @@ mod tests {
             .find(|definition| definition.id == ActionId::OpenCommandPalette)
             .expect("palette action should be available");
         assert_eq!(definition.label, "Command palette");
-        assert!(ActionRegistry::footer_hints(ActionContext::Composer, 80)
-            .contains("Ctrl+K command palette"));
+        assert!(
+            ActionRegistry::footer_hints_with_separator(ActionContext::Composer, 80, " · ")
+                .contains("Ctrl+K command palette")
+        );
     }
 
     #[test]
@@ -682,9 +677,12 @@ mod tests {
     #[test]
     fn footer_uses_only_complete_hints_that_fit() {
         assert_eq!(
-            ActionRegistry::footer_hints(ActionContext::Composer, 12),
+            ActionRegistry::footer_hints_with_separator(ActionContext::Composer, 12, " · "),
             "Ctrl+Q quit"
         );
-        assert!(!ActionRegistry::footer_hints(ActionContext::Composer, 20).ends_with('·'));
+        assert!(
+            !ActionRegistry::footer_hints_with_separator(ActionContext::Composer, 20, " · ")
+                .ends_with('·')
+        );
     }
 }

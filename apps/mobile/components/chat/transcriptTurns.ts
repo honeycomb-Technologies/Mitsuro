@@ -37,13 +37,6 @@ export interface CachedSplitTranscriptTurns extends SplitTranscriptTurns {
   cache: TranscriptTurnsCache;
 }
 
-export function buildTranscriptTurns(
-  messages: ChatMessage[],
-  isStreaming: boolean,
-): TranscriptTurn[] {
-  return splitTranscriptTurns(messages, isStreaming).turns;
-}
-
 /**
  * Split the transcript so streaming updates only invalidate the live turn.
  * Historical turns keep stable identities/signatures while the tail grows.

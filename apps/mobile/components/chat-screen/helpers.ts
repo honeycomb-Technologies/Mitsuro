@@ -1,15 +1,9 @@
-import { Dimensions } from "react-native";
-
 import type {
   ChatMessage,
   SessionType,
 } from "@mitsuro/api";
 import type { ToolCall } from "@mitsuro/state";
 export { isModelUsable, normalizeProviderId } from "@mitsuro/state";
-
-const SCREEN_HEIGHT = Dimensions.get("window").height;
-
-export const SPLIT_PANEL_HEIGHT = SCREEN_HEIGHT * 0.42;
 export const CHAT_BAR_ZONE = 130;
 export const TAB_TYPES: SessionType[] = ["chat", "code", "hive"];
 
@@ -30,16 +24,6 @@ export function tabForSessionType(type: SessionType): number {
   }
 }
 
-export function getLastAssistantMessage(messages: ChatMessage[]): ChatMessage | null {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role === "assistant") {
-      return message;
-    }
-  }
-  return null;
-}
-
 export function flattenToolCalls(messages: ChatMessage[]): ToolCall[] {
   const toolCalls: ToolCall[] = [];
   for (const message of messages) {
@@ -48,21 +32,6 @@ export function flattenToolCalls(messages: ChatMessage[]): ToolCall[] {
     }
   }
   return toolCalls;
-}
-
-export function getActiveToolCall(toolCalls: ToolCall[]): ToolCall | null {
-  for (let index = toolCalls.length - 1; index >= 0; index -= 1) {
-    const toolCall = toolCalls[index];
-    if (
-      toolCall &&
-      (toolCall.status === "awaiting_approval" ||
-        toolCall.status === "running" ||
-        toolCall.status === "pending")
-    ) {
-      return toolCall;
-    }
-  }
-  return null;
 }
 
 export function getWorkspaceMode(path: string | null): WorkspaceMode {

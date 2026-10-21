@@ -113,7 +113,7 @@ fn markdown_links_own_precise_visible_hit_targets() {
                 items: &items,
                 spacing_before: &[],
                 expandable: &[],
-                anchor: AnchorMode::Top,
+                anchor: AnchorMode::ScrollTop(0),
                 new_content_count: 0,
             }),
         })
@@ -243,7 +243,7 @@ fn hit_testing_and_selection_use_snapshot_geometry() {
                 items: &items,
                 spacing_before: &[],
                 expandable: &[],
-                anchor: AnchorMode::Top,
+                anchor: AnchorMode::ScrollTop(0),
                 new_content_count: 0,
             }),
         })

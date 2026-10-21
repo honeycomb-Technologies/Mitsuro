@@ -32,7 +32,6 @@
 //! - `subagent::build_context` - Shared coordination for builder agents
 //! - Type registry, file locks, conventions
 
-pub mod agent_types;
 pub mod autonomy;
 pub mod cancellation;
 pub mod compaction;

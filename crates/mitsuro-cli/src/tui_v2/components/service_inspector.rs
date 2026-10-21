@@ -426,33 +426,14 @@ fn render_plugin_dock(
         return;
     }
 
-    // Live classic plugin runtime is wired in a follow-up; this well is the
-    // reserved surface with empty state and available ids when present.
-    let available = crate::tui_support::plugins::available_plugin_ids();
-    let mut lines = Vec::new();
-    if available.is_empty() {
-        lines.push(Line::styled(
+    let lines = vec![
+        Line::styled(
             "No plugin loaded",
             Style::default().fg(theme.foreground_muted),
-        ));
-        lines.push(Line::default());
-        lines.push(Line::styled(
-            "/extensions",
-            Style::default().fg(theme.foreground_muted),
-        ));
-    } else {
-        lines.push(Line::styled(
-            "Plugins ready",
-            Style::default().fg(theme.foreground_muted),
-        ));
-        lines.push(Line::default());
-        for id in available
-            .into_iter()
-            .take(usize::from(inner.height.saturating_sub(3)).max(1))
-        {
-            lines.push(Line::styled(id, Style::default().fg(theme.foreground)));
-        }
-    }
+        ),
+        Line::default(),
+        Line::styled("/extensions", Style::default().fg(theme.foreground_muted)),
+    ];
 
     let content_height = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)

@@ -6,7 +6,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::elements::InlineContent;
 use super::links::LinkSpan;
-use crate::tui_support::themes::Theme;
+use super::MarkdownTheme;
 
 /// Context for tracking positions during inline rendering
 struct RenderContext {
@@ -19,7 +19,7 @@ struct RenderContext {
 }
 
 /// Convert inline content to styled spans
-pub fn render_inline(content: &[InlineContent], theme: &Theme) -> Vec<Span<'static>> {
+pub fn render_inline(content: &[InlineContent], theme: &MarkdownTheme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     for item in content {
         render_inline_item(
@@ -34,7 +34,7 @@ pub fn render_inline(content: &[InlineContent], theme: &Theme) -> Vec<Span<'stat
 
 fn render_inline_item(
     item: &InlineContent,
-    theme: &Theme,
+    theme: &MarkdownTheme,
     base_style: Style,
     spans: &mut Vec<Span<'static>>,
 ) {
@@ -93,7 +93,7 @@ fn render_inline_item(
 /// The base_line parameter is added to all link line indices.
 pub fn render_inline_with_links(
     content: &[InlineContent],
-    theme: &Theme,
+    theme: &MarkdownTheme,
     base_line: usize,
 ) -> (Vec<Span<'static>>, Vec<LinkSpan>) {
     let mut ctx = RenderContext {
@@ -118,7 +118,7 @@ pub fn render_inline_with_links(
 
 fn render_inline_item_tracked(
     item: &InlineContent,
-    theme: &Theme,
+    theme: &MarkdownTheme,
     base_style: Style,
     spans: &mut Vec<Span<'static>>,
     ctx: &mut RenderContext,

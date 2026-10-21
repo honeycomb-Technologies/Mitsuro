@@ -11,48 +11,9 @@ use super::{
     HiveProfileStoreError,
 };
 
-const PROFILE_SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS hive_profiles (
-    id TEXT PRIMARY KEY,
-    user_id TEXT,
-    revision INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_hive_profiles_user
-    ON hive_profiles(user_id) WHERE user_id IS NOT NULL;
-CREATE TABLE IF NOT EXISTS hive_profile_documents (
-    profile_id TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('soul', 'identity', 'user', 'heartbeat', 'channels')),
-    content TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY(profile_id, kind),
-    FOREIGN KEY(profile_id) REFERENCES hive_profiles(id) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS hive_crew_profiles (
-    profile_id TEXT NOT NULL,
-    slug TEXT NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY(profile_id, slug),
-    FOREIGN KEY(profile_id) REFERENCES hive_profiles(id) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS hive_crew_documents (
-    profile_id TEXT NOT NULL,
-    slug TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK(kind IN ('identity', 'soul')),
-    content TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY(profile_id, slug, kind),
-    FOREIGN KEY(profile_id, slug) REFERENCES hive_crew_profiles(profile_id, slug) ON DELETE CASCADE
-);
-"#;
-
 fn test_store() -> (TempDir, HiveProfileStore) {
     let temp = TempDir::new().unwrap();
     let db = Database::new(&temp.path().join("mitsuro.db")).unwrap();
-    db.conn().execute_batch(PROFILE_SCHEMA).unwrap();
     (temp, HiveProfileStore::new(db))
 }
 
@@ -89,7 +50,6 @@ fn get_or_create_is_idempotent_and_isolates_users() {
 fn load_rejects_a_stored_owner_mismatch() {
     let temp = TempDir::new().unwrap();
     let db = Database::new(&temp.path().join("mitsuro.db")).unwrap();
-    db.conn().execute_batch(PROFILE_SCHEMA).unwrap();
     db.conn()
         .execute(
             "INSERT INTO hive_profiles (id, user_id) VALUES ('local', 'unexpected-user')",

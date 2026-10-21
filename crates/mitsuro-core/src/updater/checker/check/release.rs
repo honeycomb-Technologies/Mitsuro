@@ -4,7 +4,7 @@ use tracing::{debug, info};
 use crate::updater::checker::types::UpdateInfo;
 use crate::updater::checker::{GITHUB_REPO, VERSION};
 
-use super::git::is_newer_version;
+use super::is_newer_version;
 
 pub(super) async fn check_for_updates_release() -> Result<Option<UpdateInfo>> {
     let url = format!(

@@ -27,7 +27,6 @@ import {
 } from "lucide-react-native";
 
 import type {
-  McpServerResponse,
   PortEntry,
   PreviewSettings,
   PreviewSettingsPatch,
@@ -584,98 +583,6 @@ export function ProvidersSection({
                 )}
               </View>
             ) : null}
-          </View>
-        )}
-      </GlassCard>
-    </>
-  );
-}
-
-export function McpSection({
-  isConnected,
-  loading,
-  mcpServers,
-  busyKey,
-  message,
-  onReload,
-  onToggle,
-}: {
-  isConnected: boolean;
-  loading: boolean;
-  mcpServers: McpServerResponse[];
-  busyKey: string | null;
-  message: string | null;
-  onReload: () => void;
-  onToggle: (server: McpServerResponse) => void;
-}) {
-  const { theme } = useThemeContext();
-  const t = theme.colors;
-
-  return (
-    <>
-      <GlassCard compact>
-        {!isConnected ? (
-          <Text style={[styles.emptyText, { color: t.mutedForeground }]}>Connect to a server to inspect MCP servers.</Text>
-        ) : loading ? (
-          <View style={styles.loadingRow}>
-            <ActivityIndicator color={t.userMessage} size="small" />
-            <Text style={[styles.loadingText, { color: t.mutedForeground }]}>Loading MCP servers…</Text>
-          </View>
-        ) : (
-          <View style={styles.stack}>
-            <MessageBanner text={message} />
-            <View style={styles.actionsWrap}>
-              <Pressable
-                onPress={onReload}
-                disabled={busyKey === "reload"}
-                style={[styles.smallActionBtn, { borderColor: t.border }]}
-              >
-                <RefreshCw size={14} color={t.foreground} strokeWidth={1.8} />
-                <Text style={[styles.smallActionText, { color: t.foreground }]}>Reload Config</Text>
-              </Pressable>
-            </View>
-
-            {mcpServers.map((server) => (
-              <View key={server.name} style={[styles.subsection, { borderColor: t.border }]}> 
-                <View style={styles.subsectionHeader}>
-                  <View style={styles.rowContent}>
-                    <Text style={[styles.rowTitle, { color: t.foreground }]}>{server.name}</Text>
-                    <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}> 
-                      {server.server_type} • {server.tool_count} tools
-                    </Text>
-                  </View>
-                  <Pill
-                    label={server.connected ? "Connected" : server.status}
-                    tone={server.connected ? "success" : server.error ? "error" : "warning"}
-                  />
-                </View>
-
-                {server.tools.length ? (
-                  <Text style={[styles.rowSubtitle, { color: t.mutedForeground }]}> 
-                    {server.tools.map((tool) => tool.name).join(", ")}
-                  </Text>
-                ) : null}
-                {server.error ? (
-                  <Text style={[styles.errorText, { color: t.error }]}>{server.error}</Text>
-                ) : null}
-
-                <View style={styles.actionsWrap}>
-                  <Pressable
-                    onPress={() => onToggle(server)}
-                    disabled={busyKey === server.name}
-                    style={[styles.smallActionBtn, { borderColor: t.border }]}
-                  >
-                    {busyKey === server.name ? (
-                      <ActivityIndicator color={t.userMessage} size="small" />
-                    ) : (
-                      <Text style={[styles.smallActionText, { color: t.userMessage }]}> 
-                        {server.connected ? "Disconnect" : "Connect"}
-                      </Text>
-                    )}
-                  </Pressable>
-                </View>
-              </View>
-            ))}
           </View>
         )}
       </GlassCard>

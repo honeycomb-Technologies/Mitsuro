@@ -71,6 +71,7 @@ const LOOP_BATCH_MAX_EVENTS: usize = 64;
 const LOOP_BATCH_MAX_DURATION: Duration = Duration::from_millis(2);
 
 impl Redraw {
+    #[cfg(test)]
     fn handled(self) -> bool {
         !matches!(self, Self::None)
     }
@@ -1684,16 +1685,6 @@ impl PreviewApp {
         }
     }
 
-    fn set_composer_cursor_from_click(&mut self, column: u16, row: u16) {
-        let byte = self.composer_byte_from_click(column, row);
-        self.state.composer.set_cursor_byte(byte);
-        self.state.composer.refresh_assist_public();
-    }
-
-    fn composer_field_width(&self) -> usize {
-        self.composer_layout_metrics().0
-    }
-
     /// Content width and visible rows inside the composer surface (post-border).
     fn composer_layout_metrics(&self) -> (usize, usize) {
         if let Some(field) = self.last_layout.as_ref().and_then(|layout| {
@@ -2103,9 +2094,7 @@ impl PreviewApp {
 
     fn preserve_trigger_row(&mut self, action: &UiAction) {
         let part_id = match action {
-            UiAction::ArtifactActivated(part_id)
-            | UiAction::ArtifactToggled(part_id)
-            | UiAction::ArtifactFullscreenChanged { part_id, .. } => Some(part_id),
+            UiAction::ArtifactActivated(part_id) => Some(part_id),
             UiAction::Invoke(ActionId::ActivateFocused | ActionId::ToggleFullscreen) => {
                 self.state.transcript.selected_part.as_ref()
             }
@@ -2147,7 +2136,6 @@ impl PreviewApp {
                     amount,
                 } => {
                     let rows = match amount {
-                        ScrollAmount::Line => 1,
                         ScrollAmount::Page => self.last_layout.as_ref().map_or(1, |layout| {
                             u32::from(layout.transcript.viewport.height.max(1))
                         }),
@@ -2164,7 +2152,6 @@ impl PreviewApp {
                         continue;
                     };
                     let rows = match amount {
-                        ScrollAmount::Line => 1,
                         ScrollAmount::Page => self.last_layout.as_ref().map_or(1, |layout| {
                             u32::from(
                                 layout
@@ -4656,7 +4643,7 @@ mod tests {
         assert!(!rendered.contains("No step in progress"));
         // Title-less purple dock: plan content, plugin well empty-state (no border titles).
         assert!(
-            rendered.contains("No plugin loaded") || rendered.contains("Plugins ready"),
+            rendered.contains("No plugin loaded"),
             "plugin well should render under the plan band"
         );
         let layout = app.last_layout.as_ref().expect("wide layout");
@@ -6032,7 +6019,7 @@ mod tests {
         terminal.draw(|frame| app.render(frame)).expect("render");
         let before = visible_part_y(&app, &part_id);
 
-        app.dispatch(UiAction::ArtifactToggled(part_id.clone()));
+        app.dispatch(UiAction::ArtifactActivated(part_id.clone()));
         terminal.draw(|frame| app.render(frame)).expect("render");
 
         assert_eq!(visible_part_y(&app, &part_id), before);

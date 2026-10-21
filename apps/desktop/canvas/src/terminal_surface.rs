@@ -35,7 +35,6 @@ use mitsuro_client::{
 use tokio::runtime::Runtime;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::acceptance;
 use crate::theme::CanvasPalette;
 
 const TRANSPORT_EVENT_CAPACITY: usize = 256;
@@ -501,9 +500,7 @@ impl TerminalSurface {
         let controller = descriptor.controller.clone();
         let should_take_control = controller
             .as_ref()
-            .is_none_or(|controller| controller.client_id == client_id)
-            || acceptance::configured_collaboration_role()
-                == Some(acceptance::AcceptanceCollaborationRole::Primary);
+            .is_none_or(|controller| controller.client_id == client_id);
         let size = descriptor.size;
         let mut surface = Self {
             client,
@@ -629,7 +626,6 @@ impl TerminalSurface {
             TerminalTransportCommand::Terminate { lease_token: token },
             cx,
         );
-        acceptance::observe_counter("terminal_ui_terminate_confirmed", 1);
         self.error = Some("Ending terminal process…".to_owned());
         cx.notify();
     }
@@ -639,7 +635,6 @@ impl TerminalSurface {
             self.request_terminate(cx);
         } else {
             self.confirm_terminate = true;
-            acceptance::observe_counter("terminal_ui_end_armed", 1);
             self.error = Some(
                 "End terminates the server process. Press Confirm end to continue.".to_owned(),
             );
@@ -660,21 +655,12 @@ impl TerminalSurface {
                 return;
             }
         };
-        if self.current_lease_token().is_some() {
-            acceptance::observe_counter("terminal_ui_paste", 1);
-            if mode.contains(TermMode::BRACKETED_PASTE) {
-                acceptance::observe_counter("terminal_ui_bracketed_paste", 1);
-            }
-        }
         self.send_input(bytes, cx);
     }
 
     pub fn copy_selection(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let text = self.emulator.term.selection_to_string()?;
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-        if !text.is_empty() {
-            acceptance::observe_counter("terminal_ui_copy", 1);
-        }
         Some(text)
     }
 
@@ -717,7 +703,6 @@ impl TerminalSurface {
             }
             SurfaceEvent::Lease(result) => match result {
                 Ok(lease) => {
-                    acceptance::observe_counter("terminal_ui_control_acquired", 1);
                     self.controller = Some(ControlLeaseSummary {
                         client_id: lease.client_id.clone(),
                         expires_at: lease.expires_at.clone(),
@@ -762,7 +747,6 @@ impl TerminalSurface {
                     .unwrap_or(usize::MAX)
                     .min(bytes.len());
                 self.emulator.advance(&bytes[trim..]);
-                observe_acceptance_terminal_modes(*self.emulator.term.mode());
                 self.expected_offset = end;
             }
             TerminalTransportEvent::Gap {
@@ -807,7 +791,6 @@ impl TerminalSurface {
                 self.connection = TerminalSurfaceConnection::Exited;
                 self.descriptor.status = TerminalStatus::Exited;
                 self.descriptor.exit_code = exit_code;
-                acceptance::observe_counter("terminal_ui_exited", 1);
             }
             TerminalTransportEvent::Pong => {}
         }
@@ -820,7 +803,6 @@ impl TerminalSurface {
         self.descriptor.size = size;
         self.emulator.resize(size);
         if let Some(lease_token) = self.current_lease_token() {
-            acceptance::observe_counter("terminal_ui_resize", 1);
             self.send_command(
                 TerminalTransportCommand::Resize {
                     lease_token,
@@ -889,9 +871,6 @@ impl TerminalSurface {
 
         let mode = *self.emulator.term.mode();
         if let Some(bytes) = encode_key(event, mode) {
-            if modifiers.alt && self.current_lease_token().is_some() {
-                acceptance::observe_counter("terminal_ui_alt_key", 1);
-            }
             self.send_input(bytes, cx);
             cx.stop_propagation();
         }
@@ -941,16 +920,10 @@ impl TerminalSurface {
         if mode.intersects(TermMode::MOUSE_MODE) && !event.modifiers.shift {
             if let Some(code) = mouse_button_code(event.button) {
                 if let Some(bytes) = encode_mouse(mode, code, point, true, event.modifiers) {
-                    if self.current_lease_token().is_some() {
-                        acceptance::observe_counter("terminal_ui_mouse_report", 1);
-                    }
                     self.send_input(bytes, cx);
                 }
             }
         } else if event.button == MouseButton::Left {
-            if mode.intersects(TermMode::MOUSE_MODE) && event.modifiers.shift {
-                acceptance::observe_counter("terminal_ui_shift_selection_override", 1);
-            }
             let selection_type = if event.modifiers.alt {
                 SelectionType::Block
             } else if event.click_count >= 3 {
@@ -1719,18 +1692,6 @@ fn encode_mouse(
         column,
         row,
     ])
-}
-
-fn observe_acceptance_terminal_modes(mode: TermMode) {
-    if mode.contains(TermMode::ALT_SCREEN) {
-        acceptance::observe_counter("terminal_ui_alternate_screen", 1);
-    }
-    if mode.intersects(TermMode::MOUSE_MODE) {
-        acceptance::observe_counter("terminal_ui_mouse_mode", 1);
-    }
-    if mode.contains(TermMode::BRACKETED_PASTE) {
-        acceptance::observe_counter("terminal_ui_bracketed_paste_mode", 1);
-    }
 }
 
 fn encode_paste_payload(text: &str, mode: TermMode) -> Result<Vec<u8>, &'static str> {

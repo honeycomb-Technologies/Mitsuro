@@ -61,7 +61,6 @@ pub enum LayoutRegionId {
     /// Bottom border row — purple comet working edge while the agent runs.
     BottomDivider,
     Overlay,
-    Toast,
     ResizeMessage,
 }
 
@@ -80,6 +79,7 @@ impl InteractionId {
         Self(value.into())
     }
 
+    #[cfg(test)]
     pub fn as_str(&self) -> &str {
         &self.0
     }

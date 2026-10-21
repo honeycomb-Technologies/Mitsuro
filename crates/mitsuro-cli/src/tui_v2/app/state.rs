@@ -75,14 +75,6 @@ impl DecisionAction {
             Self::Inspect => Self::Approve,
         }
     }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Approve => "approve",
-            Self::Deny => "deny",
-            Self::Inspect => "inspect",
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -430,14 +422,6 @@ impl ComposerUiState {
         self.refresh_assist();
     }
 
-    pub fn delete_forward(&mut self) {
-        let (width, rows) = self.active_metrics(80, 6);
-        self.follow_cursor = true;
-        self.buffer.delete_forward();
-        self.buffer.ensure_cursor_visible(width, rows);
-        self.refresh_assist();
-    }
-
     pub fn delete_previous_word(&mut self) {
         let (width, rows) = self.active_metrics(80, 6);
         self.follow_cursor = true;
@@ -466,40 +450,6 @@ impl ComposerUiState {
         self.refresh_assist();
     }
 
-    pub fn clear_to_line_start_width(&mut self, width: usize) {
-        let (w, rows) = self.active_metrics(80, 6);
-        let width = width.max(1).max(w);
-        self.follow_cursor = true;
-        self.buffer.clear_to_line_start(width);
-        self.buffer.ensure_cursor_visible(width, rows);
-        self.refresh_assist();
-    }
-
-    pub fn delete_to_line_end_width(&mut self, width: usize) {
-        let (w, rows) = self.active_metrics(80, 6);
-        let width = width.max(1).max(w);
-        self.follow_cursor = true;
-        self.buffer.delete_to_line_end(width);
-        self.buffer.ensure_cursor_visible(width, rows);
-        self.refresh_assist();
-    }
-
-    pub fn move_left(&mut self) {
-        let (width, visible) = self.active_metrics(80, 6);
-        self.follow_cursor = true;
-        self.buffer.move_left(width);
-        self.buffer.ensure_cursor_visible(width, visible);
-        self.refresh_assist();
-    }
-
-    pub fn move_right(&mut self) {
-        let (width, visible) = self.active_metrics(80, 6);
-        self.follow_cursor = true;
-        self.buffer.move_right(width);
-        self.buffer.ensure_cursor_visible(width, visible);
-        self.refresh_assist();
-    }
-
     pub fn move_left_width(&mut self, width: usize, visible_rows: usize) {
         self.follow_cursor = true;
         self.field_width = width.max(1);
@@ -517,22 +467,6 @@ impl ComposerUiState {
         self.buffer.move_right(self.field_width);
         self.buffer
             .ensure_cursor_visible(self.field_width, self.field_rows);
-        self.refresh_assist();
-    }
-
-    pub fn move_to_line_start(&mut self) {
-        let (width, visible) = self.active_metrics(80, 6);
-        self.follow_cursor = true;
-        self.buffer.move_line_start(width);
-        self.buffer.ensure_cursor_visible(width, visible);
-        self.refresh_assist();
-    }
-
-    pub fn move_to_line_end(&mut self) {
-        let (width, visible) = self.active_metrics(80, 6);
-        self.follow_cursor = true;
-        self.buffer.move_line_end(width);
-        self.buffer.ensure_cursor_visible(width, visible);
         self.refresh_assist();
     }
 
@@ -565,24 +499,6 @@ impl ComposerUiState {
         } else {
             self.buffer.move_up(self.field_width, self.field_rows);
         }
-        self.refresh_assist();
-    }
-
-    pub fn move_document_start(&mut self, width: usize, visible_rows: usize) {
-        self.follow_cursor = true;
-        self.field_width = width.max(1);
-        self.field_rows = visible_rows.max(1);
-        self.buffer
-            .move_document_start(self.field_width, self.field_rows);
-        self.refresh_assist();
-    }
-
-    pub fn move_document_end(&mut self, width: usize, visible_rows: usize) {
-        self.follow_cursor = true;
-        self.field_width = width.max(1);
-        self.field_rows = visible_rows.max(1);
-        self.buffer
-            .move_document_end(self.field_width, self.field_rows);
         self.refresh_assist();
     }
 
@@ -649,25 +565,6 @@ impl ComposerUiState {
         self.file_search_open = completion.keep_open;
     }
 
-    pub fn set_cursor_from_visual(
-        &mut self,
-        column: usize,
-        row: usize,
-        width: usize,
-        visible_rows: usize,
-    ) {
-        self.follow_cursor = true;
-        self.field_width = width.max(1);
-        self.field_rows = visible_rows.max(1);
-        let byte = self
-            .buffer
-            .byte_from_click(column, row, self.field_width, self.field_rows);
-        self.buffer.set_cursor(byte);
-        self.buffer
-            .ensure_cursor_visible(self.field_width, self.field_rows);
-        self.refresh_assist();
-    }
-
     pub fn byte_from_visual(
         &self,
         column: usize,
@@ -677,10 +574,6 @@ impl ComposerUiState {
     ) -> usize {
         self.buffer
             .byte_from_click(column, row, width.max(1), visible_rows.max(1))
-    }
-
-    pub fn refresh_assist_public(&mut self) {
-        self.refresh_assist();
     }
 
     fn refresh_assist(&mut self) {

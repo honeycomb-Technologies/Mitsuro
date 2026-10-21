@@ -308,24 +308,6 @@ fn display_part(
                 DisplayPartKind::Tool(tool_display),
             )
         }
-        TimelinePart::Approval(approval) => display(
-            approval.id.clone(),
-            if approval.settled {
-                "Approval resolved".to_owned()
-            } else {
-                "Approval required".to_owned()
-            },
-            DisplayPartKind::Notice {
-                level: NoticeLevel::Authority,
-            },
-        ),
-        TimelinePart::Question(question) => display(
-            question.id.clone(),
-            question.title.clone(),
-            DisplayPartKind::Notice {
-                level: NoticeLevel::Authority,
-            },
-        ),
         TimelinePart::Notice(notice) => display(
             notice.id.clone(),
             notice.message.clone(),

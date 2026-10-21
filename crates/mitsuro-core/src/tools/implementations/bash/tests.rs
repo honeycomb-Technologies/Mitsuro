@@ -600,6 +600,7 @@ async fn delegated_shell_sandbox_blocks_absolute_writes_outside_its_root() {
     let working_dir = parent.path().join("assigned");
     let outside = parent.path().join("outside.txt");
     std::fs::create_dir(&working_dir).expect("assigned workspace");
+    std::fs::write(&outside, "host sentinel").expect("outside sentinel");
     let working_dir = working_dir.canonicalize().expect("canonical workspace");
     let ctx = ToolContext {
         working_dir: working_dir.clone(),
@@ -613,18 +614,27 @@ async fn delegated_shell_sandbox_blocks_absolute_writes_outside_its_root() {
 
     let escaped = BashTool
         .execute(
-            json!({"command": format!("printf escaped > {}", outside.display())}),
+            json!({"command": format!(
+                "printf escaped > {}",
+                shell_words::quote(&outside.to_string_lossy())
+            )}),
             &ctx,
         )
         .await;
-    assert!(escaped.is_error, "{}", escaped.output);
-    assert!(!outside.exists());
+    // A TMPDIR under /tmp is hidden by private scratch, where this write may
+    // succeed. The protected invariant is that the host file cannot change.
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("outside sentinel remains readable"),
+        "host sentinel",
+        "sandbox changed a host file outside its root: {}",
+        escaped.output
+    );
 
     let inside = BashTool
         .execute(
             json!({"command": format!(
                 "test -d {0} && printf safe > {0}/inside.txt",
-                working_dir.display()
+                shell_words::quote(&working_dir.to_string_lossy())
             )}),
             &ctx,
         )

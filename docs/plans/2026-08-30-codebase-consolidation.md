@@ -39,12 +39,12 @@ Every item must be verified dead by ref-counting before deletion.
    Only exhaustive-match arms and serde mappings exist; no constructors.
 3. **Uncompiled `agent/autonomy/team/` directory** (~858 LOC) — outside the
    module tree; delete.
-4. **Legacy plan/verify delegation resume path**:
-   `tools/implementations/agent/single.rs:622-1267` (`execute_plan`,
-   `execute_verify`, both `#[allow(dead_code)]`) and the entire
-   `agent/agent_types.rs` (280 LOC, `PlanConfig`/`VerifyConfig`).
-   **[DECISION]** Confirm no production DBs must resume planner/verifier-role
-   runs before deleting; else time-box with an expiry note.
+4. **Legacy plan/verify implementations — removed**: caller tracing showed
+   `execute_plan`, `execute_verify`, and `agent/agent_types.rs` were unreachable.
+   Resume uses `execute_resume_from_record` → `execute_spawn` → the shared child
+   executor; server replay uses `execute_single_child`. Persisted Planner/Verifier
+   roles, governance restoration, executor envelopes, and schema readers remain.
+   Removing these private bodies does not retire stored-data compatibility.
 5. **Dead pub APIs** (each verified zero-caller):
    - `ai/models/registry.rs`: `has_models`, `try_get_model`, `mark_recent`,
      `try_get_organized_models`, `try_has_models`

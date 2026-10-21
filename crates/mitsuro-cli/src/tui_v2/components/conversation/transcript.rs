@@ -274,7 +274,7 @@ fn render_part(
         DisplayPartKind::Notice { level } => {
             let color = match level {
                 NoticeLevel::Neutral => theme.foreground_muted,
-                NoticeLevel::Authority | NoticeLevel::Warning => theme.warning,
+                NoticeLevel::Warning => theme.warning,
                 NoticeLevel::Success => theme.success,
             };
             render_text(

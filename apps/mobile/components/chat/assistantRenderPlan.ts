@@ -1,19 +1,10 @@
 import type { ChatMessage, ChatRenderPart, ToolCall } from "@mitsuro/api";
-import {
-  isExplorationToolName,
-  isHiddenToolName,
-} from "./toolPresentation";
+import { isHiddenToolName } from "./toolPresentation";
 import {
   smoothInterruptedText,
   type AssistantVisualSegment,
 } from "./assistantTextSmoothing";
 
-export {
-  appendContinuationText,
-  shouldMergeContinuationText,
-  smoothInterruptedText,
-  startsLikeNewBlock,
-} from "./assistantTextSmoothing";
 export type { AssistantVisualSegment } from "./assistantTextSmoothing";
 
 /** Keep in sync with plan/mode tools filtered from UI in core tool policy. */
@@ -47,10 +38,6 @@ export function isPlanConfirmTool(toolCall: ToolCall): boolean {
 
 function isInternalTool(toolCall: ToolCall): boolean {
   return INTERNAL_TOOL_NAMES.has(toolCall.name) || isHiddenToolName(toolCall.name);
-}
-
-export function isExplorationTool(toolCall: ToolCall): boolean {
-  return isExplorationToolName(toolCall.name);
 }
 
 function legacyRenderParts(

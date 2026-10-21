@@ -9,10 +9,7 @@ use ratatui::{
 
 use crate::tui_v2::{
     app::state::{DecisionAction, UiState},
-    components::primitive::{
-        surface::{BorderMode, Surface, SurfaceLevel},
-        text_style::TextRole,
-    },
+    components::primitive::{surface::Surface, text_style::TextRole},
     input::action::{ActionId, ActionRegistry},
     layout::snapshot::{LayoutRegionId, LayoutSnapshot},
     model::capability::GlyphMode,
@@ -33,11 +30,7 @@ pub fn render_decision_dock(
         return;
     };
     let inner = Surface {
-        level: SurfaceLevel::Subtle,
-        border: BorderMode::Full,
         focused: matches!(state.focus, FocusTarget::DecisionDock),
-        title: None,
-        footer: None,
     }
     .render(frame, area, theme, state.capability);
     if let PendingInteraction::Questions(value) = pending {

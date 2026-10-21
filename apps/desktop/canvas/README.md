@@ -27,9 +27,9 @@ Normal startup can connect to the shared server. Use the
 companion. Do not restart or replace a running shared service to test the GUI.
 
 The full native interaction, recovery, scaling, and sustained-session acceptance
-pass is still outstanding. The acceptance probe module is a stub and the separate
-acceptance binary source is an unregistered prototype. Unit tests and the limited
-smoke do not establish that full acceptance pass.
+pass is still outstanding. Unit tests and the limited smoke do not establish that
+full acceptance pass. The unused acceptance prototype and no-op telemetry were
+removed; neither provided runtime validation.
 
 ## Packaging
 

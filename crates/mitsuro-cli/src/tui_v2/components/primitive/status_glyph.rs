@@ -13,9 +13,7 @@ pub enum StatusKind {
     Running,
     Success,
     Failed,
-    Warning,
     AwaitingAuthority,
-    Paused,
     Cancelled,
 }
 
@@ -36,8 +34,7 @@ impl StatusGlyph {
             ),
             StatusKind::Success => (symbols.success, theme.success),
             StatusKind::Failed => (symbols.failure, theme.error),
-            StatusKind::Warning | StatusKind::AwaitingAuthority => (symbols.warning, theme.warning),
-            StatusKind::Paused => (symbols.paused, theme.foreground_muted),
+            StatusKind::AwaitingAuthority => (symbols.warning, theme.warning),
             StatusKind::Cancelled => (symbols.failure, theme.foreground_muted),
         };
         Span::styled(symbol, Style::default().fg(color))

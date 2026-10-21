@@ -1,5 +1,0 @@
-.expo
-dist
-node_modules
-bun.lock
-expo-env.d.ts

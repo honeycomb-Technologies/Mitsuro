@@ -4203,8 +4203,11 @@ impl Database {
         // as a user room message.
         if current_version < 68 {
             info!("Running migration 68: Hive schedule group targeting");
-            let schedules_exist: bool = self
-                .conn
+            // Keep the column check and ALTER atomic across concurrent first opens.
+            let schedule_group_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive schedule group migration lock")?;
+            let schedules_exist: bool = schedule_group_tx
                 .query_row(
                     "SELECT EXISTS(
                          SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_schedules'
@@ -4214,8 +4217,7 @@ impl Database {
                 )
                 .context("Migration 68: checking for hive_schedules")?;
             if schedules_exist {
-                let has_group_id: bool = self
-                    .conn
+                let has_group_id: bool = schedule_group_tx
                     .query_row(
                         "SELECT EXISTS(
                              SELECT 1 FROM pragma_table_info('hive_schedules')
@@ -4226,7 +4228,7 @@ impl Database {
                     )
                     .context("Migration 68: checking hive_schedules.group_id")?;
                 if !has_group_id {
-                    self.conn
+                    schedule_group_tx
                         .execute_batch(
                             "ALTER TABLE hive_schedules ADD COLUMN group_id TEXT
                                  REFERENCES hive_groups(id) ON DELETE SET NULL;
@@ -4236,10 +4238,11 @@ impl Database {
                         .context("Migration 68: adding hive_schedules.group_id")?;
                 }
             }
-            self.conn.execute(
+            schedule_group_tx.execute(
                 "INSERT OR IGNORE INTO schema_version (version) VALUES (68)",
                 [],
             )?;
+            schedule_group_tx.commit()?;
         }
 
         // Migration 69: isolated group Worker lanes and crash-safe Worker

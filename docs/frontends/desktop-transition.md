@@ -10,10 +10,10 @@
 ## Abandoned development targets
 
 The earlier `apps/desktop/gpui` application, `apps/desktop/shell` Tauri host,
-`apps/desktop/ui` Expo desktop UI, and `crates/mitsuro-desktop-backend` are abandoned.
-They receive no new features and are excluded from active desktop build, version,
-and release targets. Retained files are historical and compatibility references.
-The old build/acceptance script entry points stop with a Canvas redirect.
+`apps/desktop/ui` Expo desktop UI, and `crates/mitsuro-desktop-backend` were retired
+before their source was removed. Their source, desktop-local compatibility
+readers, and retired build/acceptance tools remain recoverable at Git commit
+`07625972`. Active development, versioning, and release tooling targets Canvas.
 
 Canvas still uses the GPUI framework. This retirement concerns the old application,
 not the framework or the mobile/web Expo application.
@@ -21,7 +21,9 @@ not the framework or the mobile/web Expo application.
 ## Installed clients and stored state
 
 Source retirement does not uninstall an application, rewrite user data, replace a
-service, or remove tested legacy-name compatibility readers. Canvas has its own
+service, or remove shared runtime legacy-name compatibility readers. The removed
+Tauri reader belongs only to the retired application; an installed copy retains
+its existing migration behavior, and its source remains in Git history. Canvas has its own
 `mitsuro-canvas` executable and `io.mitsuro.canvas` desktop identity. The Linux alpha
 archive is extracted separately; it does not overwrite the old `mitsuro-desktop`
 launcher, Debian/RPM package, or Tauri installation.

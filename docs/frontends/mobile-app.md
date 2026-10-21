@@ -86,7 +86,6 @@ Components are organized into six directories under `components/`:
 **`desktop/`** -- Desktop-specific panels:
 
 - `Terminal` -- A Ghostty-powered terminal: native libghostty on iOS/Android and Ghostty WASM on web.
-- `WorkspacePreview` -- Shows a preview of the current project workspace.
 
 **`settings/`** -- The settings UI:
 
@@ -100,7 +99,6 @@ Components are organized into six directories under `components/`:
 
 - `GlassCard` -- A translucent card with blur effects, used throughout the app for list items and panels.
 - `MitsuroLogo` and `MitsuroWordmark` -- The canonical rounded-cell mark and lowercase product wordmark used in branded app states.
-- `SegmentControl` -- A segmented control widget.
 
 There are also two top-level components: `ReportsViewer` for browsing Hive reports and `SettingsModal` for the desktop settings overlay.
 

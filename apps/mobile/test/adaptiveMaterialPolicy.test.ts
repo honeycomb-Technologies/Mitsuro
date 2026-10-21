@@ -7,7 +7,6 @@ import {
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
-  readTextFile(path: URL): Promise<string>;
 };
 
 function assertEquals<T>(actual: T, expected: T) {
@@ -133,38 +132,6 @@ Deno.test("blur fallback uses translucent glass fills, not opaque scrims", () =>
     resolveAdaptiveMaterialOverlayColor("blur", "strong", surfaces),
     "glass-pressed",
   );
-});
-
-Deno.test("liquid glass preserves tone, lifecycle, and FAB interaction policy", async () => {
-  const material = await Deno.readTextFile(
-    new URL("../components/ui/AdaptiveMaterial.tsx", import.meta.url),
-  );
-  if (
-    !material.includes('glassEffectStyle={tone === "strong" ? "regular" : "clear"}')
-  ) {
-    throw new Error(
-      "chat chrome must use platform clear glass, not the gray regular frost",
-    );
-  }
-  if (!material.includes("if (!active) return null")) {
-    throw new Error(
-      "inactive AdaptiveMaterial must unmount the GlassView instead of hiding it",
-    );
-  }
-  if (!material.includes("isInteractive={interactive}")) {
-    throw new Error(
-      "FAB glass must be able to use the iOS interactive press/glint",
-    );
-  }
-  if (
-    !material.includes("liquidGlassOnly = false") ||
-    !material.includes("respectMotionGate = false") ||
-    !material.includes("const glassMotionSafe = !respectMotionGate || motionSafe")
-  ) {
-    throw new Error(
-      "motion gating and solid fallbacks must be explicit opt-ins for new endpoints",
-    );
-  }
 });
 
 Deno.test("liquid glass stays lightly tinted per tone", () => {

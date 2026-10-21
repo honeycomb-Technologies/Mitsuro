@@ -8,7 +8,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::elements::{InlineContent, ListItem, MarkdownElement, TableCell};
 use super::inline::{inline_width, render_inline, render_inline_with_links};
 use super::links::{LinkSpan, RenderedMarkdown};
-use crate::tui_support::themes::Theme;
+use super::MarkdownTheme;
 use crate::tui_support::utils::highlight_code;
 
 /// Border characters for code blocks and tables
@@ -78,7 +78,7 @@ fn center_block_lines(
 pub fn render_elements_with_links(
     elements: &[MarkdownElement],
     width: usize,
-    theme: &Theme,
+    theme: &MarkdownTheme,
 ) -> RenderedMarkdown {
     let mut lines = Vec::new();
     let mut all_links = Vec::new();
@@ -150,7 +150,7 @@ pub fn render_elements_with_links(
 fn render_paragraph_with_links(
     content: &[InlineContent],
     width: usize,
-    theme: &Theme,
+    theme: &MarkdownTheme,
     base_line: usize,
 ) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
     // Get spans and link positions (pre-wrap positions)
@@ -171,7 +171,7 @@ fn render_heading_with_links(
     level: u8,
     content: &[InlineContent],
     width: usize,
-    theme: &Theme,
+    theme: &MarkdownTheme,
     base_line: usize,
 ) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
     // Get spans and link positions
@@ -210,7 +210,7 @@ fn render_code_block(
     lang: Option<&str>,
     code: &str,
     width: usize,
-    theme: &Theme,
+    theme: &MarkdownTheme,
 ) {
     let lang_label = lang.unwrap_or("");
     // True structural diagrams only (box drawing). Arrow lists are NOT diagrams.
@@ -225,7 +225,12 @@ fn render_code_block(
 }
 
 /// Structural ascii/box diagrams: centered, no outer frame (they draw their own).
-fn render_diagram_block(lines: &mut Vec<Line<'static>>, code: &str, width: usize, theme: &Theme) {
+fn render_diagram_block(
+    lines: &mut Vec<Line<'static>>,
+    code: &str,
+    width: usize,
+    theme: &MarkdownTheme,
+) {
     let source_lines: Vec<String> = code
         .lines()
         .map(|line| clean_diagram_line(line.trim_end()))
@@ -261,7 +266,7 @@ fn render_framed_code_block(
     lang_label: &str,
     code: &str,
     width: usize,
-    theme: &Theme,
+    theme: &MarkdownTheme,
 ) {
     let border_style = Style::default().fg(theme.dim_color);
     let highlighted_lines = highlight_code(code, lang_label, theme);
@@ -429,7 +434,7 @@ fn render_list_with_links(
     start: Option<u64>,
     items: &[ListItem],
     width: usize,
-    theme: &Theme,
+    theme: &MarkdownTheme,
     depth: usize,
     base_line: usize,
 ) -> (Vec<Line<'static>>, Vec<LinkSpan>) {
@@ -507,7 +512,7 @@ fn render_table(
     headers: &[TableCell],
     rows: &[Vec<TableCell>],
     width: usize,
-    theme: &Theme,
+    theme: &MarkdownTheme,
 ) {
     if headers.is_empty() && rows.is_empty() {
         return;
@@ -711,7 +716,7 @@ fn push_block_trail(lines: &mut Vec<Line<'static>>) {
     lines.push(Line::from(""));
 }
 
-fn render_thematic_break(lines: &mut Vec<Line<'static>>, _width: usize, _theme: &Theme) {
+fn render_thematic_break(lines: &mut Vec<Line<'static>>, _width: usize, _theme: &MarkdownTheme) {
     // Just add a blank line instead of a horizontal rule
     lines.push(Line::from(""));
 }

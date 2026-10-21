@@ -59,6 +59,17 @@ Use Mitsuro for the harness and Hive for durable autonomous work in code,
 documentation, tests, packages, routes, storage, and release artifacts. Keep
 any prior-identity reader isolated to a tested compatibility boundary.
 
+## Tests that earn their maintenance cost
+
+Test observable behavior through production code, especially ownership, recovery,
+streaming, migrations, and failure handling. Do not copy an implementation into a
+test and test the copy, or assert source formatting and component spelling as a
+substitute for behavior. Reuse fixtures and table cases where they clarify the
+contract; remove tests with the retired implementation they only exercised.
+Keep a source-level check only when it enforces a named architecture, privacy, or
+compatibility boundary that cannot be checked more directly. Client changes run
+`deno task test:mobile`, `deno task test:state`, and `bun test packages/api/test tests`.
+
 ## Writing changesets
 
 Mitsuro uses [Sampo](https://github.com/bruits/sampo) for version bumps,

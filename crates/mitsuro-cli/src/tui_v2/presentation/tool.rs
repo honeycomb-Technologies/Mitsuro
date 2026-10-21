@@ -239,7 +239,6 @@ fn tool_has_expandable_body(part: &ToolPart) -> bool {
         ArtifactContent::WebDocument(document) => {
             !document.content.text.is_empty() || document.content.truncated()
         }
-        ArtifactContent::DurableReference { .. } => true,
     }
 }
 
@@ -318,11 +317,6 @@ fn artifact_content_key(part: &ToolPart) -> u64 {
             document.url.hash(&mut hasher);
             document.content.text.hash(&mut hasher);
             document.content.omitted_bytes.hash(&mut hasher);
-        }
-        ArtifactContent::DurableReference { label, reference } => {
-            5u8.hash(&mut hasher);
-            label.hash(&mut hasher);
-            reference.hash(&mut hasher);
         }
     }
     if let Some(warning) = &part.artifact.warning {
@@ -1024,12 +1018,6 @@ fn generic_lines(artifact: &ArtifactModel) -> Vec<ArtifactLine> {
                     .map(|line| ArtifactLine::plain(ArtifactLineKind::Plain, line)),
             );
             lines
-        }
-        ArtifactContent::DurableReference { label, reference } => {
-            vec![ArtifactLine::plain(
-                ArtifactLineKind::Meta,
-                format!("{label}: {reference}"),
-            )]
         }
     };
     if let Some(warning) = &artifact.warning {

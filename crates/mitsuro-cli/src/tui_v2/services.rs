@@ -268,12 +268,10 @@ impl RuntimeServices {
         let project_entries = index_project_entries(&working_dir);
         let (
             mut services,
-            mut legacy_channels,
+            oauth_events,
             process_registry,
             current_model,
             current_model_key,
-            _legacy_theme,
-            _legacy_theme_name,
             active_provider,
         ) = crate::tui_support::app_builder::init_services(&working_dir).await;
 
@@ -302,10 +300,6 @@ impl RuntimeServices {
             }
         }
 
-        let oauth_events = legacy_channels
-            .oauth_status
-            .take()
-            .ok_or_else(|| anyhow!("OAuth status channel was not initialized."))?;
         let (setup_updates, setup_events) = mpsc::unbounded_channel();
         Ok((
             Self {

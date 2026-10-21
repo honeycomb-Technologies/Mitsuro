@@ -19,6 +19,7 @@ pub struct PersistedMessage {
 }
 
 impl PersistedMessage {
+    #[cfg(test)]
     pub fn new(id: impl Into<String>, message: ModelMessage) -> Self {
         Self {
             id: Some(id.into()),

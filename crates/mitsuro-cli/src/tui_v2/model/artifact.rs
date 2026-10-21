@@ -69,7 +69,6 @@ pub enum ArtifactContent {
     Fields(Vec<ArtifactField>),
     WebResults(Vec<WebResultArtifact>),
     WebDocument(WebDocumentArtifact),
-    DurableReference { label: String, reference: String },
 }
 
 /// File-oriented presentation hints preserved from tool envelopes.

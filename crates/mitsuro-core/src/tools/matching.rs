@@ -51,37 +51,6 @@ pub fn fuzzy_find(content: &str, needle: &str) -> Option<MatchResult> {
     find_block_anchor(content, needle)
 }
 
-/// Find all occurrences using exact match only (for replace_all safety).
-pub fn fuzzy_find_all(content: &str, needle: &str) -> Vec<MatchResult> {
-    content
-        .match_indices(needle)
-        .map(|(start, matched)| MatchResult {
-            start,
-            end: start + matched.len(),
-            matched_text: matched.to_string(),
-            pass: 1,
-        })
-        .collect()
-}
-
-/// Count how many times needle matches in content across all passes.
-/// For determining uniqueness before applying a fuzzy edit.
-pub fn fuzzy_count(content: &str, needle: &str) -> usize {
-    // Exact matches first
-    let exact = content.matches(needle).count();
-    if exact > 0 {
-        return exact;
-    }
-
-    // For fuzzy passes, we only support single-match semantics.
-    // If fuzzy_find succeeds, that's 1 match.
-    if fuzzy_find(content, needle).is_some() {
-        1
-    } else {
-        0
-    }
-}
-
 /// Normalize whitespace: collapse runs of whitespace to single space, trim lines.
 pub fn normalize_whitespace(text: &str) -> String {
     text.lines()

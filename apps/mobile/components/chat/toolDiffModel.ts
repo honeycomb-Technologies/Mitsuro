@@ -178,14 +178,6 @@ export function buildToolDiffRows(presentation: ToolDiffPresentation): ToolDiffR
   return addInlineChangeRanges(rows);
 }
 
-/** Prefer changed lines for peeks; fall back to leading rows. */
-export function buildToolDiffPeekRows(
-  presentation: ToolDiffPresentation,
-  maxRows = 12,
-): ToolDiffRow[] {
-  return buildToolDiffPeekModel(presentation, maxRows).rows;
-}
-
 /** Build the expensive row model once and derive both peek rows and count. */
 export function buildToolDiffPeekModel(
   presentation: ToolDiffPresentation,
@@ -207,12 +199,6 @@ export function buildToolDiffPeekModel(
           : rows.slice(0, maxRows),
     changedRowCount: changed.length,
   };
-}
-
-export function toolDiffChangedRowCount(presentation: ToolDiffPresentation): number {
-  return buildToolDiffRows(presentation).filter(
-    (row) => row.kind === "addition" || row.kind === "deletion",
-  ).length;
 }
 
 function patchRows(patch: string): ToolDiffRow[] {
@@ -438,7 +424,6 @@ function convertApplyPatchToUnified(patch?: string): string | undefined {
 
   return output.length > 0 ? `${output.join("\n")}\n` : undefined;
 }
-
 
 export function buildReadFilePresentation(
   toolCall: ToolCall,

@@ -24,7 +24,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 ## Core Architecture
 - `crates/mitsuro-cli`: Terminal client and TUI runtime. Entry point with command parsing.
   - `src/main.rs`: CLI entry point, parses commands, starts ACP server or TUI with logging/setup.
-  - `src/tui/`: Terminal UI module with blocks, handlers, state, themes, plugins.
+  - `src/tui_v2/`: Terminal UI; `src/tui_support/` supplies shared rendering and services.
 - `crates/mitsuro-core`: Shared runtime library.
   - `src/ai/`: AI provider layer with multi-provider clients, streaming support.
   - `src/agent/`: Agent system with event handling, hooks, sub-agents, in-place compaction.
@@ -41,13 +41,13 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - `crates/mitsuro-server`: Self-host API plus embedded web bundle for external clients.
 - `apps/mobile`: Expo app that serves as the primary mobile client and React-based web surface.
 - `apps/desktop/canvas`: Primary desktop GUI, using shared Mitsuro contracts.
-- Desktop targets `apps/desktop/{gpui,shell,ui}` and `crates/mitsuro-desktop-backend`
-  are abandoned historical references: do not develop, build, package, or release them.
+- Retired GPUI, Tauri, Expo desktop UI, and desktop-backend implementations are
+  preserved in Git history; do not restore them as parallel product targets.
 - Interfaces: Canvas desktop, Expo mobile/web, CLI/TUI terminal; ACP for editors.
 
 ## Design Patterns
 - **Event Bus**: AgentEventBus as central dispatcher.
-- **Registry**: ToolRegistry, ThemeRegistry for centralized management.
+- **Registry**: ToolRegistry for centralized tool management.
 - **Plugin Architecture**: Trait-based plugins (e.g., StreamBlock trait for renderable blocks).
 - **Strategy/Polymorphism via traits**: Different providers, tool implementations.
 - **Manager Pattern**: McpManager, PlanManager, SkillsManager, SessionManager.
@@ -163,7 +163,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Push endpoints (`/push/*`) must stay aligned with mobile/web diagnostics and test-send flows.
 - Port proxy endpoints (`/ports/*`) must remain localhost-scoped and deny recursive self-proxy loops.
 
-### TUI (`crates/mitsuro-cli/src/tui/`)
+### TUI (`crates/mitsuro-cli/src/tui_v2/`)
 - Protect frame-time performance and input responsiveness. Avoid heavy allocations in render/event hot paths.
 - Keep streaming updates idempotent and visually stable.
 - Keep stream backpressure policy, queue telemetry, and interruption recovery messaging explicit in shared TUI state/handlers.
@@ -172,7 +172,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Plan/task UI state must come from persisted plan lifecycle or explicit loop events, not heuristic parsing of assistant prose.
 - Keep contrast/readability strong in both dense and sparse views. Theme additions must update registry wiring and defaults intentionally. Avoid hardcoding colors outside theme primitives.
 
-### TUI Handlers (`crates/mitsuro-cli/src/tui/handlers/`)
+### TUI Handlers (`crates/mitsuro-cli/src/tui_v2/app/`)
 - Keep keyboard/mouse/render handling deterministic.
 - Keep session/tool side effects explicit and traceable.
 - Keep model selection and quick-toggle flows on a shared handler path so persistence, auth rebinds, and recent-model state do not drift.

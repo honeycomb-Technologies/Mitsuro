@@ -34,7 +34,6 @@ use mitsuro_client::{
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use uuid::Uuid;
 
-use crate::acceptance;
 use crate::agent::{AgentSurface, AgentSurfaceEvent};
 use crate::browser_surface::BrowserSurface;
 use crate::preferences::{CanvasPersonalState, DesktopPreferences};
@@ -3266,18 +3265,6 @@ impl CanvasApp {
     }
 
     fn reconcile_local_collaboration(&mut self) {
-        acceptance::observe_collaboration(
-            &self.client_id,
-            self.collaboration
-                .clients
-                .values()
-                .filter(|client| !client.stale)
-                .map(|client| client.client_id.as_str()),
-            self.collaboration
-                .geometry_previews
-                .values()
-                .map(|preview| preview.client_id.as_str()),
-        );
         let owned_locks = self
             .collaboration
             .geometry_previews

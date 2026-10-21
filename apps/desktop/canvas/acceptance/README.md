@@ -33,9 +33,9 @@ the isolated companion's PID record instead of the user's running server.
 
 This is a small companion/window smoke, not the full 30-minute product
 acceptance harness. It does not prove gesture behavior, all resource lifecycle
-races, native performance, or production readiness. The product acceptance
-module is currently a stub; the separate acceptance prototype is not registered
-as a product binary. The nested-compositor acceptance wrapper is not included.
+races, native performance, or production readiness. The unregistered acceptance
+prototype and no-op product instrumentation have been removed; a full interactive
+acceptance harness remains future work.
 
 For the GUI check, use an available `WAYLAND_DISPLAY` or `DISPLAY` and the
 existing compositor. The runner records whether Hyprland reports a mapped

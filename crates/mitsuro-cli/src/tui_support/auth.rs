@@ -4,7 +4,7 @@
 
 use crate::ai::client::AiClientConfig;
 use crate::ai::models::{ModelAuthScope, ModelLookupError, ModelMetadata, SharedModelRegistry};
-use crate::ai::providers::{get_provider, translate_model_id, ProviderId};
+use crate::ai::providers::{get_provider, ProviderId};
 use crate::storage::CredentialStore;
 use mitsuro_core::ai::catalog::{
     credentials_for_dynamic_models, CatalogAuthKind, CatalogCredential,
@@ -150,27 +150,6 @@ pub fn infer_provider_for_model(
     });
     let first = candidates.next()?;
     candidates.next().is_none().then_some(first)
-}
-
-/// Translate a selected model to an equivalent for another provider.
-///
-/// Returns `None` when no model is selected or when there is no equivalent model
-/// for the target provider.
-pub fn translate_model_for_provider(
-    current_model: &str,
-    from_provider: ProviderId,
-    to_provider: ProviderId,
-) -> Option<String> {
-    let current_model = current_model.trim();
-    if current_model.is_empty() {
-        return None;
-    }
-
-    if from_provider == to_provider {
-        return Some(current_model.to_string());
-    }
-
-    translate_model_id(current_model, from_provider, to_provider)
 }
 
 #[cfg(test)]

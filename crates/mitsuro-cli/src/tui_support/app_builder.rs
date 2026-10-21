@@ -17,8 +17,7 @@ use crate::plugins::PluginManager;
 use crate::process::ProcessRegistry;
 use crate::storage::{CredentialStore, Database, Preferences, SessionManager};
 use crate::tools::{register_all_tools, ToolRegistry};
-use crate::tui_support::themes::{Theme, THEME_REGISTRY};
-use crate::tui_support::utils::{AsyncChannels, McpStatusUpdate};
+use crate::tui_support::utils::OAuthStatusUpdate;
 use crate::tui_support::AppServices;
 use mitsuro_core::mcp::{McpConnectionAuthority, McpPackageConfig};
 use mitsuro_core::skills::SkillsManager;
@@ -28,12 +27,10 @@ pub async fn init_services(
     working_dir: &Path,
 ) -> (
     AppServices,
-    AsyncChannels,
+    tokio::sync::mpsc::UnboundedReceiver<OAuthStatusUpdate>,
     Arc<ProcessRegistry>,
     String,
     Option<ModelKey>,
-    Arc<Theme>,
-    String,
     ProviderId,
 ) {
     let process_registry = Arc::new(ProcessRegistry::new());
@@ -203,9 +200,8 @@ pub async fn init_services(
     // compact wire surface for each turn.
     let cached_ai_tools = tool_registry.get_ai_tools_all().await;
 
-    // Preferences and theme
-    let (preferences, theme_name) = init_preferences(&db_path);
-    let theme = THEME_REGISTRY.get_or_default(&theme_name);
+    // Preferences
+    let preferences = init_preferences(&db_path);
 
     // Session manager
     let session_manager = init_session_manager(&db_path);
@@ -288,16 +284,10 @@ pub async fn init_services(
                 .collect(),
         )
         .await;
-    let (mcp_status_tx, mcp_status_rx) = tokio::sync::mpsc::unbounded_channel();
     let (oauth_status_tx, oauth_status_rx) = tokio::sync::mpsc::unbounded_channel();
 
     // Connect MCP servers in background
-    spawn_mcp_connections(&mcp_manager, &tool_registry, &mcp_status_tx).await;
-
-    // Set up channels
-    let mut channels = AsyncChannels::new();
-    channels.mcp_status = Some(mcp_status_rx);
-    channels.oauth_status = Some(oauth_status_rx);
+    spawn_mcp_connections(&mcp_manager, &tool_registry).await;
 
     let services = AppServices {
         plan_manager,
@@ -313,18 +303,15 @@ pub async fn init_services(
         plugin_manager,
         skills_manager,
         mcp_manager,
-        mcp_status_tx,
         oauth_status_tx,
     };
 
     (
         services,
-        channels,
+        oauth_status_rx,
         process_registry,
         current_model,
         current_model_key,
-        Arc::new(theme.clone()),
-        theme_name,
         active_provider,
     )
 }
@@ -360,17 +347,13 @@ async fn init_tool_registry(user_hook_manager: &Arc<RwLock<UserHookManager>>) ->
     tool_registry
 }
 
-/// Initialize preferences and get theme name
-fn init_preferences(db_path: &Path) -> (Option<Preferences>, String) {
+/// Initialize persisted terminal preferences.
+fn init_preferences(db_path: &Path) -> Option<Preferences> {
     match Database::new(db_path) {
-        Ok(db) => {
-            let prefs = Preferences::new(db);
-            let theme = prefs.get_theme();
-            (Some(prefs), theme)
-        }
+        Ok(db) => Some(Preferences::new(db)),
         Err(e) => {
             tracing::warn!("Failed to initialize preferences: {}", e);
-            (None, "mitsuro".to_string())
+            None
         }
     }
 }
@@ -529,7 +512,6 @@ fn init_model_registry(preferences: &Option<Preferences>) -> SharedModelRegistry
 async fn spawn_mcp_connections(
     mcp_manager: &Arc<mitsuro_core::mcp::McpManager>,
     tool_registry: &Arc<ToolRegistry>,
-    status_tx: &tokio::sync::mpsc::UnboundedSender<McpStatusUpdate>,
 ) {
     if let Err(e) = mcp_manager.load_config().await {
         tracing::warn!("Failed to load MCP config: {}", e);
@@ -542,7 +524,6 @@ async fn spawn_mcp_connections(
 
     let mcp = mcp_manager.clone();
     let registry = tool_registry.clone();
-    let status_tx = status_tx.clone();
 
     tokio::spawn(async move {
         if let Err(e) = mcp.connect_all().await {
@@ -552,10 +533,7 @@ async fn spawn_mcp_connections(
 
         let tool_count = mcp.get_all_tools().await.len();
         if tool_count > 0 {
-            let _ = status_tx.send(McpStatusUpdate {
-                success: true,
-                message: format!("MCP initialized ({} tools)", tool_count),
-            });
+            tracing::info!(tool_count, "MCP initialized");
         }
     });
 }

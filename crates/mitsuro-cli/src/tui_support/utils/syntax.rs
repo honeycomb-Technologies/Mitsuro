@@ -8,7 +8,7 @@ use syntect::highlighting::{FontStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-use crate::tui_support::themes::Theme;
+use crate::tui_support::markdown::MarkdownTheme;
 
 /// Global syntax set - loaded once at startup
 static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines);
@@ -17,7 +17,7 @@ static SYNTAX_SET: Lazy<SyntaxSet> = Lazy::new(SyntaxSet::load_defaults_newlines
 static THEME_SET: Lazy<ThemeSet> = Lazy::new(ThemeSet::load_defaults);
 
 /// Highlight a code block and return styled spans for each line
-pub fn highlight_code(code: &str, lang: &str, theme: &Theme) -> Vec<Vec<Span<'static>>> {
+pub fn highlight_code(code: &str, lang: &str, theme: &MarkdownTheme) -> Vec<Vec<Span<'static>>> {
     // Try to find syntax by extension or name
     let syntax = SYNTAX_SET
         .find_syntax_by_token(lang)
@@ -68,7 +68,10 @@ pub fn highlight_code(code: &str, lang: &str, theme: &Theme) -> Vec<Vec<Span<'st
 
 /// Map syntect's color to our theme colors based on the base16-ocean palette
 /// This gives us semantic highlighting that respects the user's theme
-fn map_syntect_color_to_theme(syntect_color: syntect::highlighting::Color, theme: &Theme) -> Color {
+fn map_syntect_color_to_theme(
+    syntect_color: syntect::highlighting::Color,
+    theme: &MarkdownTheme,
+) -> Color {
     // base16-ocean.dark palette colors (what syntect will output):
     // base00 = #2b303b (background)
     // base01 = #343d46 (lighter bg)

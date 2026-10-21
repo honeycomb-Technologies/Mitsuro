@@ -88,9 +88,6 @@ apps/
   desktop/canvas/  Canonical native desktop GUI. Consumes shared Mitsuro client/server
                    contracts for Agent, Hive, resources, and durable recovery.
 
-  desktop/gpui/    Abandoned earlier desktop application, retained as historical source.
-  desktop/shell/   Abandoned Tauri host; desktop/ui is also abandoned.
-
 packages/
   api/             TypeScript API client shared between mobile and web.
   state/           State management (Zustand) shared between mobile and web.

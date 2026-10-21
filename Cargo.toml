@@ -1,8 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "apps/desktop/canvas"]
-# Abandoned desktop implementations are retained as historical source only.
-exclude = ["apps/desktop/gpui", "crates/mitsuro-desktop-backend"]
 
 # Default to running mitsuro-cli
 default-members = ["crates/mitsuro-cli"]

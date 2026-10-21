@@ -35,6 +35,3 @@ export const HIVE_PRIMARY_NAV_ITEMS: HiveDrawerItem[] = [
     detail: "Shared notes and Worker recall",
   },
 ];
-
-/** @deprecated Use HIVE_PRIMARY_NAV_ITEMS. Kept for older imports. */
-export const HIVE_DRAWER_ITEMS = HIVE_PRIMARY_NAV_ITEMS;

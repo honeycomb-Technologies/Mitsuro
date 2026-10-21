@@ -18,7 +18,6 @@ use axum::{
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use mitsuro_core::ai::types::Content;
 use mitsuro_core::storage::{
     CanvasNode, CanvasNodeBinding, CanvasResourceCleanupClaim, CanvasResourceCreateClaim,
     CanvasResourceCreateIntent, CanvasResourceCreateStatus, CanvasResourceKind, Database,
@@ -1073,11 +1072,6 @@ fn canonical_request_json(request: &CreateCanvasResourceRequest) -> Result<Strin
     let mut canonical = request.clone();
     canonical.retry_ambiguous = false;
     serde_json::to_string(&canonical).map_err(AppError::from)
-}
-
-#[allow(dead_code)]
-fn canonical_initial_prompt_json(prompt: &str) -> Result<String, AppError> {
-    serde_json::to_string(&vec![Content::text(prompt.to_string())]).map_err(AppError::from)
 }
 
 fn stored_request(

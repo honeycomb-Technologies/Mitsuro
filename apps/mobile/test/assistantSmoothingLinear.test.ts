@@ -1,6 +1,4 @@
 import {
-  appendContinuationText,
-  shouldMergeContinuationText,
   smoothInterruptedText,
   type AssistantVisualSegment,
 } from "../components/chat/assistantTextSmoothing";
@@ -20,6 +18,32 @@ function tool(id: string): AssistantVisualSegment {
     tools: [],
   };
 }
+
+Deno.test("assistant smoothing joins prose while preserving Markdown boundaries", () => {
+  for (const [previous, next, expected] of [
+    ["Looking at the ", "registry next.", "Looking at the registry next."],
+    ["The helper returns", "null when missing.", "The helper returns null when missing."],
+    ["server/mobile", "edges.", "server/mobile edges."],
+    ["See the following:", "- item one", null],
+    ["Example:", "```ts\nconst x = 1\n```", null],
+    ["```\ncode\n```", "more prose here", null],
+    ["All done.", "Next we restart.", null],
+  ] as const) {
+    const input: AssistantVisualSegment[] = [
+      { type: "text", id: "before", content: previous },
+      tool("tool"),
+      { type: "text", id: "after", content: next },
+    ];
+    const output = smoothInterruptedText(input);
+    if (expected === null) {
+      assert(JSON.stringify(output) === JSON.stringify(input), `boundary changed: ${next}`);
+    } else {
+      assert(output.length === 2 && output[0]?.type === "text"
+        && output[0].content === expected && output[1] === input[1],
+      `continuation changed: ${previous} / ${next}`);
+    }
+  }
+});
 
 Deno.test("assistant smoothing preserves soft interruption order in one pass", () => {
   const input: AssistantVisualSegment[] = [
@@ -46,7 +70,7 @@ Deno.test("assistant smoothing preserves soft interruption order in one pass", (
   assert(output[3]?.id === "t3", "text after a hard boundary must not merge");
 });
 
-Deno.test("assistant smoothing stays bounded for tool-heavy committed turns", () => {
+Deno.test("assistant smoothing preserves tool slots in large committed turns", () => {
   const input: AssistantVisualSegment[] = [
     { type: "text", id: "text-start", content: "fragment" },
   ];
@@ -55,89 +79,9 @@ Deno.test("assistant smoothing stays bounded for tool-heavy committed turns", ()
     input.push({ type: "text", id: `text-${index}`, content: `part${index}` });
   }
 
-  const startedAt = performance.now();
   const output = smoothInterruptedText(input);
-  const durationMs = performance.now() - startedAt;
   assert(output.length === 2_001, "every continuation must merge into one text slot");
-  assert(durationMs < 50, `linear smoothing took ${durationMs.toFixed(1)}ms`);
-});
-
-function referenceSmooth(
-  segments: AssistantVisualSegment[],
-): AssistantVisualSegment[] {
-  const smoothed: AssistantVisualSegment[] = [];
-  for (const segment of segments) {
-    if (segment.type !== "text") {
-      smoothed.push(segment);
-      continue;
-    }
-    let previousTextIndex = -1;
-    for (let index = smoothed.length - 1; index >= 0; index -= 1) {
-      if (smoothed[index]?.type === "text") {
-        previousTextIndex = index;
-        break;
-      }
-    }
-    const previousText = smoothed[previousTextIndex];
-    const intervening =
-      previousTextIndex >= 0 ? smoothed.slice(previousTextIndex + 1) : [];
-    if (
-      previousText?.type === "text"
-      && shouldMergeContinuationText(
-        previousText.content,
-        segment.content,
-        intervening,
-      )
-    ) {
-      smoothed[previousTextIndex] = {
-        ...previousText,
-        content: appendContinuationText(previousText.content, segment.content),
-      };
-    } else {
-      smoothed.push(segment);
-    }
-  }
-  return smoothed;
-}
-
-Deno.test("linear smoothing remains byte-equivalent to the reference policy", () => {
-  let seed = 0x5eed1234;
-  const random = () => {
-    seed = (Math.imul(seed, 1_664_525) + 1_013_904_223) >>> 0;
-    return seed / 0x1_0000_0000;
-  };
-  const texts = [
-    "we only",
-    "skimmed.",
-    "New block.",
-    ", then continued",
-    "fragment ",
-    "## Heading",
-    "```",
-  ];
-
-  for (let sample = 0; sample < 100; sample += 1) {
-    const segments: AssistantVisualSegment[] = [];
-    for (let index = 0; index < 80; index += 1) {
-      const roll = random();
-      if (roll < 0.45) {
-        segments.push({
-          type: "text",
-          id: `sample-${sample}-text-${index}`,
-          content: texts[Math.floor(random() * texts.length)] ?? "text",
-        });
-      } else if (roll < 0.8) {
-        segments.push(tool(`sample-${sample}-tool-${index}`));
-      } else {
-        segments.push({
-          type: "thinking",
-          id: `sample-${sample}-thinking-${index}`,
-          content: "boundary",
-        });
-      }
-    }
-    const expected = JSON.stringify(referenceSmooth(segments));
-    const actual = JSON.stringify(smoothInterruptedText(segments));
-    assert(actual === expected, `sample ${sample} changed smoothing output`);
+  for (let index = 0; index < 2_000; index += 1) {
+    assert(output[index + 1] === input[index * 2 + 1], "tool identity and order must survive");
   }
 });

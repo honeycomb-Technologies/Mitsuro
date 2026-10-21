@@ -48,15 +48,6 @@ pub enum UiAction {
         action: DecisionAction,
     },
     ArtifactActivated(PartId),
-    ArtifactToggled(PartId),
-    ArtifactFullscreenChanged {
-        part_id: PartId,
-        fullscreen: bool,
-    },
-    ArtifactFollowLiveChanged {
-        part_id: PartId,
-        follow_live: bool,
-    },
     MotionPreferenceChanged(MotionPreference),
     ThemeChanged(crate::tui_v2::presentation::theme::ThemeKind),
     MotionAdvancedTo(u64),
@@ -193,32 +184,6 @@ pub fn reduce(state: &mut UiState, action: UiAction) -> Vec<UiEffect> {
                 .entry(part_id)
                 .or_default()
                 .toggle_expanded();
-            Vec::new()
-        }
-        UiAction::ArtifactToggled(part_id) => {
-            state
-                .artifacts
-                .entry(part_id)
-                .or_default()
-                .toggle_expanded();
-            Vec::new()
-        }
-        UiAction::ArtifactFullscreenChanged {
-            part_id,
-            fullscreen,
-        } => {
-            state
-                .artifacts
-                .entry(part_id)
-                .or_default()
-                .set_fullscreen(fullscreen);
-            Vec::new()
-        }
-        UiAction::ArtifactFollowLiveChanged {
-            part_id,
-            follow_live,
-        } => {
-            state.artifacts.entry(part_id).or_default().follow_live = follow_live;
             Vec::new()
         }
         UiAction::MotionPreferenceChanged(preference) => {
@@ -410,10 +375,6 @@ fn unwind_nearest(state: &mut UiState) -> Vec<UiEffect> {
     }
 
     if let Some(overlay) = &mut state.overlay {
-        if overlay.phase.is_nested() {
-            overlay.phase = OverlayPhase::Ready;
-            return Vec::new();
-        }
         let id = overlay.id;
         close_overlay(state, id);
         return Vec::new();
@@ -554,7 +515,7 @@ mod tests {
                 width: 120,
                 height: 36,
             },
-            UiAction::ArtifactToggled(part_id.clone()),
+            UiAction::ArtifactActivated(part_id.clone()),
             UiAction::FocusChanged(FocusTarget::Artifact { part_id }),
             UiAction::Invoke(ActionId::ToggleFullscreen),
             UiAction::MotionPreferenceChanged(MotionPreference::Off),

@@ -16,22 +16,18 @@ tokio = { version = "1.40", features = ["full"] }
 
 # Error Handling
 anyhow = "1.0"
-thiserror = "2.0"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
 
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async Utilities
-async-trait = "0.1"
 futures = "0.3"
 tokio-stream = "0.1"
-tokio-util = "0.7"
 
 # HTTP
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -41,40 +37,11 @@ ratatui = "0.29"
 ratatui-image = "4"
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
-textwrap = "0.16"
 arboard = "3"
 image = { version = "0.25", default-features = false, features = [
   "png",
   "jpeg",
 ] }
-palette = "0.7"
-
-
-# PTY / Terminal Emulation
-vt100 = "0.15"
-portable-pty = "0.8"
-
-# Database
-rusqlite = { version = "0.32", features = ["bundled"] }
-
-# WASM Extensions (Zed compatibility) - must match Zed's versions exactly
-wasmtime = { version = "29", default-features = false, features = [
-  "async",
-  "demangle",
-  "runtime",
-  "cranelift",
-  "component-model",
-  "incremental-cache",
-  "parallel-compilation",
-] }
-wasmtime-wasi = "29"
-wasmparser = "0.222"
-semver = "1.0"
-
-# Auth
-sha2 = "0.10"
-base64 = "0.22"
-rand = "0.8"
 
 # Configuration
 dirs = "6.0"
@@ -82,48 +49,21 @@ dirs = "6.0"
 # URL/Web
 url = "2.5"
 webbrowser = "1.0"
-open = "5"
-tiny_http = "0.12"
-
-# Web content processing
-html2md = "0.2"
-scraper = "0.18"
 
 # Utilities
-which = "7.0"
-chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.11", features = ["v4", "serde"] }
 regex = "1.11"
 once_cell = "1.20"
 clap = { version = "4.5", features = ["derive"] }
-glob = "0.3"
-walkdir = "2.5"
 similar = "2.4"
-shell-words = "1.1"
-scopeguard = "1.2"
-bytes = "1.10"
-
-# Archive handling (for Zed extensions)
-flate2 = "1.0"
-tar = "0.4"
-zip = "2.2"
-xz2 = "0.1"
 
 # Concurrency
-dashmap = "6.1"
-
-# System
-libc = "0.2"
-libloading = "0.8"
-edon = "0.0.27"
 parking_lot = "0.12"
-moka = { version = "0.12", features = ["sync"] }
 
 # File System
 ignore = "0.4"
 
-# Version Control
-git2 = "0.19"
+# Markdown
 pulldown-cmark = "0.13.0"
 
 # Syntax Highlighting
@@ -131,11 +71,8 @@ syntect = { version = "5.2", default-features = false, features = [
   "default-fancy",
 ] }
 
-# Gamepad support (Unix only — libudev on Linux, IOKit on macOS)
-[target.'cfg(unix)'.dependencies]
-gilrs = "0.11"
-
 [dev-dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3.14"
 
 [[bin]]

@@ -10,7 +10,6 @@ autobins = false
 [features]
 default = []
 component-harness = []
-acceptance = []
 
 [dependencies]
 alacritty_terminal = "0.25.1"

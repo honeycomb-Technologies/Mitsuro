@@ -31,7 +31,6 @@ pub enum SyntaxRole {
     Comment,
     Type,
     Variable,
-    Operator,
     Punctuation,
 }
 

@@ -8,18 +8,15 @@ use ratatui::{
 };
 use url::Url;
 
-use crate::tui_support::{
-    markdown::{self, RenderedMarkdown},
-    themes::{Theme, THEME_REGISTRY},
-};
+use crate::tui_support::markdown::{self, MarkdownTheme, RenderedMarkdown};
 
 use super::theme::SemanticTheme;
 use crate::tui_v2::model::capability::GlyphMode;
 
 /// Render assistant Markdown once for a specific layout width.
 ///
-/// The mature Markdown parser remains shared with the legacy client while this
-/// adapter owns the v2 palette and external-link safety boundary.
+/// The terminal Markdown parser uses the active semantic palette, with external
+/// links restricted to HTTP and HTTPS.
 pub fn render(
     text: &str,
     width: u16,
@@ -110,6 +107,7 @@ fn is_heading_line(line: &Line<'_>, heading_color: Color) -> bool {
 }
 
 /// Plain, readable text with exactly the same rows as the styled rendering.
+#[cfg(test)]
 pub fn measurement_text(lines: &[Line<'_>]) -> String {
     lines
         .iter()
@@ -151,26 +149,23 @@ fn use_ascii_borders(rendered: &mut RenderedMarkdown) {
     }
 }
 
-fn markdown_theme(theme: SemanticTheme) -> Theme {
-    let mut adapted = THEME_REGISTRY.get_or_default("mitsuro").clone();
-    adapted.bg_color = theme.canvas;
-    adapted.border_color = theme.border;
-    adapted.title_color = theme.identity;
-    adapted.accent_color = theme.accent;
-    adapted.text_color = theme.foreground;
-    adapted.dim_color = theme.foreground_muted;
-    adapted.code_bg_color = theme.code_surface;
-    adapted.link_color = theme.link;
-    adapted.syntax_keyword_color = theme.accent;
-    adapted.syntax_function_color = theme.success;
-    adapted.syntax_string_color = theme.identity;
-    adapted.syntax_number_color = theme.thinking;
-    adapted.syntax_comment_color = theme.foreground_muted;
-    adapted.syntax_type_color = theme.link;
-    adapted.syntax_variable_color = theme.foreground;
-    adapted.syntax_operator_color = theme.accent;
-    adapted.syntax_punctuation_color = theme.foreground;
-    adapted
+fn markdown_theme(theme: SemanticTheme) -> MarkdownTheme {
+    MarkdownTheme {
+        title_color: theme.identity,
+        accent_color: theme.accent,
+        text_color: theme.foreground,
+        dim_color: theme.foreground_muted,
+        code_bg_color: theme.code_surface,
+        link_color: theme.link,
+        syntax_keyword_color: theme.accent,
+        syntax_function_color: theme.success,
+        syntax_string_color: theme.identity,
+        syntax_number_color: theme.thinking,
+        syntax_comment_color: theme.foreground_muted,
+        syntax_type_color: theme.link,
+        syntax_variable_color: theme.foreground,
+        syntax_punctuation_color: theme.foreground,
+    }
 }
 
 #[cfg(test)]
