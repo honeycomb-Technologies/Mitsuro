@@ -602,7 +602,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let winner_path = directory.join("mitsuro");
-        let mut source = std::fs::File::open("/bin/sleep").expect("open harmless process");
+        let mut source = std::fs::File::open("/bin/sh").expect("open harmless process");
         let mut executable = std::fs::File::create(&winner_path).expect("create winner executable");
         fs2::FileExt::lock_exclusive(&executable).expect("lock winner writer");
         std::io::copy(&mut source, &mut executable).expect("copy harmless winner process");
@@ -619,11 +619,11 @@ mod tests {
         drop(executable);
 
         Command::new(&winner_path)
-            // uutils/BusyBox dispatch by argv[0], while /proc/PID/exe must
-            // retain the canonical `mitsuro` basename for the identity check.
-            .arg0("sleep")
-            .arg("60")
-            .stdin(Stdio::null())
+            // A shell builtin blocks on our retained pipe without execing a
+            // different binary or relying on coreutils' executable-name dispatch.
+            .arg0("sh")
+            .args(["-c", "read -r _"])
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .kill_on_drop(true)
