@@ -39,11 +39,18 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
   - `src/auth/`: OAuth/auth flows and token storage helpers.
   - `src/updater/`: Auto-updater for dev/release modes.
 - `crates/mitsuro-server`: Self-host API plus embedded web bundle for external clients.
+- `crates/mitsuro-hive`: Independently supervised Hive scheduler and execution service.
+- `crates/mitsuro-hive-protocol`: Authenticated local IPC between Hive and its control clients.
+- `crates/mitsuro-client`: Rust server API client used by Canvas.
+- `crates/grok-auth`: Provider authentication library used by core.
 - `apps/mobile`: Expo app that serves as the primary mobile client and React-based web surface.
 - `apps/desktop/canvas`: Primary desktop GUI, using shared Mitsuro contracts.
-- Retired GPUI, Tauri, Expo desktop UI, and desktop-backend implementations are
+- `apps/website`: Static SvelteKit product website and plugin catalog, separate from the Expo web client.
+- `packages/api`, `packages/state`, `packages/ui`: Shared TypeScript transport, client state, and theme tokens for Expo.
+- Retired GPUI mobile/client-state, GPUI desktop, Tauri, Expo desktop UI, and desktop-backend implementations are
   preserved in Git history; do not restore them as parallel product targets.
 - Interfaces: Canvas desktop, Expo mobile/web, CLI/TUI terminal; ACP for editors.
+- See [the module inventory](docs/architecture/overview.md) for current boundaries and source links.
 
 ## Design Patterns
 - **Event Bus**: AgentEventBus as central dispatcher.

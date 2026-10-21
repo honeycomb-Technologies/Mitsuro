@@ -36,10 +36,7 @@ jobs:
       - name: Test API streaming and error contracts
         run: bun test packages/api/test
       - name: Test mobile navigation and workspace contracts
-        run: |
-          bun test ./tests/mobile-first-send-workspace.test.ts
-          bun test ./tests/mobile-target-branch-continuation.test.ts
-          bun test ./tests/mobile-navigation-shell.test.ts
+        run: bun test ./tests
       - name: Test mobile behavior and compatibility contracts
         run: deno task test:mobile
       - name: Type-check shared client state

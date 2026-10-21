@@ -11,7 +11,13 @@ The Rust side of Mitsuro is organized as a Cargo workspace with seven Mitsuro cr
 - **mitsuro-server** (`crates/mitsuro-server`) -- The self-hosted API server built on Axum. It serves the REST/WebSocket APIs used by the mobile and desktop clients, and optionally embeds the web frontend (more on that below).
 - **mitsuro-hive** (`crates/mitsuro-hive`) -- The independently supervised autonomous execution owner, durable scheduler, recovery loop, and event-log service.
 - **mitsuro-hive-protocol** (`crates/mitsuro-hive-protocol`) -- The typed, authenticated local protocol shared by the server, daemon, and control clients.
-- **mitsuro-client** and **mitsuro-client-state** -- Typed transport and shared client-state boundaries.
+- **mitsuro-client** (`crates/mitsuro-client`) -- Typed Rust HTTP/SSE/WebSocket client used by Canvas.
+- **mitsuro-canvas** (`apps/desktop/canvas`) -- Native desktop workspace using the shared server contracts.
+- **grok-auth** (`crates/grok-auth`) -- Provider authentication support library used by core.
+
+Expo client state lives in `packages/state`. The unused Rust client-state
+experiment has been retired with its former GPUI mobile consumers; it is not
+part of the active workspace.
 
 The workspace root `Cargo.toml` sets a few important release profile options: link-time optimization (`lto = true`), a single codegen unit (`codegen-units = 1`), and symbol stripping (`strip = true`). These produce smaller, faster release binaries at the cost of longer compile times. The workspace also defines shared lint rules so all workspace crates enforce the same code quality standards through Clippy.
 
@@ -47,9 +53,14 @@ The CI workflow (`.github/workflows/ci.yml`) runs on every push to `main` and on
 | **Rust Clippy** | `cargo clippy --workspace -- -D warnings` -- lint pass with zero tolerance for warnings |
 | **Rust Format** | `cargo fmt --all -- --check` -- verifies formatting without modifying files |
 | **Client Quality Gates** | Calls the reusable client workflow: Bun API contract tests, Deno shared-state type-check/tests, mobile TypeScript, and Expo web export |
-| **Canvas Linux Packaging Contracts** | Canvas metadata, deterministic staging, and release checksum validation |
+| **Desktop Linux Bundle** | Builds the Expo companion web surface and release Canvas/server binaries, then packages and validates their exact-source Linux archive; also checks metadata and deterministic staging |
 
-Linux Rust jobs install the native headers required by the workspace. The Canvas packaging-contract job uses desktop-file and AppStream validators; the release job installs Canvas native build dependencies. Tauri bundling is no longer a CI target.
+Linux Rust jobs install the native headers required by the workspace. The
+required `Desktop Linux Bundle` status builds Canvas using the release packaging
+path and native dependencies, including desktop-file and AppStream validation.
+It keeps the existing required status name without building the retired Tauri
+application. The archive stays under `target/` in CI; this gate does not publish
+or install it. Workspace tests remain in the separate Rust Test job.
 
 All Rust jobs use `dtolnay/rust-toolchain@master` pinned to the stable channel. A PR cannot merge until every job is green.
 

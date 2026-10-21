@@ -164,14 +164,42 @@ jobs:
       - run: cargo fmt --all -- --check
 
   desktop-canvas-packaging:
-    name: Canvas Linux Packaging Contracts
-    needs: canonical-identity
+    name: Desktop Linux Bundle
+    needs: [canonical-identity, client-quality]
     runs-on: ubuntu-latest
+    env:
+      MITSURO_CANVAS_SOURCE_COMMIT: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v5
-      - name: Install metadata validators
-        run: sudo apt-get update && sudo apt-get install -y desktop-file-utils appstream jq
+      - name: Install Canvas build and metadata dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libudev-dev libgtk-3-dev libxcb1-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libfontconfig1-dev libssl-dev \
+            pkg-config desktop-file-utils appstream jq
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.18
+      - name: Build the companion web surface
+        working-directory: apps/mobile
+        run: |
+          bun install --frozen-lockfile
+          bunx expo export --platform web
       - name: Validate Canvas package metadata and deterministic staging
         run: apps/desktop/canvas/packaging/test-package-linux-alpha.sh
       - name: Test Canvas release asset validation
         run: python3 -m unittest scripts/test_check_canvas_release.py scripts/test_interface_versions.py
+      - name: Build Native Canvas and server companion
+        run: cargo build --release --locked -p mitsuro-canvas -p mitsuro
+      - name: Package and validate the exact Canvas source
+        run: |
+          apps/desktop/canvas/packaging/package-linux-alpha.sh \
+            --canvas-bin "$PWD/target/release/mitsuro-canvas" \
+            --server-bin "$PWD/target/release/mitsuro" \
+            --output-dir "$PWD/target/canvas-ci-package"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("apps/desktop/canvas/Cargo.toml", "rb"))["package"]["version"])')
+          python3 scripts/check-canvas-release.py target/canvas-ci-package "$version" "$(git rev-parse HEAD)"

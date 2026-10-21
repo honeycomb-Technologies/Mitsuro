@@ -5226,15 +5226,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mitsuro-client-state"
-version = "0.10.1"
-dependencies = [
- "mitsuro-client",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "mitsuro-core"
 version = "0.10.1"
 dependencies = [
