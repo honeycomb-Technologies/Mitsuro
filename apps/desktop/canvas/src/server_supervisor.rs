@@ -653,14 +653,20 @@ mod tests {
         })
         .to_string();
         let health_server = tokio::spawn(async move {
+            let mut starting = true;
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     return;
                 };
                 let mut request = [0_u8; 2048];
                 let _ = stream.read(&mut request).await;
+                let status = if std::mem::replace(&mut starting, false) {
+                    "503 Service Unavailable"
+                } else {
+                    "200 OK"
+                };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                     body.len(), body
                 );
                 let _ = stream.write_all(response.as_bytes()).await;
@@ -671,8 +677,30 @@ mod tests {
         let pid_path = mitsuro_core::paths::config_dir().join("server.pid");
         std::fs::create_dir_all(pid_path.parent().expect("PID parent"))
             .expect("create isolated PID parent");
+        // Modern companions hold this lock while starting. Without it, a failed
+        // health probe correctly removes the legacy record and loses this port.
+        let singleton_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(pid_path.with_extension("pid.lock"))
+            .expect("open isolated singleton lock");
+        fs2::FileExt::try_lock_exclusive(&singleton_lock).expect("claim singleton authority");
         std::fs::write(&pid_path, format!("{winner_pid}:{port}"))
             .expect("publish isolated winner record");
+
+        assert!(detect_running_server().await.is_none());
+        assert_eq!(
+            read_pid_file(),
+            Some(ServerInstance {
+                pid: winner_pid,
+                port
+            })
+        );
+        let discovered = detect_running_server()
+            .await
+            .expect("locked winner must remain discoverable after its startup health failure");
 
         let mut loser = Command::new("/bin/false")
             .stdin(Stdio::null())
@@ -680,13 +708,20 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn losing companion");
-        let result =
-            wait_for_server(BootstrapOutcome::SpawnedCompanion, Some(&mut loser), None).await;
+        // Keep health polling on the discovered fixture, never a real service
+        // that could be listening on the canonical port during a local run.
+        let result = wait_for_server(
+            BootstrapOutcome::SpawnedCompanion,
+            Some(&mut loser),
+            Some(discovered),
+        )
+        .await;
 
         health_server.abort();
         let _ = winner.start_kill();
         let _ = winner.wait().await;
         let _ = remove_pid_file_if_matches(winner_pid, port);
+        drop(singleton_lock);
 
         let connection = result.expect("loser must attach to the compatible winner");
         assert_eq!(connection.outcome, BootstrapOutcome::Reused);
