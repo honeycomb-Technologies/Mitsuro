@@ -329,7 +329,10 @@ export class MitsuroClient {
 			method: "GET",
 			headers: this.headers(),
 		});
-		if (summaryResponse.status === 409) {
+		if (summaryResponse.redirected) {
+			throw new MitsuroApiError(summaryResponse.status, "Agent control probe was redirected", "");
+		}
+		if (summaryResponse.status === 409 || summaryResponse.status === 404) {
 			return null;
 		}
 		if (!summaryResponse.ok) {
@@ -340,7 +343,26 @@ export class MitsuroClient {
 				text,
 			);
 		}
-		const summary = (await summaryResponse.json()) as AgentControlState;
+		const summaryText = await summaryResponse.text();
+		const contentType = summaryResponse.headers.get("content-type")
+			?.split(";", 1)[0]?.trim().toLowerCase();
+		// Pre-lease servers send their SPA (or no-web placeholder) for unknown
+		// routes. Re-probe on every mutation so a server upgrade takes effect.
+		if (summaryResponse.status === 200 && (
+			(contentType === "text/html" && /^\s*(?:<!doctype html(?:\s|>)|<html(?:\s|>))/i.test(summaryText)) ||
+			(contentType === "text/plain" && summaryText ===
+				"Mitsuro API server running. Web frontend not embedded in this build.")
+		)) {
+			return null;
+		}
+		const summary = JSON.parse(summaryText) as AgentControlState;
+		if (!summary || typeof summary !== "object" || summary.session_id !== sessionId ||
+			!Number.isSafeInteger(summary.ttl_seconds) || summary.ttl_seconds < 0 ||
+			(summary.controller != null && (typeof summary.controller !== "object" ||
+				typeof summary.controller.client_id !== "string" ||
+				typeof summary.controller.expires_at !== "string"))) {
+			throw new MitsuroApiError(summaryResponse.status, "Invalid Agent control response", summaryText);
+		}
 		if (summary.controller) {
 			if (summary.controller.client_id !== this.agentControlClientId) {
 				throw new MitsuroApiError(

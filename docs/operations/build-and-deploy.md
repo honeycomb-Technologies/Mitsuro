@@ -52,6 +52,7 @@ The CI workflow (`.github/workflows/ci.yml`) runs on every push to `main` and on
 | **Rust Test** | `cargo test --workspace` -- runs the full test suite |
 | **Rust Clippy** | `cargo clippy --workspace -- -D warnings` -- lint pass with zero tolerance for warnings |
 | **Rust Format** | `cargo fmt --all -- --check` -- verifies formatting without modifying files |
+| **Windows Check** | `cargo check --locked --target x86_64-pc-windows-msvc -p mitsuro` -- checks the CLI and server with Windows dependency selection |
 | **Client Quality Gates** | Calls the reusable client workflow: Bun API contract tests, Deno shared-state type-check/tests, mobile TypeScript, and Expo web export |
 | **Desktop Linux Bundle** | Builds the Expo companion web surface and release Canvas/server binaries, then packages and validates their exact-source Linux archive; also checks metadata and deterministic staging |
 
@@ -62,7 +63,27 @@ It keeps the existing required status name without building the retired Tauri
 application. The archive stays under `target/` in CI; this gate does not publish
 or install it. Workspace tests remain in the separate Rust Test job.
 
-All Rust jobs use `dtolnay/rust-toolchain@master` pinned to the stable channel. A PR cannot merge until every job is green.
+All Rust jobs use `dtolnay/rust-toolchain@master` on the rolling stable channel.
+Use the same stable Rust version for local validation; an older local Clippy
+passing does not establish that the current CI toolchain passes. Keep shared
+server dependencies outside target-specific tables so Windows checks include
+the HTTP, WebSocket, and push notification clients. A PR cannot merge until
+every required job is green.
+
+### Mixed-version Code control
+
+Client and server upgrades can arrive independently. Clients probe the Code
+control route before mutations; an absent route or the preceding server's SPA
+fallback allows the original mutation without a lease. Authentication, network, and malformed
+JSON failures still stop the mutation. The next mutation probes again so a
+server upgrade enables leases without restarting the client.
+
+Previously shipped clients do not carry a stable device identity or lease token.
+The server groups their mutations under one compatibility controller with a
+15-second stale window. A live modern controller rejects legacy mutations;
+modern clients must wait for the compatibility controller to expire or take
+control explicitly. Invalid or stale supplied tokens never become legacy
+requests. Existing session ownership checks apply to both paths.
 
 ### Default-branch and governance preflight
 

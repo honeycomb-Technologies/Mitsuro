@@ -4,6 +4,8 @@
 //! process-local: durable Agent sessions survive a server restart, while
 //! mutation authority does not. Public snapshots expose only controller
 //! identity and expiry; the opaque token is returned only by an explicit take.
+//! Installed clients without lease support share a short-lived legacy controller.
+//! Their requests carry no device identity, but never override a native lease.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -23,8 +25,23 @@ const MAX_CLIENT_ID_BYTES: usize = 128;
 const MAX_LEASES: usize = 4_096;
 
 #[derive(Debug, Clone)]
+enum LeaseOwner {
+    Client(String),
+    Legacy,
+}
+
+impl LeaseOwner {
+    fn client_id(&self) -> &str {
+        match self {
+            Self::Client(client_id) => client_id,
+            Self::Legacy => "legacy-client",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct LeaseState {
-    client_id: String,
+    owner: LeaseOwner,
     token: String,
     last_seen: Instant,
 }
@@ -70,21 +87,17 @@ impl SessionControlLeaseRegistry {
         validate_client_id(&client_id)?;
         self.prune_expired();
         if let Some(current) = self.leases.get(session_id) {
-            if current.client_id != client_id && !force {
+            if !matches!(&current.owner, LeaseOwner::Client(id) if id == &client_id) && !force {
                 return Err(AppError::Conflict(format!(
                     "Code Agent is controlled by another client ({})",
-                    current.client_id
+                    current.owner.client_id()
                 )));
             }
         }
-        if self.leases.len() >= MAX_LEASES && !self.leases.contains_key(session_id) {
-            return Err(AppError::ServiceUnavailable(
-                "Code Agent control lease registry is at capacity".to_owned(),
-            ));
-        }
+        self.ensure_capacity(session_id)?;
 
         let lease = LeaseState {
-            client_id,
+            owner: LeaseOwner::Client(client_id),
             token: Uuid::new_v4().to_string(),
             last_seen: Instant::now(),
         };
@@ -108,7 +121,9 @@ impl SessionControlLeaseRegistry {
                     .to_owned(),
             )
         })?;
-        if lease.client_id != client_id || !constant_time_token_eq(&lease.token, token) {
+        if !matches!(&lease.owner, LeaseOwner::Client(id) if id == client_id)
+            || !constant_time_token_eq(&lease.token, token)
+        {
             return Err(AppError::Conflict(
                 "Code Agent control lease is held by another client".to_owned(),
             ));
@@ -122,32 +137,54 @@ impl SessionControlLeaseRegistry {
         })
     }
 
-    /// Authorize a Code mutation only under an active matching lease. A
-    /// matching token also renews the stale window.
+    /// Matching tokens renew native authority. Tokenless installed clients may
+    /// claim or renew only legacy authority; a live native owner fences them.
+    /// A supplied stale/invalid token is never treated as a legacy request.
     pub(crate) fn authorize_mutation(
         &mut self,
         session_id: &str,
         token: Option<&str>,
     ) -> Result<(), AppError> {
         self.prune_expired();
+        if token.is_none() && !self.leases.contains_key(session_id) {
+            self.ensure_capacity(session_id)?;
+            self.leases.insert(
+                session_id.to_owned(),
+                LeaseState {
+                    owner: LeaseOwner::Legacy,
+                    token: String::new(),
+                    last_seen: Instant::now(),
+                },
+            );
+        }
         let Some(lease) = self.leases.get_mut(session_id) else {
             return Err(AppError::Conflict(
                 "Code Agent control lease is required; take control before mutating it".to_owned(),
             ));
         };
-        let token = token.filter(|token| !token.is_empty()).ok_or_else(|| {
-            AppError::Conflict(format!(
-                "Code Agent is controlled by another client ({})",
-                lease.client_id
-            ))
-        })?;
-        if !constant_time_token_eq(&lease.token, token) {
+        let authorized = match (&lease.owner, token) {
+            (LeaseOwner::Legacy, None) => true,
+            (LeaseOwner::Client(_), Some(token)) if !token.is_empty() => {
+                constant_time_token_eq(&lease.token, token)
+            }
+            _ => false,
+        };
+        if !authorized {
             return Err(AppError::Conflict(format!(
                 "Code Agent is controlled by another client ({})",
-                lease.client_id
+                lease.owner.client_id()
             )));
         }
         lease.last_seen = Instant::now();
+        Ok(())
+    }
+
+    fn ensure_capacity(&self, session_id: &str) -> Result<(), AppError> {
+        if self.leases.len() >= MAX_LEASES && !self.leases.contains_key(session_id) {
+            return Err(AppError::ServiceUnavailable(
+                "Code Agent control lease registry is at capacity".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -164,7 +201,7 @@ impl SessionControlLeaseRegistry {
     fn private_lease(&self, session_id: &str, lease: &LeaseState) -> SessionControlLease {
         SessionControlLease {
             resource_id: session_id.to_owned(),
-            client_id: lease.client_id.clone(),
+            client_id: lease.owner.client_id().to_owned(),
             lease_token: lease.token.clone(),
             expires_at: expiry_timestamp(self.ttl),
         }
@@ -218,7 +255,7 @@ fn validate_client_id(client_id: &str) -> Result<(), AppError> {
 fn summary_with_ttl(lease: &LeaseState, ttl: Duration) -> SessionControlLeaseSummary {
     let remaining = ttl.saturating_sub(lease.last_seen.elapsed());
     SessionControlLeaseSummary {
-        client_id: lease.client_id.clone(),
+        client_id: lease.owner.client_id().to_owned(),
         expires_at: expiry_timestamp(remaining),
     }
 }
@@ -267,16 +304,46 @@ mod tests {
             .expect("new controller token");
     }
 
-    #[tokio::test]
-    async fn mutation_requires_a_lease_before_acquisition_and_after_expiry() {
-        let mut registry = SessionControlLeaseRegistry::new(Duration::from_millis(2));
+    #[test]
+    fn legacy_mutations_reserve_control_until_expiry_or_explicit_transfer() {
+        let mut registry = SessionControlLeaseRegistry::default();
+        registry
+            .authorize_mutation("code-1", None)
+            .expect("legacy claim");
+        registry
+            .authorize_mutation("code-1", None)
+            .expect("legacy renewal");
+        assert!(registry
+            .take("code-1", "canvas-a".to_owned(), false)
+            .is_err());
+        // The public display label is never treated as a native client identity.
+        assert!(registry
+            .take("code-1", "legacy-client".to_owned(), false)
+            .is_err());
+        let native = registry
+            .take("code-1", "canvas-a".to_owned(), true)
+            .expect("explicit native transfer");
         assert!(registry.authorize_mutation("code-1", None).is_err());
         registry
-            .take("code-1", "canvas-a".to_owned(), false)
-            .expect("lease");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        assert!(registry.authorize_mutation("code-1", None).is_err());
+            .authorize_mutation("code-1", Some(&native.lease_token))
+            .expect("native authority");
+        registry.leases.get_mut("code-1").unwrap().last_seen =
+            Instant::now().checked_sub(CONTROL_LEASE_TTL).unwrap();
+        assert!(registry
+            .authorize_mutation("code-1", Some(&native.lease_token))
+            .is_err());
         assert!(registry.snapshot("code-1").controller.is_none());
+        registry
+            .authorize_mutation("code-1", None)
+            .expect("legacy claim after expiry");
+        assert!(registry
+            .authorize_mutation("code-1", Some(&native.lease_token))
+            .is_err());
+        registry.leases.get_mut("code-1").unwrap().last_seen =
+            Instant::now().checked_sub(CONTROL_LEASE_TTL).unwrap();
+        registry
+            .take("code-1", "canvas-a".to_owned(), false)
+            .expect("passive native claim after legacy expiry");
     }
 
     #[test]

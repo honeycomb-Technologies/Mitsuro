@@ -99,6 +99,16 @@ impl MitsuroClient {
         let http = Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .default_headers(headers)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                // A redirected login/SPA is not evidence that control is unsupported.
+                if attempt.previous().last().is_some_and(|url| {
+                    url.path().contains("/sessions/") && url.path().ends_with("/control")
+                }) {
+                    attempt.stop()
+                } else {
+                    reqwest::redirect::Policy::default().redirect(attempt)
+                }
+            }))
             .build()
             .context("building Mitsuro HTTP client")?;
         Ok(Self {
@@ -1333,7 +1343,8 @@ impl MitsuroClient {
     }
 
     /// Keep older shipped Rust callers operational under strict Code Agent
-    /// authority. Chat/Hive control endpoints return 409 and bypass this path;
+    /// authority. Chat/Hive return 409; pre-lease servers return 404 or their
+    /// known web fallback. Probe each mutation so upgrades are discovered.
     /// Code is claimed only when unowned or already owned by this client.
     async fn compatibility_agent_lease(&self, session_id: &str) -> Result<Option<String>> {
         let mut control = self.compatibility_agent_control.lock().await;
@@ -1345,10 +1356,38 @@ impl MitsuroClient {
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;
-        if response.status() == StatusCode::CONFLICT {
+        if matches!(
+            response.status(),
+            StatusCode::CONFLICT | StatusCode::NOT_FOUND
+        ) {
             return Ok(None);
         }
-        let state = decode_json_response::<AgentControlState>(response, &url).await?;
+        let response = ensure_success(response).await?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let body = response
+            .text()
+            .await
+            .with_context(|| format!("reading response from {url}"))?;
+        if status == StatusCode::OK && legacy_agent_control_fallback(&content_type, &body) {
+            return Ok(None);
+        }
+        let state: AgentControlState =
+            serde_json::from_str(&body).with_context(|| format!("decoding response from {url}"))?;
+        if state.session_id != session_id {
+            return Err(anyhow!(
+                "Agent control response targets a different session"
+            ));
+        }
         if let Some(controller) = state.controller.as_ref() {
             if controller.client_id != control.client_id {
                 return Err(anyhow!(
@@ -1518,6 +1557,21 @@ fn compatibility_agent_client_id() -> String {
         std::process::id(),
         NEXT_CLIENT_ID.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+fn legacy_agent_control_fallback(content_type: &str, body: &str) -> bool {
+    if content_type == "text/plain" {
+        return body == "Mitsuro API server running. Web frontend not embedded in this build.";
+    }
+    if content_type != "text/html" {
+        return false;
+    }
+    let html = body.trim_start().to_ascii_lowercase();
+    ["<!doctype html", "<html"].into_iter().any(|prefix| {
+        html.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix.starts_with('>') || suffix.starts_with(char::is_whitespace)
+        })
+    })
 }
 
 fn with_agent_control_lease(
@@ -2018,60 +2072,143 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compatibility_steer_claims_control_before_serializing_the_mutation() {
+    async fn compatibility_steer_reprobes_legacy_servers_and_claims_after_upgrade() {
         use std::io::{Read as _, Write as _};
 
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        let address = listener.local_addr().expect("test server address");
-        let server = std::thread::spawn(move || {
-            let responses = [
-                r#"{"session_id":"session-1","controller":null,"ttl_seconds":15}"#,
-                r#"{"lease":{"resource_id":"session-1","client_id":"compat","lease_token":"compat-secret","expires_at":"later"}}"#,
-                r#"{"status":"accepted","pending_id":"pending-1"}"#,
-            ];
-            for (index, body) in responses.into_iter().enumerate() {
-                let (mut socket, _) = listener.accept().expect("accept request");
-                let mut request = [0_u8; 8192];
-                let size = socket.read(&mut request).expect("read request");
-                let request = String::from_utf8_lossy(&request[..size]);
-                match index {
-                    0 => assert!(request.starts_with("GET /api/sessions/session-1/control ")),
-                    1 => {
-                        assert!(request.starts_with("POST /api/sessions/session-1/control "));
-                        assert!(request.contains("\"force\":false"));
-                        assert!(request.contains("\"client_id\":\"mitsuro-client-"));
+        for legacy in [
+            (
+                "404 Not Found",
+                "application/json",
+                r#"{"error":"not found"}"#,
+            ),
+            (
+                "200 OK",
+                "text/html; charset=utf-8",
+                "<!DOCTYPE html><html></html>",
+            ),
+            (
+                "200 OK",
+                "text/plain",
+                "Mitsuro API server running. Web frontend not embedded in this build.",
+            ),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let address = listener.local_addr().expect("test server address");
+            let server = std::thread::spawn(move || {
+                let accepted = r#"{"status":"accepted","pending_id":"pending-1"}"#;
+                let responses = [
+                    legacy,
+                    ("200 OK", "application/json", accepted),
+                    (
+                        "200 OK",
+                        "application/json",
+                        r#"{"session_id":"session-1","controller":null,"ttl_seconds":15}"#,
+                    ),
+                    (
+                        "200 OK",
+                        "application/json",
+                        r#"{"lease":{"resource_id":"session-1","client_id":"compat","lease_token":"compat-secret","expires_at":"later"}}"#,
+                    ),
+                    ("200 OK", "application/json", accepted),
+                ];
+                for (index, (status, content_type, body)) in responses.into_iter().enumerate() {
+                    let (mut socket, _) = listener.accept().expect("accept request");
+                    let mut request = [0_u8; 8192];
+                    let size = socket.read(&mut request).expect("read request");
+                    let request = String::from_utf8_lossy(&request[..size]);
+                    match index {
+                        0 | 2 => {
+                            assert!(request.starts_with("GET /api/sessions/session-1/control "))
+                        }
+                        1 => {
+                            assert!(request.starts_with("POST /api/chat/steer "));
+                            assert!(!request
+                                .to_ascii_lowercase()
+                                .contains("x-mitsuro-control-lease:"));
+                        }
+                        3 => {
+                            assert!(request.starts_with("POST /api/sessions/session-1/control "));
+                            assert!(request.contains("\"force\":false"));
+                            assert!(request.contains("\"client_id\":\"mitsuro-client-"));
+                        }
+                        4 => {
+                            assert!(request.starts_with("POST /api/chat/steer "));
+                            assert!(request
+                                .to_ascii_lowercase()
+                                .contains("x-mitsuro-control-lease: compat-secret"));
+                        }
+                        _ => unreachable!(),
                     }
-                    2 => {
-                        assert!(request.starts_with("POST /api/chat/steer "));
-                        assert!(request
-                            .to_ascii_lowercase()
-                            .contains("x-mitsuro-control-lease: compat-secret"));
-                    }
-                    _ => unreachable!(),
+                    socket.write_all(format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()).as_bytes()).expect("write response");
                 }
-                socket
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .as_bytes(),
-                    )
-                    .expect("write response");
+            });
+            let client = MitsuroClient::new(format!("http://{address}")).expect("client");
+            for _ in 0..2 {
+                let response = client
+                    .steer(SteerRequest {
+                        session_id: "session-1".to_owned(),
+                        message: "preserve shipped caller".to_owned(),
+                        content: Vec::new(),
+                    })
+                    .await
+                    .expect("compatibility steer");
+                assert_eq!(response.pending_id, "pending-1");
             }
-        });
+            server.join().expect("test server join");
+        }
+    }
 
-        let client = MitsuroClient::new(format!("http://{address}")).expect("client");
-        let response = client
-            .steer(SteerRequest {
-                session_id: "session-1".to_owned(),
-                message: "preserve shipped caller".to_owned(),
-                content: Vec::new(),
-            })
-            .await
-            .expect("compatibility steer");
-        assert_eq!(response.pending_id, "pending-1");
-        server.join().expect("test server join");
+    #[tokio::test]
+    async fn compatibility_control_does_not_downgrade_auth_redirect_or_invalid_json_errors() {
+        use std::io::{Read as _, Write as _};
+
+        for (status, content_type, body) in [
+            ("401 Unauthorized", "application/json", "{}"),
+            ("403 Forbidden", "application/json", "{}"),
+            ("503 Service Unavailable", "text/html", "<html></html>"),
+            ("200 OK", "application/json", "invalid json"),
+            ("200 OK", "application/json", "{}"),
+            (
+                "200 OK",
+                "application/json",
+                r#"{"session_id":"other-session","controller":null,"ttl_seconds":15}"#,
+            ),
+            ("200 OK", "application/json", "<html></html>"),
+            ("200 OK", "text/html", "upstream failed"),
+            ("200 OK", "text/plain", "not the known server placeholder"),
+            ("302 Found", "text/html", "<html>login</html>"),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test server");
+            let address = listener.local_addr().expect("server address");
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().expect("accept probe");
+                let mut request = [0_u8; 2048];
+                let size = socket.read(&mut request).expect("read probe");
+                assert!(String::from_utf8_lossy(&request[..size])
+                    .starts_with("GET /api/sessions/session-1/control "));
+                socket.write_all(format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nLocation: /login\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()).as_bytes()).expect("write response");
+            });
+            let client = MitsuroClient::new(format!("http://{address}")).expect("client");
+            let error = client
+                .compatibility_agent_lease("session-1")
+                .await
+                .expect_err("unrecognized/authenticated failures must not enable legacy mutations");
+            if status == "302 Found" {
+                assert!(
+                    error.to_string().contains("302"),
+                    "redirect must not be followed"
+                );
+            }
+            server.join().expect("server join");
+            assert!(
+                client.compatibility_agent_lease("session-1").await.is_err(),
+                "a failed network probe must not enable legacy mutations"
+            );
+        }
     }
 
     #[test]

@@ -1361,7 +1361,7 @@ async fn session_cancel_signals_the_owned_active_run() {
 }
 
 #[tokio::test]
-async fn code_agent_cancel_requires_and_renews_the_active_controller_token() {
+async fn legacy_code_agent_cancel_yields_to_explicit_native_control() {
     let (state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     let session_id = create_owned_code_session(&state, "alice", "Controlled Cancellation");
@@ -1372,21 +1372,32 @@ async fn code_agent_cancel_requires_and_renews_the_active_controller_token() {
         .await
         .insert(session_id.clone(), input_tx);
 
-    let unclaimed = cancel_session(
+    let legacy = cancel_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
         Path(session_id.clone()),
         HeaderMap::new(),
     )
-    .await;
-    assert!(matches!(unclaimed, Err(AppError::Conflict(_))));
-    assert!(input_rx.try_recv().is_err());
+    .await
+    .expect("installed client may claim an unowned Code Agent");
+    assert!(legacy.0.ok);
+    assert!(matches!(input_rx.try_recv(), Ok(LoopInput::Cancel)));
+    let renewed = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        HeaderMap::new(),
+    )
+    .await
+    .expect("the installed client may renew its compatibility control");
+    assert!(renewed.0.ok);
+    assert!(matches!(input_rx.try_recv(), Ok(LoopInput::Cancel)));
 
     let lease = state
         .session_control_leases
         .write()
         .await
-        .take(&session_id, "canvas-a".to_owned(), false)
+        .take(&session_id, "canvas-a".to_owned(), true)
         .expect("control lease");
 
     let denied = cancel_session(
@@ -1417,7 +1428,7 @@ async fn code_agent_cancel_requires_and_renews_the_active_controller_token() {
 }
 
 #[tokio::test]
-async fn expired_code_agent_lease_does_not_reopen_tokenless_mutation() {
+async fn expired_code_agent_lease_rejects_stale_tokens_but_allows_legacy_claim() {
     let (mut state, _temp_dir) = create_test_state();
     create_test_user(&state, "alice");
     let session_id = create_owned_code_session(&state, "alice", "Expired Control");
@@ -1432,7 +1443,7 @@ async fn expired_code_agent_lease_does_not_reopen_tokenless_mutation() {
         .write()
         .await
         .insert(session_id.clone(), input_tx);
-    state
+    let lease = state
         .session_control_leases
         .write()
         .await
@@ -1440,15 +1451,30 @@ async fn expired_code_agent_lease_does_not_reopen_tokenless_mutation() {
         .expect("short lease");
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
 
+    let mut stale_headers = HeaderMap::new();
+    stale_headers.insert(
+        crate::control_leases::CONTROL_LEASE_HEADER,
+        lease.lease_token.parse().expect("lease header"),
+    );
     let denied = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        stale_headers,
+    )
+    .await;
+    assert!(matches!(denied, Err(AppError::Conflict(_))));
+    assert!(input_rx.try_recv().is_err());
+    let legacy = cancel_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
         Path(session_id),
         HeaderMap::new(),
     )
-    .await;
-    assert!(matches!(denied, Err(AppError::Conflict(_))));
-    assert!(input_rx.try_recv().is_err());
+    .await
+    .expect("installed client may claim after native expiry");
+    assert!(legacy.0.ok);
+    assert!(matches!(input_rx.try_recv(), Ok(LoopInput::Cancel)));
 }
 
 #[tokio::test]
@@ -1479,7 +1505,7 @@ async fn session_cancel_rejects_a_foreign_owner_without_signalling() {
     let result = cancel_session(
         State(state.clone()),
         Some(current_user("bob", state.working_dir.as_ref())),
-        Path(session_id),
+        Path(session_id.clone()),
         axum::http::HeaderMap::new(),
     )
     .await;
@@ -1487,6 +1513,16 @@ async fn session_cancel_rejects_a_foreign_owner_without_signalling() {
     assert!(matches!(result, Err(AppError::NotFound(_))));
     assert!(input_rx.try_recv().is_err());
     assert!(!child_cancellation.is_cancelled());
+    assert!(
+        state
+            .session_control_leases
+            .write()
+            .await
+            .snapshot(&session_id)
+            .controller
+            .is_none(),
+        "a foreign tenant must not acquire even compatibility control"
+    );
 }
 
 #[tokio::test]

@@ -598,22 +598,44 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn losing_companion_process_reuses_one_compatible_singleton_winner() {
+    fn spawn_harmless_winner(directory: &Path) -> Child {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let temp = tempfile::tempdir().expect("temp dir");
-        let winner_path = temp.path().join("mitsuro");
-        std::fs::copy("/bin/sleep", &winner_path).expect("copy harmless winner process");
-        std::fs::set_permissions(&winner_path, std::fs::Permissions::from_mode(0o700))
+        let winner_path = directory.join("mitsuro");
+        let mut source = std::fs::File::open("/bin/sleep").expect("open harmless process");
+        let mut executable = std::fs::File::create(&winner_path).expect("create winner executable");
+        fs2::FileExt::lock_exclusive(&executable).expect("lock winner writer");
+        std::io::copy(&mut source, &mut executable).expect("copy harmless winner process");
+        executable
+            .set_permissions(std::fs::Permissions::from_mode(0o700))
             .expect("make winner executable");
-        let mut winner = Command::new(&winner_path)
+
+        // std::fs opens CLOEXEC files, but a parallel fork can inherit the writer until exec,
+        // causing ETXTBSY even after our copy closes. The inherited flock lasts
+        // until that last writer closes; reacquire it through a read-only file.
+        drop(executable);
+        let executable = std::fs::File::open(&winner_path).expect("reopen winner read-only");
+        fs2::FileExt::lock_shared(&executable).expect("wait for inherited winner writers");
+        drop(executable);
+
+        Command::new(&winner_path)
+            // uutils/BusyBox dispatch by argv[0], while /proc/PID/exe must
+            // retain the canonical `mitsuro` basename for the identity check.
+            .arg0("sleep")
             .arg("60")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
+            .kill_on_drop(true)
             .spawn()
-            .expect("spawn singleton winner");
+            .expect("spawn singleton winner")
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn losing_companion_process_reuses_one_compatible_singleton_winner() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut winner = spawn_harmless_winner(temp.path());
         let winner_pid = winner.id().expect("winner pid");
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -675,20 +697,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn reuses_a_health_proven_mitsuro_without_a_pid_record() {
-        use std::os::unix::fs::PermissionsExt as _;
-
         let temp = tempfile::tempdir().expect("temp dir");
-        let winner_path = temp.path().join("mitsuro");
-        std::fs::copy("/bin/sleep", &winner_path).expect("copy harmless winner process");
-        std::fs::set_permissions(&winner_path, std::fs::Permissions::from_mode(0o700))
-            .expect("make winner executable");
-        let mut winner = Command::new(&winner_path)
-            .arg("60")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn singleton winner");
+        let mut winner = spawn_harmless_winner(temp.path());
         let winner_pid = winner.id().expect("winner pid");
 
         let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
