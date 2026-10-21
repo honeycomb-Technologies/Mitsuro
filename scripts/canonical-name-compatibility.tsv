@@ -37,22 +37,6 @@ content	.gitignore	91	.krusty/
 content	AGENTS.md	20	- The supported terminal command is `mitsuro`. The deprecated `krusty` command remains a tested compatibility alias for the announced transition window; removing it requires the migration cutover criteria to pass.
 content	README.md	39	| **Terminal** | Interactive coding via the modern Mitsuro TUI (`mitsuro` / `krusty` alias) |
 content	README.md	90	`mitsuro` is the primary command. The deprecated `krusty` command remains a
-content	apps/desktop/shell/README.md	48	  (`io.krusty.desktop` / early `dev.krusty.desktop`) for offline migration — not product branding.
-content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	12	const LEGACY_DESKTOP_ID: &str = "io.krusty.desktop";
-content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	13	const EARLY_DEVELOPMENT_DESKTOP_ID: &str = "dev.krusty.desktop";
-content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	183	        "window.__MITSURO_SERVER_URL='http://localhost:{0}';window.__MITSURO_SERVER_TOKEN='local';window.__KRUSTY_SERVER_URL='http://localhost:{0}';window.__KRUSTY_SERVER_TOKEN='local';",
-content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	954	        assert!(script.contains("__KRUSTY_SERVER_URL='http://localhost:4321'"));
-content	apps/desktop/shell/src-tauri/src/desktop_identity_compatibility.rs	955	        assert!(script.contains("__KRUSTY_SERVER_TOKEN='local'"));
-content	apps/desktop/ui/app/onboarding.tsx	20	  const injected = (window as any).__KRUSTY_SERVER_URL;
-content	apps/desktop/ui/app/onboarding.tsx	30	    typeof window !== 'undefined' && (window as any).__KRUSTY_SERVER_TOKEN
-content	apps/desktop/ui/app/onboarding.tsx	31	      ? String((window as any).__KRUSTY_SERVER_TOKEN)
-content	apps/desktop/ui/scripts/smoke-chat-stream.mjs	5	const base = process.env.KRUSTY_URL || 'http://127.0.0.1:3000';
-content	apps/desktop/ui/scripts/smoke-chat-stream.mjs	6	const token = process.env.KRUSTY_TOKEN || 'local';
-content	apps/desktop/ui/src/bootstrap/desktopConnection.ts	43	  const existingUrl = (window as any).__KRUSTY_SERVER_URL;
-content	apps/desktop/ui/src/bootstrap/desktopConnection.ts	44	  const existingToken = (window as any).__KRUSTY_SERVER_TOKEN;
-content	apps/desktop/ui/src/bootstrap/desktopConnection.ts	56	      (window as any).__KRUSTY_SERVER_URL = baseUrl;
-content	apps/desktop/ui/src/bootstrap/desktopConnection.ts	57	      (window as any).__KRUSTY_SERVER_TOKEN = 'local';
-content	apps/desktop/ui/src/host/desktopHost.ts	13	      w.__KRUSTY_DESKTOP_HOST === true,
 content	apps/mobile/EAS-PROJECT.md	4	- App `slug` is currently **`krusty`** so it matches the existing Expo project
 content	apps/mobile/EAS-PROJECT.md	6	- Apple bundle id remains **io.krusty.mobile** (TestFlight / App Store freeze).
 content	apps/mobile/EAS-PROJECT.md	14	Slug for project identified by "extra.eas.projectId" (krusty)
@@ -114,7 +98,6 @@ content	apps/mobile/test/identityMigration.test.ts	303	    new URL("../widgets/M
 content	apps/mobile/test/identityMigration.test.ts	312	    names.includes("HiveWidget") && names.includes("MakoWidget"),
 content	apps/mobile/test/identityMigration.test.ts	480	      'createWidget("MakoWidget", HiveWidgetView)',
 content	apps/mobile/test/identityMigration.test.ts	318	      sync.includes('require("../widgets/MakoWidget")'),
-content	apps/mobile/test/jsHotPathProbe.test.ts	17	      source.includes("EXPO_PUBLIC_KRUSTY_JS_HOTPATH_PROBE === '1'") &&
 content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	57	  // Expo project 6e327449-... is still named "krusty" on expo.dev. EAS requires
 content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	60	  const allowedSlugs = new Set(["mitsuro", "krusty"]);
 content	apps/mobile/test/mitsuroBrandGuardrails.test.ts	63	    "the Expo slug must be mitsuro (canonical) or krusty (EAS project transition)",
@@ -142,13 +125,6 @@ content	crates/mitsuro-cli/Cargo.toml	145	name = "krusty"
 content	crates/mitsuro-cli/Cargo.toml	146	path = "src/bin/krusty.rs"
 content	crates/mitsuro-cli/src/bin/krusty.rs	6	    eprintln!("`krusty` is deprecated; use `mitsuro` (arguments are forwarded unchanged)");
 content	crates/mitsuro-cli/src/main.rs	72	    #[command(name = "hive", alias = "mako", args_conflicts_with_subcommands = true)]
-content	crates/mitsuro-cli/src/tui_support/plugins/js.rs	87	globalThis.__krustyPluginRegistry = globalThis.__mitsuroPluginRegistry;
-content	crates/mitsuro-cli/src/tui_support/plugins/js.rs	88	globalThis.__krustyPluginLogs = globalThis.__mitsuroPluginLogs;
-content	crates/mitsuro-cli/src/tui_support/plugins/js.rs	99	globalThis.krusty = globalThis.mitsuro;
-content	crates/mitsuro-cli/src/tui_support/plugins/js.rs	106	}} else if (globalThis.krustyPlugin) {{
-content	crates/mitsuro-cli/src/tui_support/plugins/js.rs	107	  globalThis.__mitsuroPluginRegistry[{plugin_id}] = globalThis.krustyPlugin;
-content	crates/mitsuro-cli/src/tui_support/plugins/legacy_identity.rs	3	pub(super) const NATIVE_PLUGIN_ENTRY_SYMBOL: &[u8] = b"krusty_plugin_entry";
-content	crates/mitsuro-cli/src/tui_support/plugins/retroarch_identity.rs	14	const LEGACY_RELATIVE_ROOT: &str = ".config/krusty/gameboy-color";
 content	crates/mitsuro-cli/src/tui_v2/projection/tests.rs	190	    assert_eq!(agent_text.join(""), "Checking Hive/Mako next.");
 content	crates/mitsuro-cli/src/tui_v2/services.rs	2031	        assert_eq!(parse_theme_kind("krusty"), None);
 content	crates/mitsuro-client/src/types.rs	274	    #[serde(alias = "mako")]
@@ -465,8 +441,6 @@ content	crates/mitsuro-core/src/storage/database_tests/core.rs	546	            A
 content	crates/mitsuro-core/src/storage/database_tests/core.rs	547	            ALTER TABLE hive_control_outbox RENAME TO mako_control_outbox;
 content	crates/mitsuro-core/src/storage/database_tests/core.rs	634	    const SENTINEL: &str = "MAKO_CRASH_WINDOW_SECRET_SENTINEL_44";
 content	crates/mitsuro-core/src/storage/database_tests/core.rs	636	    let db_path = temp_dir.path().join("mako-privacy-crash-window.db");
-content	crates/mitsuro-core/src/storage/database_tests/migrations.rs	145	        .expect("query Mako schedule columns")
-content	crates/mitsuro-core/src/storage/database_tests/migrations.rs	147	        .expect("collect Mako schedule columns");
 content	crates/mitsuro-core/src/storage/database_tests/migrations.rs	200	         CREATE TABLE mako_schedules (
 content	crates/mitsuro-core/src/storage/database_tests/migrations.rs	204	         INSERT INTO mako_schedules (id, model) VALUES ('legacy', 'shared-model');",
 content	crates/mitsuro-core/src/storage/memories/model.rs	55	    #[serde(alias = "mako")]

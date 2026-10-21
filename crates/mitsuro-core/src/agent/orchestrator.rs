@@ -21,10 +21,13 @@
 mod message_builder;
 mod persistence;
 mod recovery;
+#[cfg(test)]
+mod runtime_tests;
 mod title;
 mod tool_surface;
+mod workflow_runtime;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -33,7 +36,6 @@ use chrono::Utc;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::ai::client::{AiClient, CallOptions, RemoteAttemptPolicy};
-use crate::ai::retry::is_retryable_error_message;
 use crate::ai::transport_policy::StreamTransportPolicy;
 use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
 use crate::constants;
@@ -50,12 +52,7 @@ use crate::tools::registry::{
 use crate::tools::registry::{
     trusted_changed, FileObservationTracker, PermissionMode, ToolRegistry,
 };
-use crate::workflow::{
-    AttemptProgressInput, AttemptStatus, GoalStatus, StartAttemptInput, WorkflowManager,
-    WorkflowMutation, WorkflowStepStatus, DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
-    DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS, DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
-    DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
-};
+use crate::workflow::{AttemptStatus, GoalStatus, WorkflowManager, WorkflowStepStatus};
 
 use super::compaction::{
     effective_context_window_for_runtime, is_context_overflow_error,
@@ -68,7 +65,7 @@ use super::context_ledger::ContextLedger;
 use super::executor;
 use super::failure;
 use super::loop_events::{LoopEvent, LoopInput, LoopInputInbox, LoopStopReason};
-use super::progress::{DelegationCheckpoint, DelegationNudgeTracker, LoopGuard};
+use super::progress::{DelegationNudgeTracker, LoopGuard};
 use super::run_spec::RunContextMode;
 use super::state::{RunBudget, RunBudgetResolution};
 use super::stream;
@@ -84,13 +81,21 @@ use super::{
 };
 
 use self::message_builder::{build_assistant_message, finalize_explore_only_turn};
-use self::persistence::{persist_context_state, save_message, set_agent_state};
+use self::persistence::{
+    clear_recovery_state, persist_context_state, save_message, set_agent_state, update_token_count,
+};
 use self::recovery::{
     build_awaiting_input_recovery_state, build_partial_assistant_state, build_recovery_state,
     continuation_recovery_message,
 };
 use self::title::maybe_generate_title;
 use self::tool_surface::{advertised_names, ModeAwareToolSurface};
+use self::workflow_runtime::{
+    active_goal_for_run, awaiting_background_delegation, block_active_goal_for_stop,
+    ensure_active_goal_attempt_for_run, finish_active_attempt_for_stop, goal_final_disposition,
+    pause_active_goal_for_stop, record_active_attempt_progress, record_active_goal_tokens,
+    AttemptProgressTracker, GoalFinalDisposition, GOAL_FINAL_CONTINUATION,
+};
 use crate::plan::has_active_workflow_or_plan;
 
 const EMPTY_COMPLETION_RECOVERY_INSTRUCTION: &str = "[EMPTY RESPONSE RECOVERY]\nThe previous model completion contained no user-visible text or tool call. Continue the same turn from the existing conversation and provide the response requested by the user now, or make a necessary new tool call. Do not repeat a completed tool call merely because the prior completion was empty, and do not mention this recovery instruction.";
@@ -98,7 +103,7 @@ const AWAITING_INPUT_PERSISTENCE_ERROR: &str =
     "Unable to safely pause for user input because the continuation policy could not be persisted.";
 const EMPTY_COMPLETION_ERROR: &str = "The AI provider completed twice without producing user-visible text or a tool call. Try again or choose another model.";
 const EMPTY_COMPLETION_AFTER_SERVER_TOOL_ERROR: &str = "The AI provider completed after hosted tool activity without producing a user-visible response. The hosted tool was not replayed; try again or choose another model.";
-const LOOP_GUARD_LANDING_FALLBACK: &str = "I stopped this run after the loop guard detected repeated work without enough new evidence. The evidence gathered so far remains available; a new instruction can steer a different approach.";
+const LOOP_GUARD_LANDING_FALLBACK: &str = super::loop_kernel::LANDING_FALLBACK_USER;
 
 /// Canonical Chat/Code/Hive-session persistence is not the durable record for
 /// a WorkerGoal run. Its trigger, assistant stream, and tool protocol belong
@@ -355,14 +360,15 @@ fn provider_options_for_turn(options: &CallOptions, landing: bool) -> CallOption
         request_options.web_search = None;
         request_options.web_fetch = None;
         request_options.codex_parallel_tool_calls = false;
+        request_options.parallel_tool_calls = Some(false);
     }
     request_options
 }
 
 fn loop_guard_landing_instruction(landing: &LoopGuardLanding) -> String {
-    format!(
-        "[LOOP GUARD LANDING]\n{}\n\nThis is the one bounded synthesis turn. No tools are available. Give the user a concise evidence-based answer, identify any unresolved blocker, and state what new direction would be needed to continue. Do not request or describe another tool call.",
-        landing.diagnostic
+    super::loop_kernel::loop_guard_landing_instruction(
+        &landing.diagnostic,
+        super::loop_kernel::LandingAudience::User,
     )
 }
 
@@ -376,10 +382,11 @@ enum EmptyCompletionAction {
 fn empty_completion_action(
     text: &str,
     tool_calls: &[AiToolCall],
+    has_citations: bool,
     retry_attempted: bool,
     had_server_tool_activity: bool,
 ) -> EmptyCompletionAction {
-    if !text.trim().is_empty() || !tool_calls.is_empty() {
+    if !text.trim().is_empty() || !tool_calls.is_empty() || has_citations {
         EmptyCompletionAction::None
     } else if retry_attempted || had_server_tool_activity {
         EmptyCompletionAction::Fail
@@ -468,281 +475,6 @@ fn finish_worker_provider_attention(
         session_id: session_id.to_string(),
         stop_reason: LoopStopReason::AwaitingInput,
     });
-}
-
-fn active_goal_for_run(db_path: &Path, session_id: &str) -> bool {
-    WorkflowManager::new(db_path.to_path_buf())
-        .and_then(|manager| manager.get_snapshot(session_id))
-        .map(|snapshot| snapshot.is_some_and(|snapshot| snapshot.goal.status == GoalStatus::Active))
-        .unwrap_or_else(|error| {
-            tracing::warn!(
-                session_id,
-                %error,
-                "Failed to resolve durable Goal before agent run"
-            );
-            false
-        })
-}
-
-/// Claim the next dependency-ready step when an explicitly active Goal enters
-/// the orchestrator. Lifecycle correctness must not depend on the model
-/// remembering to call `task_start`; a duplicate model call remains a no-op.
-fn ensure_active_goal_attempt_for_run(
-    db_path: &Path,
-    session_id: &str,
-    permission_mode: PermissionMode,
-) -> Option<WorkflowMutation> {
-    let manager = WorkflowManager::new(db_path.to_path_buf()).ok()?;
-    let snapshot = manager.get_snapshot(session_id).ok()??;
-    if snapshot.goal.status != GoalStatus::Active
-        || snapshot
-            .latest_attempt
-            .as_ref()
-            .is_some_and(|attempt| attempt.status == AttemptStatus::Running)
-    {
-        return None;
-    }
-
-    let status_by_id = snapshot
-        .steps
-        .iter()
-        .map(|step| (step.id.as_str(), step.status))
-        .collect::<HashMap<_, _>>();
-    let step = snapshot.steps.iter().find(|step| {
-        step.status == WorkflowStepStatus::Pending
-            && snapshot
-                .dependencies
-                .iter()
-                .filter(|dependency| dependency.step_id == step.id)
-                .all(|dependency| {
-                    status_by_id
-                        .get(dependency.depends_on_step_id.as_str())
-                        .is_some_and(|status| {
-                            matches!(
-                                status,
-                                WorkflowStepStatus::Completed | WorkflowStepStatus::Skipped
-                            )
-                        })
-                })
-    })?;
-
-    manager
-        .start_attempt(
-            session_id,
-            &snapshot.goal.id,
-            snapshot.aggregate_revision,
-            StartAttemptInput {
-                step_id: Some(step.id.clone()),
-                permission_mode: permission_mode.as_str().to_string(),
-                max_turns: DEFAULT_GOAL_ATTEMPT_MAX_TURNS,
-                max_tool_calls: DEFAULT_GOAL_ATTEMPT_MAX_TOOL_CALLS,
-                max_wall_time_secs: DEFAULT_GOAL_ATTEMPT_MAX_WALL_TIME_SECS,
-                max_research_actions: DEFAULT_GOAL_ATTEMPT_MAX_RESEARCH_ACTIONS,
-            },
-            &format!("runtime-auto-attempt-{}", uuid::Uuid::new_v4()),
-            "runtime",
-        )
-        .map_err(|error| {
-            tracing::warn!(
-                session_id,
-                %error,
-                "Failed to automatically claim the next active Goal step"
-            );
-            error
-        })
-        .ok()
-}
-
-fn pause_active_goal_for_stop(db_path: &Path, session_id: &str, reason: &str) {
-    let Ok(manager) = WorkflowManager::new(db_path.to_path_buf()) else {
-        return;
-    };
-    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
-        return;
-    };
-    if snapshot.goal.status != GoalStatus::Active {
-        return;
-    }
-    if let Err(error) = manager.pause_goal(
-        session_id,
-        &snapshot.goal.id,
-        snapshot.aggregate_revision,
-        Some(reason),
-        &format!("runtime-pause-{}", uuid::Uuid::new_v4()),
-        "runtime",
-    ) {
-        tracing::warn!(session_id, %error, "Failed to pause Goal at runtime stop boundary");
-    }
-}
-
-fn block_active_goal_for_stop(db_path: &Path, session_id: &str, reason: &str) {
-    let Ok(manager) = WorkflowManager::new(db_path.to_path_buf()) else {
-        return;
-    };
-    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
-        return;
-    };
-    if snapshot.goal.status != GoalStatus::Active {
-        return;
-    }
-    if let Err(error) = manager.block_goal(
-        session_id,
-        &snapshot.goal.id,
-        snapshot.aggregate_revision,
-        reason,
-        &format!("runtime-block-{}", uuid::Uuid::new_v4()),
-        "runtime",
-    ) {
-        tracing::warn!(session_id, %error, "Failed to block Goal at runtime stop boundary");
-    }
-}
-
-fn finish_active_attempt_for_stop(db_path: &Path, session_id: &str, reason: &str) {
-    let Ok(manager) = WorkflowManager::new(db_path.to_path_buf()) else {
-        return;
-    };
-    let Ok(Some(snapshot)) = manager.get_snapshot(session_id) else {
-        return;
-    };
-    if snapshot.goal.status != GoalStatus::Active {
-        return;
-    }
-    let Some(attempt) = snapshot
-        .latest_attempt
-        .as_ref()
-        .filter(|attempt| attempt.status == AttemptStatus::Running)
-    else {
-        return;
-    };
-    if let Err(error) = manager.finish_attempt(
-        session_id,
-        &snapshot.goal.id,
-        &attempt.id,
-        snapshot.aggregate_revision,
-        AttemptStatus::Paused,
-        reason,
-        &format!("runtime-attempt-stop-{}", uuid::Uuid::new_v4()),
-        "runtime",
-    ) {
-        tracing::warn!(session_id, %error, "Failed to checkpoint Goal attempt at run completion");
-    }
-}
-
-#[derive(Debug, Default)]
-struct AttemptProgressTracker {
-    attempt_id: Option<String>,
-    turn_baseline: usize,
-    tool_call_baseline: usize,
-    research_action_baseline: usize,
-}
-
-impl AttemptProgressTracker {
-    fn local_counts(
-        &mut self,
-        attempt_id: &str,
-        run_turn_count: usize,
-        run_tool_call_count: usize,
-        run_research_action_count: usize,
-        current_turn_tool_calls: usize,
-        current_turn_research_actions: usize,
-    ) -> (u32, u32, u32) {
-        if self.attempt_id.as_deref() != Some(attempt_id) {
-            self.attempt_id = Some(attempt_id.to_string());
-            self.turn_baseline = run_turn_count.saturating_sub(1);
-            self.tool_call_baseline = run_tool_call_count.saturating_sub(current_turn_tool_calls);
-            self.research_action_baseline =
-                run_research_action_count.saturating_sub(current_turn_research_actions);
-        }
-
-        (
-            run_turn_count
-                .saturating_sub(self.turn_baseline)
-                .min(u32::MAX as usize) as u32,
-            run_tool_call_count
-                .saturating_sub(self.tool_call_baseline)
-                .min(u32::MAX as usize) as u32,
-            run_research_action_count
-                .saturating_sub(self.research_action_baseline)
-                .min(u32::MAX as usize) as u32,
-        )
-    }
-}
-
-fn record_active_attempt_progress(
-    db_path: &Path,
-    session_id: &str,
-    tracker: &mut AttemptProgressTracker,
-    turn_count: usize,
-    tool_call_count: usize,
-    research_action_count: usize,
-    current_turn_tool_calls: usize,
-    current_turn_research_actions: usize,
-    material_progress: bool,
-    blocker_fingerprint: Option<String>,
-) -> Option<(GoalStatus, Option<String>)> {
-    let manager = WorkflowManager::new(db_path.to_path_buf()).ok()?;
-    let snapshot = manager.get_snapshot(session_id).ok()??;
-    if snapshot.goal.status != GoalStatus::Active {
-        return None;
-    }
-    let attempt = snapshot
-        .latest_attempt
-        .as_ref()
-        .filter(|attempt| attempt.status == AttemptStatus::Running)?;
-    let (turn_count, tool_call_count, research_action_count) = tracker.local_counts(
-        &attempt.id,
-        turn_count,
-        tool_call_count,
-        research_action_count,
-        current_turn_tool_calls,
-        current_turn_research_actions,
-    );
-    let mutation = manager
-        .record_attempt_progress(
-            session_id,
-            &snapshot.goal.id,
-            &attempt.id,
-            snapshot.aggregate_revision,
-            AttemptProgressInput {
-                turn_count,
-                tool_call_count,
-                research_action_count,
-                material_progress,
-                blocker_fingerprint,
-            },
-            &format!("runtime-progress-{}", uuid::Uuid::new_v4()),
-            "runtime",
-        )
-        .map_err(|error| {
-            tracing::warn!(session_id, %error, "Failed to persist Goal attempt progress");
-            error
-        })
-        .ok()?;
-    (mutation.snapshot.goal.status != GoalStatus::Active).then_some({
-        (
-            mutation.snapshot.goal.status,
-            mutation.snapshot.goal.status_reason,
-        )
-    })
-}
-
-fn record_active_goal_tokens(
-    db_path: &Path,
-    session_id: &str,
-    token_delta: usize,
-) -> Option<(GoalStatus, Option<String>)> {
-    let manager = WorkflowManager::new(db_path.to_path_buf()).ok()?;
-    let mutation = manager
-        .record_token_usage(session_id, token_delta.min(u64::MAX as usize) as u64)
-        .map_err(|error| {
-            tracing::warn!(session_id, %error, "Failed to account durable Goal token usage");
-            error
-        })
-        .ok()??;
-    Some((
-        mutation.snapshot.goal.status,
-        mutation.snapshot.goal.status_reason,
-    ))
 }
 
 fn is_research_action(
@@ -869,6 +601,7 @@ fn tool_batch_made_material_progress(tool_results: &[Content]) -> bool {
 }
 
 fn fail_required_recovery_persistence(
+    workflow_goal_id: Option<&str>,
     db_path: &Path,
     session_id: &str,
     event_tx: &mpsc::UnboundedSender<LoopEvent>,
@@ -883,15 +616,19 @@ fn fail_required_recovery_persistence(
     let _ = event_tx.send(LoopEvent::Error {
         error: AWAITING_INPUT_PERSISTENCE_ERROR.to_string(),
     });
-    let _ = event_tx.send(LoopEvent::Finished {
-        session_id: session_id.to_string(),
-        stop_reason: LoopStopReason::ProviderError,
-    });
+    finish_run_preserving_recovery(
+        workflow_goal_id,
+        db_path,
+        session_id,
+        event_tx,
+        "error",
+        LoopStopReason::ProviderError,
+    );
 }
 
 fn should_retry_empty_stream_interruption(
     stop_reason: Option<&LoopStopReason>,
-    last_error: Option<&str>,
+    last_failure: Option<&stream::StreamFailure>,
     produced_output: bool,
     retry_attempted: bool,
 ) -> bool {
@@ -901,9 +638,279 @@ fn should_retry_empty_stream_interruption(
 
     match stop_reason {
         Some(LoopStopReason::StreamIdleTimeout) => true,
-        Some(LoopStopReason::ProviderError) => last_error.is_some_and(is_retryable_error_message),
+        Some(LoopStopReason::ProviderError) => {
+            matches!(
+                last_failure,
+                Some(stream::StreamFailure::RetryableTransport(_))
+            )
+        }
         _ => false,
     }
+}
+
+/// Close every unexecuted provider call at a control boundary. Cancelled tool
+/// batches may contain partial results; preserve those and fill only missing IDs.
+fn close_unexecuted_tool_calls(
+    calls: &[AiToolCall],
+    results: &mut Vec<Content>,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    reason: &str,
+) {
+    for call in calls {
+        if results.iter().any(|result| matches!(result, Content::ToolResult { tool_use_id, .. } if tool_use_id == &call.id)) {
+            continue;
+        }
+        let output = serde_json::json!({"ok":false,"error":{"code":"execution_interrupted","message":reason}});
+        results.push(Content::ToolResult {
+            tool_use_id: call.id.clone(),
+            output: output.clone(),
+            is_error: Some(true),
+        });
+        let _ = event_tx.send(LoopEvent::ToolResult {
+            id: call.id.clone(),
+            output: output.to_string(),
+            is_error: true,
+        });
+    }
+}
+
+/// Preserve completed siblings, close every remaining call, and settle usage
+/// before a cancelled batch exits. AskUser batches share this same boundary.
+#[allow(clippy::too_many_arguments)]
+fn finish_cancelled_tool_batch(
+    db_path: &Path,
+    session_id: &str,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    active_goal: bool,
+    tracker: &mut AttemptProgressTracker,
+    calls: &[AiToolCall],
+    mut results: Vec<Content>,
+    run_counts: (usize, usize, usize),
+    current_research_actions: usize,
+) {
+    close_unexecuted_tool_calls(
+        calls,
+        &mut results,
+        event_tx,
+        "Cancelled before this tool could execute",
+    );
+    if active_goal {
+        if let Err(error) = record_active_attempt_progress(
+            db_path,
+            session_id,
+            tracker,
+            run_counts.0,
+            run_counts.1,
+            run_counts.2,
+            calls.len(),
+            current_research_actions,
+            tool_batch_made_material_progress(&results),
+            None,
+        ) {
+            let _ = event_tx.send(LoopEvent::Error {
+                error: format!("Goal cancellation accounting could not be persisted: {error}"),
+            });
+        }
+    }
+    save_message(
+        db_path,
+        session_id,
+        &ModelMessage {
+            role: Role::User,
+            content: results,
+        },
+    );
+    finish_run(
+        tracker.goal_id(),
+        db_path,
+        session_id,
+        event_tx,
+        "idle",
+        LoopStopReason::UserAbort,
+    );
+}
+
+fn publish_workflow_transition(
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    result: Result<Option<crate::workflow::WorkflowMutation>, crate::workflow::WorkflowError>,
+) -> bool {
+    match result {
+        Ok(Some(mutation)) => {
+            let _ = event_tx.send(LoopEvent::WorkflowUpdated {
+                goal_id: mutation.snapshot.goal.id,
+                aggregate_revision: mutation.snapshot.aggregate_revision,
+                operation_id: mutation.operation_id,
+            });
+            true
+        }
+        Ok(None) => true,
+        Err(error) => {
+            let _ = event_tx.send(LoopEvent::Error {
+                error: format!("Unable to persist the Goal transition: {error}"),
+            });
+            false
+        }
+    }
+}
+
+/// Terminal loop exit shared by every stop path that clears recovery state:
+/// clear, record the terminal agent state, and emit the single canonical
+/// `Finished` event. Sites whose recovery state is already clear (for example
+/// after tool-result persistence) treat the clear as a no-op normalization.
+fn finish_run(
+    workflow_goal_id: Option<&str>,
+    db_path: &Path,
+    session_id: &str,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    terminal_state: &str,
+    stop_reason: LoopStopReason,
+) {
+    clear_recovery_state(db_path, session_id);
+    finish_run_preserving_recovery(
+        workflow_goal_id,
+        db_path,
+        session_id,
+        event_tx,
+        terminal_state,
+        stop_reason,
+    );
+}
+
+fn finish_run_preserving_recovery(
+    workflow_goal_id: Option<&str>,
+    db_path: &Path,
+    session_id: &str,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    terminal_state: &str,
+    stop_reason: LoopStopReason,
+) {
+    let stop_reason = if let Some(goal_id) = workflow_goal_id {
+        match finish_active_attempt_for_stop(
+            db_path,
+            session_id,
+            goal_id,
+            &format!("run_{stop_reason:?}"),
+        ) {
+            Ok(Some(mutation)) => {
+                let _ = event_tx.send(LoopEvent::WorkflowUpdated {
+                    goal_id: mutation.snapshot.goal.id,
+                    aggregate_revision: mutation.snapshot.aggregate_revision,
+                    operation_id: mutation.operation_id,
+                });
+                stop_reason
+            }
+            Ok(None) => stop_reason,
+            Err(error) => {
+                let _ = event_tx.send(LoopEvent::Error {
+                    error: format!("Unable to checkpoint the Goal attempt at run exit: {error}"),
+                });
+                LoopStopReason::ProviderError
+            }
+        }
+    } else {
+        stop_reason
+    };
+    set_agent_state(db_path, session_id, terminal_state);
+    let _ = event_tx.send(LoopEvent::Finished {
+        session_id: session_id.to_string(),
+        stop_reason,
+    });
+}
+
+/// Continue the loop after accepted steering: recovery cleared, streaming
+/// state recorded, and the turn boundary emitted before the steering events.
+fn emit_steering_turn_boundary(
+    db_path: &Path,
+    session_id: &str,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+    iteration: usize,
+    injected_steering: Vec<InjectedSteering>,
+) {
+    clear_recovery_state(db_path, session_id);
+    set_agent_state(db_path, session_id, "streaming");
+    let _ = event_tx.send(LoopEvent::TurnComplete {
+        turn: iteration,
+        has_more: true,
+    });
+    emit_steering_events(event_tx, injected_steering);
+}
+
+/// Fresh per-turn recovery state at a steering boundary: a new user directive
+/// re-arms every one-shot retry budget and clears any pending landing turn.
+#[allow(clippy::too_many_arguments)]
+fn reset_recovery_flags(
+    loop_guard: &mut LoopGuard,
+    active_goal: bool,
+    loop_guard_landing: &mut Option<LoopGuardLanding>,
+    delegation_nudge_tracker: &mut DelegationNudgeTracker,
+    empty_stream_retry_attempted: &mut bool,
+    empty_completion_retry_attempted: &mut bool,
+    empty_completion_recovery_pending: &mut bool,
+    provider_tool_activity_seen: &mut bool,
+    overflow_compact_retry_attempted: &mut bool,
+    goal_final_continuation_attempted: &mut bool,
+) {
+    *goal_final_continuation_attempted = false;
+    *loop_guard_landing = None;
+    delegation_nudge_tracker.reset_for_steering();
+    *empty_stream_retry_attempted = false;
+    *empty_completion_retry_attempted = false;
+    *empty_completion_recovery_pending = false;
+    *provider_tool_activity_seen = false;
+    *overflow_compact_retry_attempted = false;
+    if !active_goal {
+        loop_guard.reset_for_steering();
+    }
+}
+
+/// Compact once in place and adopt the result for an immediate retry.
+/// Returns the compaction error when compaction failed; the caller owns the
+/// terminal path.
+#[allow(clippy::too_many_arguments)]
+async fn compact_and_retry_once(
+    db_path: &Path,
+    session_id: &str,
+    conversation: &mut Vec<ModelMessage>,
+    context_ledger: &mut ContextLedger,
+    working_dir: &Path,
+    project_dir: Option<&str>,
+    user_id: Option<&str>,
+    ai_client: &AiClient,
+    compaction_manager: &CompactionManager,
+    trigger: CompactionTrigger,
+    last_usage_prompt_tokens: &mut Option<usize>,
+    messages_at_last_usage: &mut usize,
+    last_token_count: &mut usize,
+    request_budget: Option<CompactionRequestBudget>,
+    provider_call_trace: &super::ProviderCallTraceContext,
+    event_tx: &mpsc::UnboundedSender<LoopEvent>,
+) -> Result<(), anyhow::Error> {
+    let messages_after_usage = conversation.len().saturating_sub(*messages_at_last_usage);
+    let result = apply_in_place_compaction(
+        db_path,
+        session_id,
+        conversation,
+        context_ledger,
+        working_dir,
+        project_dir,
+        user_id,
+        ai_client,
+        compaction_manager,
+        trigger,
+        *last_usage_prompt_tokens,
+        messages_after_usage,
+        request_budget,
+        provider_call_trace,
+        event_tx,
+    )
+    .await?;
+    *last_usage_prompt_tokens = None;
+    *messages_at_last_usage = conversation.len();
+    *last_token_count = result.estimated_tokens_after;
+    update_token_count(db_path, session_id, result.estimated_tokens_after);
+    clear_recovery_state(db_path, session_id);
+    set_agent_state(db_path, session_id, "streaming");
+    Ok(())
 }
 
 /// Configuration for an orchestrator run.
@@ -1205,9 +1212,9 @@ impl AgenticOrchestrator {
         // evidence transaction rather than letting generic session helpers
         // select or mutate live Goal rows by session id.
         let manages_workflow_lifecycle = matches!(&context_mode, RunContextMode::Standard);
-        let active_goal_at_start =
+        let mut active_goal =
             manages_workflow_lifecycle && active_goal_for_run(&db_path, &session_id);
-        let run_budget = if active_goal_at_start {
+        let run_budget = if active_goal {
             RunBudgetResolution::resolve_goal_attempt(run_budget, project_settings.run_limits)
         } else {
             RunBudgetResolution::resolve(run_budget, project_settings.run_limits)
@@ -1254,6 +1261,7 @@ impl AgenticOrchestrator {
         let mut goal_tool_call_count = 0usize;
         let mut goal_research_action_count = 0usize;
         let mut attempt_progress_tracker = AttemptProgressTracker::default();
+        let mut goal_final_continuation_attempted = false;
         let mut worker_goal_outcome_journal = WorkerGoalOutcomeJournal::default();
         let mut loop_guard_landing = None::<LoopGuardLanding>;
         let model_context_window = effective_context_window_for_runtime(
@@ -1273,7 +1281,6 @@ impl AgenticOrchestrator {
         let mut provider_tool_activity_seen = false;
         let mut overflow_compact_retry_attempted = false;
         let mut stale_compaction_reload_attempted = false;
-        let mut mutation_needs_validation = false;
         let mut last_microcompact_history_message_count = conversation.len();
         let mut microcompaction_generation = 0usize;
         let project_dir_key = project_dir
@@ -1299,16 +1306,6 @@ impl AgenticOrchestrator {
             max_turns: run_budget.budget.max_turns,
             source: run_budget.source,
         });
-        if let Some(mutation) = active_goal_at_start
-            .then(|| ensure_active_goal_attempt_for_run(&db_path, &session_id, permission_mode))
-            .flatten()
-        {
-            let _ = event_tx.send(LoopEvent::WorkflowUpdated {
-                goal_id: mutation.snapshot.goal.id,
-                aggregate_revision: mutation.snapshot.aggregate_revision,
-                operation_id: mutation.operation_id,
-            });
-        }
 
         loop {
             input_inbox.collect_ready();
@@ -1324,13 +1321,115 @@ impl AgenticOrchestrator {
                 emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates());
             }
             if input_inbox.take_cancel() {
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
+            }
+            if manages_workflow_lifecycle {
+                let binding = (|| -> anyhow::Result<_> {
+                    let manager = WorkflowManager::new(db_path.clone())?;
+                    if let Some(mutation) =
+                        ensure_active_goal_attempt_for_run(&db_path, &session_id, permission_mode)?
+                    {
+                        let _ = event_tx.send(LoopEvent::WorkflowUpdated {
+                            goal_id: mutation.snapshot.goal.id,
+                            aggregate_revision: mutation.snapshot.aggregate_revision,
+                            operation_id: mutation.operation_id,
+                        });
+                    }
+                    manager.get_snapshot(&session_id).map_err(Into::into)
+                })();
+                let snapshot = match binding {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        let _ = event_tx.send(LoopEvent::Error {
+                            error: format!("Unable to bind Goal execution: {error}"),
+                        });
+                        finish_run(
+                            attempt_progress_tracker.goal_id(),
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            "error",
+                            LoopStopReason::ProviderError,
+                        );
+                        return;
+                    }
+                };
+                // Durable controls still stop this run when their live
+                // notification raced with input-channel registration. A
+                // completed Goal may receive its final synthesis below.
+                if active_goal
+                    && snapshot.as_ref().is_some_and(|snapshot| {
+                        matches!(
+                            snapshot.goal.status,
+                            GoalStatus::Paused | GoalStatus::Blocked | GoalStatus::Cancelled
+                        )
+                    })
+                {
+                    finish_run(
+                        attempt_progress_tracker.goal_id(),
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "idle",
+                        LoopStopReason::AwaitingInput,
+                    );
+                    return;
+                }
+                active_goal = snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.goal.status == GoalStatus::Active);
+                if active_goal {
+                    work_mode = WorkMode::Build;
+                    if !snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.latest_attempt.as_ref())
+                        .is_some_and(|attempt| attempt.status == AttemptStatus::Running)
+                    {
+                        let _ = event_tx.send(LoopEvent::Error { error: "The active Goal has no runnable attempt. Its workflow changed or its remaining steps need attention; no provider work was admitted.".into() });
+                        finish_run(
+                            attempt_progress_tracker.goal_id(),
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            "awaiting_input",
+                            LoopStopReason::AwaitingInput,
+                        );
+                        return;
+                    }
+                }
+                if let Some(attempt) = snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.latest_attempt.as_ref())
+                    .filter(|attempt| attempt.status == AttemptStatus::Running)
+                {
+                    attempt_progress_tracker.bind(
+                        attempt,
+                        iteration,
+                        goal_tool_call_count,
+                        goal_research_action_count,
+                    );
+                }
+                mode_tool_surface.refresh(
+                    &mut options,
+                    &mut advertised_tool_names,
+                    ai_client.as_ref(),
+                    permission_mode,
+                    work_mode,
+                    has_active_workflow_or_plan(&db_path, &session_id),
+                    project_settings
+                        .disabled_tools
+                        .as_deref()
+                        .unwrap_or_default(),
+                    execution_tool_allowlist.as_ref(),
+                );
             }
             let injected_steering = if context_mode.is_isolated_worker() {
                 Vec::new()
@@ -1345,16 +1444,18 @@ impl AgenticOrchestrator {
             };
             if !injected_steering.is_empty() {
                 emit_steering_events(&event_tx, injected_steering);
-                loop_guard_landing = None;
-                delegation_nudge_tracker.reset_for_steering();
-                empty_stream_retry_attempted = false;
-                empty_completion_retry_attempted = false;
-                empty_completion_recovery_pending = false;
-                provider_tool_activity_seen = false;
-                overflow_compact_retry_attempted = false;
-                if !active_goal_at_start {
-                    loop_guard.reset_for_steering();
-                }
+                reset_recovery_flags(
+                    &mut loop_guard,
+                    active_goal,
+                    &mut loop_guard_landing,
+                    &mut delegation_nudge_tracker,
+                    &mut empty_stream_retry_attempted,
+                    &mut empty_completion_retry_attempted,
+                    &mut empty_completion_recovery_pending,
+                    &mut provider_tool_activity_seen,
+                    &mut overflow_compact_retry_attempted,
+                    &mut goal_final_continuation_attempted,
+                );
             }
 
             if loop_guard_landing.is_none() && run_budget.budget.is_exhausted(iteration) {
@@ -1367,16 +1468,45 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                if active_goal_at_start {
-                    pause_active_goal_for_stop(&db_path, &session_id, "turn_budget_exhausted");
+                if active_goal {
+                    publish_workflow_transition(
+                        &event_tx,
+                        pause_active_goal_for_stop(&db_path, &session_id, "turn_budget_exhausted"),
+                    );
                 }
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::BudgetExhausted,
-                });
+                finish_run(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::BudgetExhausted,
+                );
                 return;
+            }
+            // A finite interactive Code run spends its last available response
+            // reporting evidence, not starting another tool batch. This stays
+            // inside the configured provider budget; durable Goals and workers
+            // retain their own attempt/outcome rules. A one-turn run still gets
+            // its initial tool-capable response.
+            if loop_guard_landing.is_none()
+                && !active_goal
+                && !context_mode.is_isolated_worker()
+                && session_type == SessionType::Code
+                && iteration > 0
+                && run_budget.budget.has_one_turn_remaining(iteration)
+            {
+                let landing = LoopGuardLanding {
+                    diagnostic: "This is the last response available within this run's configured turn budget. Report what the existing evidence proves, any unfinished work, and any failed or unrun required checks. Reaching the limit does not prove task completion; do not invent verification or promise another action in this run.".into(),
+                    block_goal: false,
+                };
+                conversation.push(ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::text(loop_guard_landing_instruction(&landing))],
+                });
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
+                loop_guard_landing = Some(landing);
             }
             // Soft pressure for unlimited interactive runs only. Goal/project
             // budgets already hard-stop; this keeps long thrash visible without
@@ -1403,7 +1533,7 @@ impl AgenticOrchestrator {
                 if let Some(text) = soft_message {
                     conversation.push(ModelMessage {
                         role: Role::System,
-                        content: vec![Content::Text { text }],
+                        content: vec![Content::text(text)],
                     });
                 }
             }
@@ -1440,13 +1570,13 @@ impl AgenticOrchestrator {
                 persist_context_state(&db_path, &session_id, &context_ledger);
             }
 
-            // UI/DB keep mid-turn status prose; the provider must not. Feeding
-            // "I'll do X" preambles back every tool round trains replan loops.
-            let model_history = super::history_policy::model_facing_messages(&conversation);
+            // Keep assistant findings and decisions alongside tool calls;
+            // text has no reliable status-only classification.
+            let model_history = &conversation;
             let mut conversation_with_context = match &context_mode {
                 RunContextMode::WorkerConversation { worker_id, .. } => {
                     match context::inject_worker_conversation_context(
-                        &model_history,
+                        model_history,
                         &db_path,
                         &session_id,
                         worker_id,
@@ -1481,7 +1611,7 @@ impl AgenticOrchestrator {
                         return;
                     };
                     match context::inject_worker_goal_context(
-                        &model_history,
+                        model_history,
                         &db_path,
                         &session_id,
                         user_id.as_deref(),
@@ -1503,7 +1633,7 @@ impl AgenticOrchestrator {
                     }
                 }
                 RunContextMode::Standard => inject_runtime_context(
-                    &model_history,
+                    model_history,
                     &db_path,
                     &session_id,
                     &working_dir,
@@ -1534,12 +1664,10 @@ impl AgenticOrchestrator {
                     if !extension_context_additions.is_empty() {
                         conversation_with_context.push(ModelMessage {
                             role: Role::System,
-                            content: vec![Content::Text {
-                                text: format!(
+                            content: vec![Content::text(format!(
                                 "[AGENT EXTENSION CONTEXT]\n\n{}\n\n[END AGENT EXTENSION CONTEXT]",
                                 extension_context_additions.join("\n\n")
-                            ),
-                            }],
+                            ))],
                         });
                     }
                 }
@@ -1547,9 +1675,9 @@ impl AgenticOrchestrator {
             if empty_completion_recovery_pending {
                 conversation_with_context.push(ModelMessage {
                     role: Role::System,
-                    content: vec![Content::Text {
-                        text: EMPTY_COMPLETION_RECOVERY_INSTRUCTION.to_string(),
-                    }],
+                    content: vec![Content::text(
+                        EMPTY_COMPLETION_RECOVERY_INSTRUCTION.to_string(),
+                    )],
                 });
             }
             let request_options = provider_options_for_turn(&options, loop_guard_landing.is_some());
@@ -1591,9 +1719,7 @@ impl AgenticOrchestrator {
                     );
                     return;
                 }
-                let messages_after_usage =
-                    conversation.len().saturating_sub(messages_at_last_usage);
-                match apply_in_place_compaction(
+                if let Err(error) = compact_and_retry_once(
                     &db_path,
                     &session_id,
                     &mut conversation,
@@ -1604,72 +1730,66 @@ impl AgenticOrchestrator {
                     ai_client.as_ref(),
                     &compaction_manager,
                     CompactionTrigger::Auto,
-                    last_usage_prompt_tokens,
-                    messages_after_usage,
+                    &mut last_usage_prompt_tokens,
+                    &mut messages_at_last_usage,
+                    &mut last_token_count,
                     Some(compaction_request_budget),
                     &provider_call_trace,
                     &event_tx,
                 )
                 .await
                 {
-                    Ok(result) => {
-                        last_usage_prompt_tokens = None;
-                        messages_at_last_usage = conversation.len();
-                        last_token_count = result.estimated_tokens_after;
-                        update_token_count(&db_path, &session_id, result.estimated_tokens_after);
-                        clear_recovery_state(&db_path, &session_id);
-                        set_agent_state(&db_path, &session_id, "streaming");
-                        continue;
-                    }
-                    Err(error) => {
-                        if !stale_compaction_reload_attempted
-                            && is_stale_compaction_snapshot_error(&error)
-                        {
-                            match reload_persisted_conversation(&db_path, &session_id) {
-                                Ok(reloaded) if !reloaded.is_empty() => {
-                                    tracing::warn!(
-                                        session_id = %session_id,
-                                        message_count = reloaded.len(),
-                                        %error,
-                                        "Reloaded canonical transcript after compaction snapshot race"
-                                    );
-                                    conversation = reloaded;
-                                    context_ledger.update_from_conversation(&conversation);
-                                    persist_context_state(&db_path, &session_id, &context_ledger);
-                                    last_usage_prompt_tokens = None;
-                                    messages_at_last_usage = conversation.len();
-                                    last_microcompact_history_message_count = conversation.len();
-                                    stale_compaction_reload_attempted = true;
-                                    continue;
-                                }
-                                Ok(_) => {}
-                                Err(reload_error) => {
-                                    tracing::warn!(
-                                        session_id = %session_id,
-                                        %reload_error,
-                                        "Failed to reload canonical transcript after compaction snapshot race"
-                                    );
-                                }
+                    if !stale_compaction_reload_attempted
+                        && is_stale_compaction_snapshot_error(&error)
+                    {
+                        match reload_persisted_conversation(&db_path, &session_id) {
+                            Ok(reloaded) if !reloaded.is_empty() => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    message_count = reloaded.len(),
+                                    %error,
+                                    "Reloaded canonical transcript after compaction snapshot race"
+                                );
+                                conversation = reloaded;
+                                context_ledger.update_from_conversation(&conversation);
+                                persist_context_state(&db_path, &session_id, &context_ledger);
+                                last_usage_prompt_tokens = None;
+                                messages_at_last_usage = conversation.len();
+                                last_microcompact_history_message_count = conversation.len();
+                                stale_compaction_reload_attempted = true;
+                                continue;
+                            }
+                            Ok(_) => {}
+                            Err(reload_error) => {
+                                tracing::warn!(
+                                    session_id = %session_id,
+                                    %reload_error,
+                                    "Failed to reload canonical transcript after compaction snapshot race"
+                                );
                             }
                         }
-                        let _ = event_tx.send(LoopEvent::Error {
-                            error: format!("Automatic compaction failed: {}", error),
-                        });
-                        if last_token_count > 0 {
-                            update_token_count(&db_path, &session_id, last_token_count);
-                        }
-                        if active_goal_at_start {
-                            finish_active_attempt_for_stop(&db_path, &session_id, "pinch_failed");
-                            pause_active_goal_for_stop(&db_path, &session_id, "pinch_failed");
-                        }
-                        clear_recovery_state(&db_path, &session_id);
-                        set_agent_state(&db_path, &session_id, "error");
-                        let _ = event_tx.send(LoopEvent::Finished {
-                            session_id: session_id.clone(),
-                            stop_reason: LoopStopReason::PinchFailed,
-                        });
-                        return;
                     }
+                    let _ = event_tx.send(LoopEvent::Error {
+                        error: format!("Automatic compaction failed: {}", error),
+                    });
+                    if last_token_count > 0 {
+                        update_token_count(&db_path, &session_id, last_token_count);
+                    }
+                    if active_goal {
+                        publish_workflow_transition(
+                            &event_tx,
+                            pause_active_goal_for_stop(&db_path, &session_id, "pinch_failed"),
+                        );
+                    }
+                    finish_run(
+                        attempt_progress_tracker.goal_id(),
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "error",
+                        LoopStopReason::PinchFailed,
+                    );
+                    return;
                 }
             }
 
@@ -1785,12 +1905,14 @@ impl AgenticOrchestrator {
                     None,
                     provider_call_started.elapsed(),
                 ));
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
             };
 
@@ -1865,9 +1987,7 @@ impl AgenticOrchestrator {
                             session_id = %session_id,
                             "Provider rejected request for context overflow; compacting and retrying once"
                         );
-                        let messages_after_usage =
-                            conversation.len().saturating_sub(messages_at_last_usage);
-                        match apply_in_place_compaction(
+                        match compact_and_retry_once(
                             &db_path,
                             &session_id,
                             &mut conversation,
@@ -1878,27 +1998,16 @@ impl AgenticOrchestrator {
                             ai_client.as_ref(),
                             &compaction_manager,
                             CompactionTrigger::Overflow,
-                            last_usage_prompt_tokens,
-                            messages_after_usage,
+                            &mut last_usage_prompt_tokens,
+                            &mut messages_at_last_usage,
+                            &mut last_token_count,
                             Some(compaction_request_budget),
                             &provider_call_trace,
                             &event_tx,
                         )
                         .await
                         {
-                            Ok(result) => {
-                                last_usage_prompt_tokens = None;
-                                messages_at_last_usage = conversation.len();
-                                last_token_count = result.estimated_tokens_after;
-                                update_token_count(
-                                    &db_path,
-                                    &session_id,
-                                    result.estimated_tokens_after,
-                                );
-                                clear_recovery_state(&db_path, &session_id);
-                                set_agent_state(&db_path, &session_id, "streaming");
-                                continue;
-                            }
+                            Ok(()) => continue,
                             Err(compaction_error) => {
                                 tracing::error!(
                                     session_id = %session_id,
@@ -1923,11 +2032,14 @@ impl AgenticOrchestrator {
                     if last_token_count > 0 {
                         update_token_count(&db_path, &session_id, last_token_count);
                     }
-                    set_agent_state(&db_path, &session_id, "error");
-                    let _ = event_tx.send(LoopEvent::Finished {
-                        session_id: session_id.clone(),
-                        stop_reason: LoopStopReason::ProviderError,
-                    });
+                    finish_run_preserving_recovery(
+                        attempt_progress_tracker.goal_id(),
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "error",
+                        LoopStopReason::ProviderError,
+                    );
                     return;
                 }
             };
@@ -1967,6 +2079,26 @@ impl AgenticOrchestrator {
             };
 
             let Some(result) = result else {
+                if active_goal {
+                    if let Err(error) = record_active_attempt_progress(
+                        &db_path,
+                        &session_id,
+                        &mut attempt_progress_tracker,
+                        iteration,
+                        goal_tool_call_count,
+                        goal_research_action_count,
+                        0,
+                        0,
+                        false,
+                        None,
+                    ) {
+                        let _ = event_tx.send(LoopEvent::Error {
+                            error: format!(
+                                "Goal cancellation usage could not be persisted: {error}"
+                            ),
+                        });
+                    }
+                }
                 if let Some(permit) = provider_call_permit.as_ref() {
                     if let Err(error) = permit.complete(WorkerProviderCompletion::acknowledged(
                         WorkerProviderTerminalOutcome::CancelledAfterAcceptance,
@@ -1989,12 +2121,14 @@ impl AgenticOrchestrator {
                     None,
                     provider_call_started.elapsed(),
                 ));
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
             };
 
@@ -2135,16 +2269,39 @@ impl AgenticOrchestrator {
                 messages_at_last_usage = conversation.len();
             }
             provider_tool_activity_seen |= result.had_server_tool_activity;
-            let goal_token_stop = active_goal_at_start
-                .then(|| record_active_goal_tokens(&db_path, &session_id, result.total_tokens))
-                .flatten();
+            let goal_token_stop = if active_goal {
+                match record_active_goal_tokens(
+                    &db_path,
+                    &session_id,
+                    attempt_progress_tracker.goal_id(),
+                    result.total_tokens,
+                ) {
+                    Ok(stop) => stop,
+                    Err(error) => {
+                        let _ = event_tx.send(LoopEvent::Error {
+                            error: format!("Goal token accounting could not be persisted: {error}"),
+                        });
+                        finish_run_preserving_recovery(
+                            attempt_progress_tracker.goal_id(),
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            "error",
+                            LoopStopReason::ProviderError,
+                        );
+                        return;
+                    }
+                }
+            } else {
+                None
+            };
 
             if !context_mode.is_worker_conversation()
                 && loop_guard_landing.is_none()
                 && goal_token_stop.is_none()
                 && should_retry_empty_stream_interruption(
                     result.stop_reason.as_ref(),
-                    result.last_error.as_deref(),
+                    result.last_error.as_ref(),
                     result.produced_output,
                     empty_stream_retry_attempted,
                 )
@@ -2159,6 +2316,34 @@ impl AgenticOrchestrator {
                 continue;
             }
 
+            if active_goal && (result.tool_calls.is_empty() || result.stop_reason.is_some()) {
+                if let Err(error) = record_active_attempt_progress(
+                    &db_path,
+                    &session_id,
+                    &mut attempt_progress_tracker,
+                    iteration,
+                    goal_tool_call_count,
+                    goal_research_action_count,
+                    0,
+                    0,
+                    false,
+                    None,
+                ) {
+                    let _ = event_tx.send(LoopEvent::Error {
+                        error: format!("Goal response accounting could not be persisted: {error}"),
+                    });
+                    finish_run_preserving_recovery(
+                        attempt_progress_tracker.goal_id(),
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "error",
+                        LoopStopReason::ProviderError,
+                    );
+                    return;
+                }
+            }
+
             let effective_stop_reason = if loop_guard_landing.is_none() {
                 result.stop_reason.clone()
             } else {
@@ -2168,19 +2353,16 @@ impl AgenticOrchestrator {
                 if !context_mode.is_isolated_worker()
                     && !overflow_compact_retry_attempted
                     && stop_reason == LoopStopReason::ProviderError
-                    && result
-                        .last_error
-                        .as_ref()
-                        .is_some_and(|error| is_context_overflow_error(error))
+                    && result.last_error.as_ref().is_some_and(|failure| {
+                        matches!(failure, stream::StreamFailure::ContextOverflow(_))
+                    })
                 {
                     overflow_compact_retry_attempted = true;
                     tracing::warn!(
                         session_id = %session_id,
                         "Provider stream reported context overflow; compacting and retrying once"
                     );
-                    let messages_after_usage =
-                        conversation.len().saturating_sub(messages_at_last_usage);
-                    match apply_in_place_compaction(
+                    match compact_and_retry_once(
                         &db_path,
                         &session_id,
                         &mut conversation,
@@ -2191,27 +2373,16 @@ impl AgenticOrchestrator {
                         ai_client.as_ref(),
                         &compaction_manager,
                         CompactionTrigger::Overflow,
-                        last_usage_prompt_tokens,
-                        messages_after_usage,
+                        &mut last_usage_prompt_tokens,
+                        &mut messages_at_last_usage,
+                        &mut last_token_count,
                         Some(compaction_request_budget),
                         &provider_call_trace,
                         &event_tx,
                     )
                     .await
                     {
-                        Ok(result) => {
-                            last_usage_prompt_tokens = None;
-                            messages_at_last_usage = conversation.len();
-                            last_token_count = result.estimated_tokens_after;
-                            update_token_count(
-                                &db_path,
-                                &session_id,
-                                result.estimated_tokens_after,
-                            );
-                            clear_recovery_state(&db_path, &session_id);
-                            set_agent_state(&db_path, &session_id, "streaming");
-                            continue;
-                        }
+                        Ok(()) => continue,
                         Err(compaction_error) => {
                             tracing::error!(
                                 session_id = %session_id,
@@ -2228,14 +2399,18 @@ impl AgenticOrchestrator {
                         &context_ledger,
                         RecoveryStatus::Interrupted,
                         Some(stop_reason.clone()),
-                        result.last_error.clone(),
+                        result
+                            .last_error
+                            .as_ref()
+                            .map(|failure| failure.message().to_string()),
                         build_partial_assistant_state(&result.recovery_checkpoint),
                     ),
                 );
                 persist_context_state(&db_path, &session_id, &context_ledger);
                 let terminal_error = result
                     .last_error
-                    .clone()
+                    .as_ref()
+                    .map(|failure| failure.message().to_string())
                     .unwrap_or_else(|| continuation_recovery_message(&context_ledger));
                 let _ = event_tx.send(LoopEvent::Error {
                     error: terminal_error,
@@ -2243,15 +2418,14 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                set_agent_state(
+                finish_run_preserving_recovery(
+                    attempt_progress_tracker.goal_id(),
                     &db_path,
                     &session_id,
+                    &event_tx,
                     terminal_agent_state_after_interruption(&stop_reason),
-                );
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
                     stop_reason,
-                });
+                );
                 return;
             }
 
@@ -2488,6 +2662,7 @@ impl AgenticOrchestrator {
                     empty_completion_action(
                         &result.text,
                         &result.tool_calls,
+                        !result.citations.is_empty(),
                         empty_completion_retry_attempted,
                         provider_tool_activity_seen,
                     )
@@ -2533,11 +2708,14 @@ impl AgenticOrchestrator {
                     if last_token_count > 0 {
                         update_token_count(&db_path, &session_id, last_token_count);
                     }
-                    set_agent_state(&db_path, &session_id, "error");
-                    let _ = event_tx.send(LoopEvent::Finished {
-                        session_id: session_id.clone(),
-                        stop_reason: LoopStopReason::ProviderError,
-                    });
+                    finish_run_preserving_recovery(
+                        attempt_progress_tracker.goal_id(),
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "error",
+                        LoopStopReason::ProviderError,
+                    );
                     return;
                 }
                 EmptyCompletionAction::None => {}
@@ -2555,6 +2733,7 @@ impl AgenticOrchestrator {
                 &result.text,
                 &result.thinking_blocks,
                 assistant_tool_calls,
+                &result.citations,
             );
             if !assistant_msg.content.is_empty() {
                 conversation.push(assistant_msg.clone());
@@ -2570,14 +2749,105 @@ impl AgenticOrchestrator {
             } else {
                 emit_workflow_update_inputs(&event_tx, input_inbox.take_workflow_updates())
             };
-            if input_inbox.take_cancel() {
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
+            let cancelled = input_inbox.take_cancel();
+            let workflow_control_stop = if goal_token_stop.is_some()
+                && !result.tool_calls.is_empty()
+            {
+                let _ = event_tx.send(LoopEvent::Error {
+                    error: "The Goal token budget was exhausted; pending tools were not executed."
+                        .into(),
                 });
-                return;
+                Some(LoopStopReason::BudgetExhausted)
+            } else if manages_workflow_lifecycle && (workflow_updated || active_goal) {
+                match WorkflowManager::new(db_path.clone())
+                    .and_then(|manager| manager.get_snapshot(&session_id))
+                {
+                    Ok(snapshot)
+                        if active_goal
+                            && !snapshot.as_ref().is_some_and(|snapshot| {
+                                snapshot.goal.status == GoalStatus::Active
+                                    && attempt_progress_tracker.goal_id()
+                                        == Some(snapshot.goal.id.as_str())
+                            }) =>
+                    {
+                        Some(LoopStopReason::AwaitingInput)
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        let _ = event_tx.send(LoopEvent::Error {
+                            error: format!("Unable to refresh changed Goal execution: {error}"),
+                        });
+                        Some(LoopStopReason::ProviderError)
+                    }
+                }
+            } else {
+                None
+            };
+            if cancelled
+                || workflow_control_stop.is_some()
+                || (workflow_updated && !result.tool_calls.is_empty())
+            {
+                if active_goal {
+                    if let Err(error) = record_active_attempt_progress(
+                        &db_path,
+                        &session_id,
+                        &mut attempt_progress_tracker,
+                        iteration,
+                        goal_tool_call_count,
+                        goal_research_action_count,
+                        0,
+                        0,
+                        false,
+                        None,
+                    ) {
+                        let _ = event_tx.send(LoopEvent::Error {
+                            error: format!(
+                                "Interrupted Goal response usage could not be persisted: {error}"
+                            ),
+                        });
+                    }
+                }
+                let mut results = Vec::new();
+                close_unexecuted_tool_calls(
+                    &result.tool_calls,
+                    &mut results,
+                    &event_tx,
+                    if cancelled {
+                        "Cancelled before tool execution"
+                    } else {
+                        "Workflow changed before tool execution; reload the current execution contract"
+                    },
+                );
+                if !results.is_empty() {
+                    let tool_msg = ModelMessage {
+                        role: Role::User,
+                        content: results,
+                    };
+                    conversation.push(tool_msg.clone());
+                    context_ledger.update_from_conversation(&conversation);
+                    persist_context_state(&db_path, &session_id, &context_ledger);
+                    save_message(&db_path, &session_id, &tool_msg);
+                }
+                if cancelled || workflow_control_stop.is_some() {
+                    finish_run(
+                        attempt_progress_tracker.goal_id(),
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "idle",
+                        if cancelled {
+                            LoopStopReason::UserAbort
+                        } else {
+                            workflow_control_stop.expect("workflow control stop checked")
+                        },
+                    );
+                    return;
+                }
+                let _ = event_tx.send(LoopEvent::TurnComplete {
+                    turn: iteration,
+                    has_more: true,
+                });
+                continue;
             }
 
             // Title generation on first response
@@ -2600,23 +2870,25 @@ impl AgenticOrchestrator {
                     )
                 };
                 if !injected_steering.is_empty() || workflow_updated {
-                    loop_guard_landing = None;
-                    delegation_nudge_tracker.reset_for_steering();
-                    empty_stream_retry_attempted = false;
-                    empty_completion_retry_attempted = false;
-                    empty_completion_recovery_pending = false;
-                    provider_tool_activity_seen = false;
-                    overflow_compact_retry_attempted = false;
-                    if !active_goal_at_start {
-                        loop_guard.reset_for_steering();
-                    }
-                    clear_recovery_state(&db_path, &session_id);
-                    set_agent_state(&db_path, &session_id, "streaming");
-                    let _ = event_tx.send(LoopEvent::TurnComplete {
-                        turn: iteration,
-                        has_more: true,
-                    });
-                    emit_steering_events(&event_tx, injected_steering);
+                    reset_recovery_flags(
+                        &mut loop_guard,
+                        active_goal,
+                        &mut loop_guard_landing,
+                        &mut delegation_nudge_tracker,
+                        &mut empty_stream_retry_attempted,
+                        &mut empty_completion_retry_attempted,
+                        &mut empty_completion_recovery_pending,
+                        &mut provider_tool_activity_seen,
+                        &mut overflow_compact_retry_attempted,
+                        &mut goal_final_continuation_attempted,
+                    );
+                    emit_steering_turn_boundary(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        iteration,
+                        injected_steering,
+                    );
                     continue;
                 }
 
@@ -2642,7 +2914,7 @@ impl AgenticOrchestrator {
                     });
                     let fallback_msg = ModelMessage {
                         role: Role::Assistant,
-                        content: vec![Content::Text { text: fallback }],
+                        content: vec![Content::text(fallback)],
                     };
                     conversation.push(fallback_msg.clone());
                     context_ledger.update_from_conversation(&conversation);
@@ -2655,34 +2927,46 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                if active_goal_at_start {
-                    if landing.block_goal {
-                        block_active_goal_for_stop(&db_path, &session_id, "semantic_no_progress");
+                if active_goal {
+                    let transition = if landing.block_goal {
+                        block_active_goal_for_stop(&db_path, &session_id, "semantic_no_progress")
+                    } else {
+                        pause_active_goal_for_stop(
+                            &db_path,
+                            &session_id,
+                            "validation_converged_before_goal_verification",
+                        )
+                    };
+                    if !publish_workflow_transition(&event_tx, transition) {
+                        finish_run(
+                            attempt_progress_tracker.goal_id(),
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            "error",
+                            LoopStopReason::ProviderError,
+                        );
+                        return;
                     }
-                    finish_active_attempt_for_stop(
-                        &db_path,
-                        &session_id,
-                        if landing.block_goal {
-                            "loop_guard_landing_completed_before_goal_verification"
-                        } else {
-                            "validation_converged_before_goal_verification"
-                        },
-                    );
                 }
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
                     has_more: false,
                 });
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: if landing.block_goal {
+                finish_run(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    if landing.block_goal {
                         LoopStopReason::LoopGuardTriggered
+                    } else if active_goal {
+                        LoopStopReason::AwaitingInput
                     } else {
                         LoopStopReason::Completed
                     },
-                });
+                );
                 return;
             }
 
@@ -2701,23 +2985,25 @@ impl AgenticOrchestrator {
                     )
                 };
                 if no_tool_completion_should_continue(&injected_steering) || workflow_updated {
-                    loop_guard_landing = None;
-                    delegation_nudge_tracker.reset_for_steering();
-                    empty_stream_retry_attempted = false;
-                    empty_completion_retry_attempted = false;
-                    empty_completion_recovery_pending = false;
-                    provider_tool_activity_seen = false;
-                    overflow_compact_retry_attempted = false;
-                    if !active_goal_at_start {
-                        loop_guard.reset_for_steering();
-                    }
-                    clear_recovery_state(&db_path, &session_id);
-                    set_agent_state(&db_path, &session_id, "streaming");
-                    let _ = event_tx.send(LoopEvent::TurnComplete {
-                        turn: iteration,
-                        has_more: true,
-                    });
-                    emit_steering_events(&event_tx, injected_steering);
+                    reset_recovery_flags(
+                        &mut loop_guard,
+                        active_goal,
+                        &mut loop_guard_landing,
+                        &mut delegation_nudge_tracker,
+                        &mut empty_stream_retry_attempted,
+                        &mut empty_completion_retry_attempted,
+                        &mut empty_completion_recovery_pending,
+                        &mut provider_tool_activity_seen,
+                        &mut overflow_compact_retry_attempted,
+                        &mut goal_final_continuation_attempted,
+                    );
+                    emit_steering_turn_boundary(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        iteration,
+                        injected_steering,
+                    );
                     continue;
                 }
             }
@@ -2939,6 +3225,82 @@ impl AgenticOrchestrator {
                         }
                     }
                 }
+                if manages_workflow_lifecycle && goal_token_stop.is_none() {
+                    let disposition = (|| -> anyhow::Result<_> {
+                        let snapshot =
+                            WorkflowManager::new(db_path.clone())?.get_snapshot(&session_id)?;
+                        let awaiting_delegation =
+                            awaiting_background_delegation(&db_path, &session_id)?;
+                        Ok(goal_final_disposition(
+                            snapshot.as_ref(),
+                            awaiting_delegation,
+                            goal_final_continuation_attempted,
+                        ))
+                    })();
+                    match disposition {
+                        Ok(GoalFinalDisposition::Continue) => {
+                            goal_final_continuation_attempted = true;
+                            conversation.push(ModelMessage {
+                                role: Role::System,
+                                content: vec![Content::text(GOAL_FINAL_CONTINUATION.into())],
+                            });
+                            context_ledger.update_from_conversation(&conversation);
+                            persist_context_state(&db_path, &session_id, &context_ledger);
+                            let _ = event_tx.send(LoopEvent::TurnComplete {
+                                turn: iteration,
+                                has_more: true,
+                            });
+                            continue;
+                        }
+                        Ok(GoalFinalDisposition::Pause) => {
+                            if !publish_workflow_transition(
+                                &event_tx,
+                                pause_active_goal_for_stop(
+                                    &db_path,
+                                    &session_id,
+                                    "model_completion_without_goal_verification",
+                                ),
+                            ) {
+                                finish_run(
+                                    attempt_progress_tracker.goal_id(),
+                                    &db_path,
+                                    &session_id,
+                                    &event_tx,
+                                    "error",
+                                    LoopStopReason::ProviderError,
+                                );
+                                return;
+                            }
+                            let _ = event_tx.send(LoopEvent::Error { error: "The Agent ended twice while the Goal was still active. The Goal is paused with its work preserved; completion was not verified.".into() });
+                            finish_run(
+                                attempt_progress_tracker.goal_id(),
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                "awaiting_input",
+                                LoopStopReason::AwaitingInput,
+                            );
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = event_tx.send(LoopEvent::Error {
+                                error: format!("Unable to settle Goal response: {error}"),
+                            });
+                            finish_run(
+                                attempt_progress_tracker.goal_id(),
+                                &db_path,
+                                &session_id,
+                                &event_tx,
+                                "error",
+                                LoopStopReason::ProviderError,
+                            );
+                            return;
+                        }
+                        Ok(
+                            GoalFinalDisposition::Complete | GoalFinalDisposition::AwaitDelegation,
+                        ) => {}
+                    }
+                }
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
                     has_more: false,
@@ -2946,15 +3308,6 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                if active_goal_at_start {
-                    finish_active_attempt_for_stop(
-                        &db_path,
-                        &session_id,
-                        "model_completion_before_goal_verification",
-                    );
-                }
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
                 if let Some((_, reason)) = &goal_token_stop {
                     let _ = event_tx.send(LoopEvent::Error {
                         error: format!(
@@ -2965,14 +3318,18 @@ impl AgenticOrchestrator {
                         ),
                     });
                 }
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: if goal_token_stop.is_some() {
+                finish_run(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    if goal_token_stop.is_some() {
                         LoopStopReason::BudgetExhausted
                     } else {
                         LoopStopReason::Completed
                     },
-                });
+                );
                 return;
             }
 
@@ -3004,6 +3361,7 @@ impl AgenticOrchestrator {
                         &pending_ask_user_call.arguments,
                     )];
                 let mut all_results: Vec<Content> = Vec::new();
+                let mut cancelled = false;
 
                 // Execute non-AskUser tools first
                 if !non_ask_user_calls.is_empty() {
@@ -3044,15 +3402,40 @@ impl AgenticOrchestrator {
                     )
                     .await;
                     all_results.extend(other_batch.results);
-                    if other_batch.cancelled {
-                        clear_recovery_state(&db_path, &session_id);
-                        set_agent_state(&db_path, &session_id, "idle");
-                        let _ = event_tx.send(LoopEvent::Finished {
-                            session_id: session_id.clone(),
-                            stop_reason: LoopStopReason::UserAbort,
-                        });
-                        return;
-                    }
+                    cancelled = other_batch.cancelled;
+                }
+                input_inbox.collect_ready();
+                cancelled |= input_inbox.take_cancel();
+                if cancelled {
+                    let delegated_store = Database::new(&db_path).ok().map(DelegatedRunStore::new);
+                    let research_actions = result
+                        .tool_calls
+                        .iter()
+                        .filter(|call| {
+                            is_research_action(
+                                call,
+                                &all_results,
+                                delegated_store.as_ref(),
+                                &session_id,
+                            )
+                        })
+                        .count();
+                    finish_cancelled_tool_batch(
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        active_goal,
+                        &mut attempt_progress_tracker,
+                        &result.tool_calls,
+                        all_results,
+                        (
+                            iteration,
+                            goal_tool_call_count.saturating_add(result.tool_calls.len()),
+                            goal_research_action_count.saturating_add(research_actions),
+                        ),
+                        research_actions,
+                    );
+                    return;
                 }
 
                 // Add one resumable placeholder and terminal errors for any
@@ -3082,16 +3465,6 @@ impl AgenticOrchestrator {
                 persist_context_state(&db_path, &session_id, &context_ledger);
                 save_message(&db_path, &session_id, &tool_msg);
 
-                input_inbox.collect_ready();
-                if input_inbox.take_cancel() {
-                    clear_recovery_state(&db_path, &session_id);
-                    set_agent_state(&db_path, &session_id, "idle");
-                    let _ = event_tx.send(LoopEvent::Finished {
-                        session_id: session_id.clone(),
-                        stop_reason: LoopStopReason::UserAbort,
-                    });
-                    return;
-                }
                 let injected_steering = if context_mode.is_isolated_worker() {
                     let _ = input_inbox.take_steering();
                     Vec::new()
@@ -3109,6 +3482,48 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
+                if active_goal {
+                    let delegated_store = Database::new(&db_path).ok().map(DelegatedRunStore::new);
+                    let research_actions = result
+                        .tool_calls
+                        .iter()
+                        .filter(|call| {
+                            is_research_action(
+                                call,
+                                &tool_msg.content,
+                                delegated_store.as_ref(),
+                                &session_id,
+                            )
+                        })
+                        .count();
+                    if let Err(error) = record_active_attempt_progress(
+                        &db_path,
+                        &session_id,
+                        &mut attempt_progress_tracker,
+                        iteration,
+                        goal_tool_call_count.saturating_add(result.tool_calls.len()),
+                        goal_research_action_count.saturating_add(research_actions),
+                        result.tool_calls.len(),
+                        research_actions,
+                        tool_batch_made_material_progress(&tool_msg.content),
+                        None,
+                    ) {
+                        let _ = event_tx.send(LoopEvent::Error {
+                            error: format!(
+                                "Goal input-wait accounting could not be persisted: {error}"
+                            ),
+                        });
+                        finish_run(
+                            attempt_progress_tracker.goal_id(),
+                            &db_path,
+                            &session_id,
+                            &event_tx,
+                            "error",
+                            LoopStopReason::ProviderError,
+                        );
+                        return;
+                    }
+                }
                 let recovery = build_awaiting_input_recovery_state(
                     ask_user_partial_assistant,
                     ask_user_pending_interactions,
@@ -3118,7 +3533,13 @@ impl AgenticOrchestrator {
                 if let Err(error) =
                     persist_required_recovery_state(&db_path, &session_id, &recovery)
                 {
-                    fail_required_recovery_persistence(&db_path, &session_id, &event_tx, &error);
+                    fail_required_recovery_persistence(
+                        attempt_progress_tracker.goal_id(),
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        &error,
+                    );
                     return;
                 }
 
@@ -3127,11 +3548,14 @@ impl AgenticOrchestrator {
                     tool_name: pending_ask_user_call.name.clone(),
                 });
 
-                set_agent_state(&db_path, &session_id, "awaiting_input");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::AwaitingInput,
-                });
+                finish_run_preserving_recovery(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "awaiting_input",
+                    LoopStopReason::AwaitingInput,
+                );
                 return;
             }
 
@@ -3185,7 +3609,7 @@ impl AgenticOrchestrator {
             )
             .await;
             work_mode = tool_batch.next_work_mode;
-            let yield_after_background_agent = tool_batch.yield_after_background_agent;
+            let background_agent_started = tool_batch.background_agent_started;
             // A tool batch can change either work mode (`set_work_mode`) or
             // plan lifecycle state (for example, completing the final task).
             // Refresh both dimensions before the next provider request.
@@ -3224,17 +3648,17 @@ impl AgenticOrchestrator {
                 goal_research_action_count.saturating_add(current_turn_research_actions);
 
             if tool_batch.cancelled {
-                let tool_msg = ModelMessage {
-                    role: Role::User,
-                    content: tool_results,
-                };
-                save_message(&db_path, &session_id, &tool_msg);
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_cancelled_tool_batch(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    active_goal,
+                    &mut attempt_progress_tracker,
+                    &result.tool_calls,
+                    tool_results,
+                    (iteration, goal_tool_call_count, goal_research_action_count),
+                    current_turn_research_actions,
+                );
                 return;
             }
 
@@ -3251,10 +3675,6 @@ impl AgenticOrchestrator {
             let progress_diagnostic = progress_telemetry
                 .as_ref()
                 .and_then(|telemetry| telemetry.diagnostic());
-            let progress_replan_instruction = progress_telemetry
-                .as_ref()
-                .and_then(|telemetry| telemetry.replan_instruction())
-                .map(ToString::to_string);
             let guard_loop_landing = fail_diagnostic
                 .as_ref()
                 .or(explore_diagnostic.as_ref())
@@ -3273,49 +3693,46 @@ impl AgenticOrchestrator {
                             block_goal: false,
                         })
                 });
-            let delegation_checkpoint = (!context_mode.is_isolated_worker()
+            let delegation_nudge_instruction = (!context_mode.is_isolated_worker()
                 && guard_loop_landing.is_none())
-            .then(|| delegation_nudge_tracker.record_turn(&result.tool_calls, &tool_results));
-            let delegation_nudge_instruction =
-                match delegation_checkpoint.as_ref().and_then(Option::as_ref) {
-                    Some(DelegationCheckpoint::Nudge(instruction)) => Some(instruction.clone()),
-                    Some(DelegationCheckpoint::Land(_)) | None => None,
-                };
-            let terminal_loop_landing = guard_loop_landing.or_else(|| {
-                match delegation_checkpoint.flatten() {
-                    Some(DelegationCheckpoint::Land(diagnostic)) => Some(LoopGuardLanding {
-                        diagnostic,
-                        // This is convergence pressure, not evidence that an
-                        // active Goal itself is blocked.
-                        block_goal: false,
-                    }),
-                    Some(DelegationCheckpoint::Nudge(_)) | None => None,
-                }
-            });
+            .then(|| {
+                delegation_nudge_tracker.record_turn(
+                    &result.tool_calls,
+                    &tool_results,
+                    project_settings.delegation_mode.unwrap_or_default(),
+                    advertised_tool_names.contains("agent"),
+                )
+            })
+            .flatten();
+            let terminal_loop_landing = guard_loop_landing;
             let blocker_fingerprint = terminal_loop_landing
                 .as_ref()
                 .filter(|landing| landing.block_goal)
                 .map(|landing| landing.diagnostic.clone());
             let token_budget_stopped = goal_token_stop.is_some();
-            let goal_runtime_stop = goal_token_stop.or_else(|| {
-                if active_goal_at_start {
-                    record_active_attempt_progress(
-                        &db_path,
-                        &session_id,
-                        &mut attempt_progress_tracker,
-                        iteration,
-                        goal_tool_call_count,
-                        goal_research_action_count,
-                        current_turn_tool_calls,
-                        current_turn_research_actions,
-                        tool_batch_made_material_progress(&tool_results),
-                        blocker_fingerprint,
-                    )
-                } else {
-                    None
-                }
-            });
-            if let Some(telemetry) = progress_telemetry {
+            let attempt_progress_result = if active_goal {
+                record_active_attempt_progress(
+                    &db_path,
+                    &session_id,
+                    &mut attempt_progress_tracker,
+                    iteration,
+                    goal_tool_call_count,
+                    goal_research_action_count,
+                    current_turn_tool_calls,
+                    current_turn_research_actions,
+                    tool_batch_made_material_progress(&tool_results),
+                    blocker_fingerprint,
+                )
+            } else {
+                Ok(None)
+            };
+            let attempt_accounting_error = attempt_progress_result
+                .as_ref()
+                .err()
+                .map(ToString::to_string);
+            let goal_runtime_stop =
+                goal_token_stop.or_else(|| attempt_progress_result.ok().flatten());
+            if let Some(telemetry) = &progress_telemetry {
                 if telemetry.triggered {
                     tracing::warn!(
                         iteration,
@@ -3337,7 +3754,9 @@ impl AgenticOrchestrator {
                         "Semantic no-progress guard warning"
                     );
                 }
-                let _ = event_tx.send(LoopEvent::ProgressGuard { telemetry });
+                let _ = event_tx.send(LoopEvent::ProgressGuard {
+                    telemetry: telemetry.clone(),
+                });
             }
 
             // Save tool results
@@ -3345,64 +3764,59 @@ impl AgenticOrchestrator {
                 role: Role::User,
                 content: tool_results,
             };
-            let validation_reminder_needed = update_validation_state(
-                &mut mutation_needs_validation,
-                &result.tool_calls,
-                &tool_msg.content,
-            );
             conversation.push(tool_msg.clone());
-            if let Some(instruction) = progress_replan_instruction {
-                conversation.push(ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::Text { text: instruction }],
-                });
-            }
+            super::progress::refresh_progress_feedback(
+                &mut conversation,
+                progress_telemetry.as_ref(),
+            );
             if let Some(instruction) = delegation_nudge_instruction {
                 conversation.push(ModelMessage {
                     role: Role::System,
-                    content: vec![Content::Text { text: instruction }],
+                    content: vec![Content::text(instruction)],
                 });
             }
-            if !mutation_needs_validation {
-                remove_validation_reminders(&mut conversation);
-            }
-            if validation_reminder_needed && session_type == SessionType::Code {
-                conversation.push(ModelMessage {
-                    role: Role::System,
-                    content: vec![Content::Text {
-                        text: VALIDATION_REMINDER.to_string(),
-                    }],
-                });
-            }
+            refresh_validation_reminder(
+                &mut conversation,
+                session_type,
+                &result.tool_calls,
+                &tool_msg.content,
+            );
             context_ledger.update_from_conversation(&conversation);
             persist_context_state(&db_path, &session_id, &context_ledger);
             save_message(&db_path, &session_id, &tool_msg);
             clear_recovery_state(&db_path, &session_id);
 
-            if yield_after_background_agent {
-                if context_mode.is_worker_goal() {
-                    finish_worker_provider_attention(
-                        &db_path,
-                        &session_id,
-                        &event_tx,
-                        "Hive Worker Goal reached a forbidden background-agent yield; no Workflow progress was published"
-                            .to_string(),
-                    );
-                    return;
-                }
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::TurnComplete {
-                    turn: iteration,
-                    has_more: false,
+            if let Some(error) = attempt_accounting_error {
+                let _ = event_tx.send(LoopEvent::Error {
+                    error: format!("Goal accounting could not be persisted: {error}"),
                 });
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::Completed,
-                });
+                finish_run(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "error",
+                    LoopStopReason::ProviderError,
+                );
                 return;
             }
+            goal_final_continuation_attempted = false;
 
-            if active_goal_at_start
+            if background_agent_started {
+                if context_mode.is_worker_goal() {
+                    finish_worker_provider_attention(&db_path, &session_id, &event_tx,
+                        "Hive Worker Goal reached a forbidden background-agent start; no Workflow progress was published".into());
+                    return;
+                }
+                conversation.push(ModelMessage {
+                    role: Role::System,
+                    content: vec![Content::text("A background Agent is working and owns a durable completion wake. Continue useful independent work now. Do not poll or wait repeatedly. When only child-dependent work remains, end the foreground response with an honest progress update and await the completion wake.".into())],
+                });
+                context_ledger.update_from_conversation(&conversation);
+                persist_context_state(&db_path, &session_id, &context_ledger);
+            }
+
+            if active_goal
                 && successful_task_completion_needs_goal_followthrough(
                     &db_path,
                     &session_id,
@@ -3413,9 +3827,7 @@ impl AgenticOrchestrator {
                 let instruction = "All approved plan steps are now terminal, but the Goal is still active. Continue in this same run: call `workflow_update` with `verify_criterion` and concrete evidence for every pending required criterion, then call `workflow_update` with `complete_goal`. Do not stop or claim completion in prose while the Goal remains active.";
                 conversation.push(ModelMessage {
                     role: Role::System,
-                    content: vec![Content::Text {
-                        text: instruction.to_string(),
-                    }],
+                    content: vec![Content::text(instruction.to_string())],
                 });
                 context_ledger.update_from_conversation(&conversation);
                 persist_context_state(&db_path, &session_id, &context_ledger);
@@ -3434,30 +3846,36 @@ impl AgenticOrchestrator {
                     let _ = event_tx.send(LoopEvent::Error {
                         error: format!("Goal attempt stopped: {reason}"),
                     });
-                    set_agent_state(&db_path, &session_id, "idle");
                     let _ = event_tx.send(LoopEvent::TurnComplete {
                         turn: iteration,
                         has_more: false,
                     });
-                    let _ = event_tx.send(LoopEvent::Finished {
-                        session_id: session_id.clone(),
-                        stop_reason: if status == GoalStatus::Blocked {
+                    finish_run(
+                        attempt_progress_tracker.goal_id(),
+                        &db_path,
+                        &session_id,
+                        &event_tx,
+                        "idle",
+                        if status == GoalStatus::Blocked {
                             LoopStopReason::LoopGuardTriggered
                         } else {
                             LoopStopReason::BudgetExhausted
                         },
-                    });
+                    );
                     return;
                 }
             }
 
             input_inbox.collect_ready();
             if input_inbox.take_cancel() {
-                set_agent_state(&db_path, &session_id, "idle");
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::UserAbort,
-                });
+                finish_run(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::UserAbort,
+                );
                 return;
             }
             let injected_steering = if context_mode.is_isolated_worker() {
@@ -3473,22 +3891,25 @@ impl AgenticOrchestrator {
                 )
             };
             if !injected_steering.is_empty() {
-                loop_guard_landing = None;
-                delegation_nudge_tracker.reset_for_steering();
-                empty_stream_retry_attempted = false;
-                empty_completion_retry_attempted = false;
-                empty_completion_recovery_pending = false;
-                provider_tool_activity_seen = false;
-                overflow_compact_retry_attempted = false;
-                if !active_goal_at_start {
-                    loop_guard.reset_for_steering();
-                }
-                set_agent_state(&db_path, &session_id, "streaming");
-                let _ = event_tx.send(LoopEvent::TurnComplete {
-                    turn: iteration,
-                    has_more: true,
-                });
-                emit_steering_events(&event_tx, injected_steering);
+                reset_recovery_flags(
+                    &mut loop_guard,
+                    active_goal,
+                    &mut loop_guard_landing,
+                    &mut delegation_nudge_tracker,
+                    &mut empty_stream_retry_attempted,
+                    &mut empty_completion_retry_attempted,
+                    &mut empty_completion_recovery_pending,
+                    &mut provider_tool_activity_seen,
+                    &mut overflow_compact_retry_attempted,
+                    &mut goal_final_continuation_attempted,
+                );
+                emit_steering_turn_boundary(
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    iteration,
+                    injected_steering,
+                );
                 continue;
             }
 
@@ -3504,7 +3925,7 @@ impl AgenticOrchestrator {
                 loop_guard_landing = Some(landing);
                 conversation.push(ModelMessage {
                     role: Role::System,
-                    content: vec![Content::Text { text: instruction }],
+                    content: vec![Content::text(instruction)],
                 });
                 context_ledger.update_from_conversation(&conversation);
                 persist_context_state(&db_path, &session_id, &context_ledger);
@@ -3517,7 +3938,7 @@ impl AgenticOrchestrator {
                 continue;
             }
 
-            if let Some(explore_summary) = (!context_mode.is_worker_goal())
+            if let Some(explore_summary) = (!context_mode.is_worker_goal() && !active_goal)
                 .then(|| finalize_explore_only_turn(&result.tool_calls, &tool_msg.content))
                 .flatten()
             {
@@ -3527,9 +3948,7 @@ impl AgenticOrchestrator {
 
                 let assistant_msg = ModelMessage {
                     role: Role::Assistant,
-                    content: vec![Content::Text {
-                        text: explore_summary,
-                    }],
+                    content: vec![Content::text(explore_summary)],
                 };
                 conversation.push(assistant_msg.clone());
                 context_ledger.update_from_conversation(&conversation);
@@ -3543,16 +3962,18 @@ impl AgenticOrchestrator {
                 if last_token_count > 0 {
                     update_token_count(&db_path, &session_id, last_token_count);
                 }
-                clear_recovery_state(&db_path, &session_id);
-                set_agent_state(&db_path, &session_id, "idle");
                 let _ = event_tx.send(LoopEvent::TurnComplete {
                     turn: iteration,
                     has_more: false,
                 });
-                let _ = event_tx.send(LoopEvent::Finished {
-                    session_id: session_id.clone(),
-                    stop_reason: LoopStopReason::Completed,
-                });
+                finish_run(
+                    attempt_progress_tracker.goal_id(),
+                    &db_path,
+                    &session_id,
+                    &event_tx,
+                    "idle",
+                    LoopStopReason::Completed,
+                );
                 return;
             }
 
@@ -3609,7 +4030,7 @@ fn steering_display_message(content: &[Content]) -> String {
     let text = content
         .iter()
         .filter_map(|item| match item {
-            Content::Text { text } if !text.trim().is_empty() => Some(text.trim()),
+            Content::Text { text, .. } if !text.trim().is_empty() => Some(text.trim()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -3718,40 +4139,41 @@ fn reload_persisted_conversation(
         .collect()
 }
 
-fn update_validation_state(
-    mutation_needs_validation: &mut bool,
+/// A post-mutation cue lasts for one provider response. It is an advisory,
+/// not a ledger of required checks: consuming it must not depend on recognizing
+/// the next command, or imply that user/Goal verification requirements passed.
+fn refresh_validation_reminder(
+    conversation: &mut Vec<ModelMessage>,
+    session_type: SessionType,
     tool_calls: &[crate::ai::types::AiToolCall],
     tool_results: &[Content],
-) -> bool {
-    let successful_results = tool_results
+) {
+    remove_validation_reminders(conversation);
+    if session_type != SessionType::Code {
+        return;
+    }
+    let changed_ids = tool_results
         .iter()
         .filter_map(|result| match result {
             Content::ToolResult {
                 tool_use_id,
                 output,
                 is_error,
-            } if !is_error.unwrap_or(false) => {
-                Some((tool_use_id.as_str(), trusted_changed(output)))
+            } if !is_error.unwrap_or(false) && trusted_changed(output) == Some(true) => {
+                Some(tool_use_id.as_str())
             }
             _ => None,
         })
-        .collect::<HashMap<_, _>>();
-    let was_pending = *mutation_needs_validation;
-
-    for call in tool_calls
+        .collect::<HashSet<_>>();
+    if tool_calls
         .iter()
-        .filter(|call| successful_results.contains_key(call.id.as_str()))
+        .any(|call| changed_ids.contains(call.id.as_str()) && is_mutation_call(call))
     {
-        if failure::is_validation_call(call) {
-            *mutation_needs_validation = false;
-        } else if successful_results.get(call.id.as_str()) == Some(&Some(true))
-            && is_mutation_call(call)
-        {
-            *mutation_needs_validation = true;
-        }
+        conversation.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::text(VALIDATION_REMINDER.into())],
+        });
     }
-
-    !was_pending && *mutation_needs_validation
 }
 
 fn successful_task_completion_needs_goal_followthrough(
@@ -3795,13 +4217,13 @@ fn successful_task_completion_needs_goal_followthrough(
     })
 }
 
-const VALIDATION_REMINDER: &str = "Files changed successfully. Before finishing, run the narrowest relevant test, build, lint, typecheck, or `git diff --check`. If no executable validation applies, say why explicitly instead of implying it ran.";
+const VALIDATION_REMINDER: &str = "Files changed successfully. Verify with the narrowest relevant check available through your authorized tools. Respect user-assigned external validation: perform requested inspection, then report external checks as pending. If a required check is unavailable, say so; do not substitute repeated reads or invent test results. Explicit required checks and Goal verification criteria remain requirements. Once available verification is complete, report the change, evidence, and any remaining verification gaps.";
 
 fn remove_validation_reminders(conversation: &mut Vec<ModelMessage>) {
     conversation.retain(|message| {
         !(message.role == Role::System
             && message.content.iter().any(
-                |content| matches!(content, Content::Text { text } if text == VALIDATION_REMINDER),
+                |content| matches!(content, Content::Text { text, .. } if text == VALIDATION_REMINDER),
             ))
     });
 }
@@ -3910,13 +4332,13 @@ mod tests {
     use super::message_builder::finalize_explore_only_turn;
     use super::no_tool_completion_should_continue;
     use super::provider_options_for_turn;
+    use super::refresh_validation_reminder;
     use super::remove_validation_reminders;
     use super::resolve_project_permission_mode;
     use super::should_retry_empty_stream_interruption;
     use super::split_single_pending_ask_user_call;
     use super::successful_task_completion_needs_goal_followthrough;
     use super::terminal_agent_state_after_interruption;
-    use super::update_validation_state;
     use super::worker_response_commit_terminal_outcome;
     use super::AttemptProgressTracker;
     use super::CanonicalSessionPersistenceBoundary;
@@ -4262,9 +4684,9 @@ mod tests {
 
         let trigger = ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "[WORKER GOAL TRIGGER v1] EPHEMERAL-TRIGGER-LEAK-CANARY".into(),
-            }],
+            content: vec![Content::text(
+                "[WORKER GOAL TRIGGER v1] EPHEMERAL-TRIGGER-LEAK-CANARY".into(),
+            )],
         };
         let tool_result = ModelMessage {
             role: Role::User,
@@ -4640,7 +5062,7 @@ mod tests {
         assert_eq!(active.snapshot.goal.status, GoalStatus::Active);
 
         let mutation =
-            ensure_active_goal_attempt_for_run(&db_path, &session_id, PermissionMode::Autonomous)
+            ensure_active_goal_attempt_for_run(&db_path, &session_id, PermissionMode::Autonomous)?
                 .expect("active run should create an attempt");
         assert_eq!(
             mutation.snapshot.steps[0].status,
@@ -4663,7 +5085,7 @@ mod tests {
         let revision = mutation.snapshot.aggregate_revision;
 
         assert!(
-            ensure_active_goal_attempt_for_run(&db_path, &session_id, PermissionMode::Autonomous,)
+            ensure_active_goal_attempt_for_run(&db_path, &session_id, PermissionMode::Autonomous,)?
                 .is_none(),
             "a running attempt must not be duplicated"
         );
@@ -4739,19 +5161,13 @@ mod tests {
         let session_id = manager.create_session("steering", Some("test-model"), None)?;
         let initial_user = ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "start".into(),
-            }],
+            content: vec![Content::text("start".into())],
         };
         let assistant = ModelMessage {
             role: Role::Assistant,
-            content: vec![Content::Text {
-                text: "first response".into(),
-            }],
+            content: vec![Content::text("first response".into())],
         };
-        let steering_content = vec![Content::Text {
-            text: "change direction".into(),
-        }];
+        let steering_content = vec![Content::text("change direction".into())];
         let steering_json = serde_json::to_string(&steering_content)?;
         manager.save_message(
             &session_id,
@@ -4821,13 +5237,9 @@ mod tests {
         let session_id = manager.create_session("persisted input", Some("test-model"), None)?;
         let initial_user = ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "start".into(),
-            }],
+            content: vec![Content::text("start".into())],
         };
-        let follow_up = vec![Content::Text {
-            text: "already committed by daemon".into(),
-        }];
+        let follow_up = vec![Content::text("already committed by daemon".into())];
         manager.save_message(
             &session_id,
             "user",
@@ -4883,94 +5295,102 @@ mod tests {
     }
 
     #[test]
-    fn successful_mutation_requires_validation_and_successful_check_clears_it() {
+    fn validation_cue_expires_without_claiming_required_checks_passed() {
         let mutation = AiToolCall {
-            id: "edit-1".into(),
+            id: "edit".into(),
             name: "edit".into(),
-            arguments: json!({"file_path": "src/lib.rs"}),
+            arguments: json!({"file_path": "app.py"}),
         };
-        let validation = AiToolCall {
-            id: "check-1".into(),
-            name: "bash".into(),
-            arguments: json!({"command": "cargo test -p mitsuro-core"}),
-        };
-        let success = |id: &str, changed: Option<bool>| Content::ToolResult {
-            tool_use_id: id.into(),
-            output: match changed {
-                Some(changed) => json!({"ok": true, "changed": changed}),
-                None => json!({"ok": true}),
-            },
+        let changed = Content::ToolResult {
+            tool_use_id: "edit".into(),
+            output: json!({"ok": true, "changed": true}),
             is_error: None,
         };
-        let mut pending = false;
-
-        assert!(update_validation_state(
-            &mut pending,
+        let obligation = ModelMessage {
+            role: Role::User,
+            content: vec![Content::text(
+                "Run the required tests; native acceptance remains pending.".into(),
+            )],
+        };
+        let mut conversation = vec![obligation.clone()];
+        refresh_validation_reminder(
+            &mut conversation,
+            SessionType::Code,
             std::slice::from_ref(&mutation),
-            &[success("edit-1", Some(true))],
-        ));
-        assert!(pending);
-        assert!(!update_validation_state(
-            &mut pending,
-            std::slice::from_ref(&validation),
-            &[success("check-1", None)],
-        ));
-        assert!(!pending);
-    }
+            std::slice::from_ref(&changed),
+        );
+        assert_eq!(conversation.len(), 2);
 
-    #[test]
-    fn opaque_or_noop_mutation_results_do_not_invent_validation_work() {
-        let python = AiToolCall {
-            id: "bash-1".into(),
+        // A custom inspection need not match a test-command keyword. Its result
+        // consumes the cue, but neither alters the obligation nor claims success.
+        let inspection = AiToolCall {
+            id: "inspect".into(),
             name: "bash".into(),
-            arguments: json!({"command": "python3 probe.py"}),
+            arguments: json!({"command": "python3 -c 'print(open(\"app.py\", \"rb\").read())'"}),
         };
-        let edit = AiToolCall {
-            id: "edit-1".into(),
-            name: "edit".into(),
-            arguments: json!({"file_path": "src/lib.rs"}),
-        };
-        let result = |id: &str, output| Content::ToolResult {
-            tool_use_id: id.into(),
-            output,
-            is_error: None,
-        };
-        let mut pending = false;
-
-        assert!(!update_validation_state(
-            &mut pending,
-            &[python],
-            &[result("bash-1", json!({"ok": true}))],
-        ));
-        assert!(!pending);
-        assert!(!update_validation_state(
-            &mut pending,
-            &[edit],
-            &[result("edit-1", json!({"ok": true, "changed": false}))],
-        ));
-        assert!(!pending);
-    }
-
-    #[test]
-    fn failed_validation_does_not_clear_pending_mutation() {
-        let validation = AiToolCall {
-            id: "check-1".into(),
-            name: "bash".into(),
-            arguments: json!({"command": "cargo check --workspace"}),
-        };
-        let mut pending = true;
         let failed = Content::ToolResult {
-            tool_use_id: "check-1".into(),
-            output: json!({"error": true}),
+            tool_use_id: "inspect".into(),
+            output: json!({"error": "inspection failed"}),
             is_error: Some(true),
         };
-
-        assert!(!update_validation_state(
-            &mut pending,
-            &[validation],
+        conversation.push(ModelMessage {
+            role: Role::User,
+            content: vec![failed.clone()],
+        });
+        refresh_validation_reminder(
+            &mut conversation,
+            SessionType::Code,
+            &[inspection],
             &[failed],
+        );
+        assert_eq!(conversation.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&conversation[0]).unwrap(),
+            serde_json::to_value(obligation).unwrap()
+        );
+        assert!(matches!(
+            &conversation[1].content[0],
+            Content::ToolResult {
+                is_error: Some(true),
+                ..
+            }
         ));
-        assert!(pending);
+
+        // A subsequent real change independently earns another one-response cue.
+        refresh_validation_reminder(
+            &mut conversation,
+            SessionType::Code,
+            &[mutation],
+            &[changed],
+        );
+        assert_eq!(conversation.len(), 3);
+    }
+
+    #[test]
+    fn validation_cue_requires_a_successful_proven_mutation() {
+        let call = AiToolCall {
+            id: "edit".into(),
+            name: "edit".into(),
+            arguments: json!({"file_path": "app.py"}),
+        };
+        for (output, is_error) in [
+            (json!({"ok": true}), None),
+            (json!({"changed": false}), None),
+            (json!({"changed": true}), Some(true)),
+        ] {
+            let mut conversation = vec![];
+            refresh_validation_reminder(
+                &mut conversation,
+                SessionType::Code,
+                std::slice::from_ref(&call),
+                &[Content::ToolResult {
+                    tool_use_id: call.id.clone(),
+                    output,
+                    is_error,
+                }],
+            );
+            assert!(conversation.is_empty());
+        }
     }
 
     #[test]
@@ -4978,15 +5398,11 @@ mod tests {
         let mut conversation = vec![
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: "durable instruction".into(),
-                }],
+                content: vec![Content::text("durable instruction".into())],
             },
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: VALIDATION_REMINDER.into(),
-                }],
+                content: vec![Content::text(VALIDATION_REMINDER.into())],
             },
         ];
 
@@ -4995,7 +5411,7 @@ mod tests {
         assert_eq!(conversation.len(), 1);
         assert!(matches!(
             &conversation[0].content[0],
-            Content::Text { text } if text == "durable instruction"
+            Content::Text { text, .. } if text == "durable instruction"
         ));
     }
 
@@ -5031,25 +5447,33 @@ mod tests {
         ));
         assert!(should_retry_empty_stream_interruption(
             Some(&LoopStopReason::ProviderError),
-            Some("API error: 429 Too Many Requests - capacity"),
+            Some(&super::stream::StreamFailure::RetryableTransport(
+                "API error: 429 Too Many Requests - capacity".to_string()
+            )),
             false,
             false
         ));
         assert!(should_retry_empty_stream_interruption(
             Some(&LoopStopReason::ProviderError),
-            Some("AI stream ended without a finish signal"),
+            Some(&super::stream::StreamFailure::RetryableTransport(
+                "AI stream ended without a finish signal".to_string()
+            )),
             false,
             false
         ));
         assert!(!should_retry_empty_stream_interruption(
             Some(&LoopStopReason::ProviderError),
-            Some("API error: 402 Payment Required - limit reached"),
+            Some(&super::stream::StreamFailure::Terminal(
+                "API error: 402 Payment Required - limit reached".to_string()
+            )),
             false,
             false
         ));
         assert!(!should_retry_empty_stream_interruption(
             Some(&LoopStopReason::ProviderError),
-            Some("API error: 503 Service Unavailable"),
+            Some(&super::stream::StreamFailure::RetryableTransport(
+                "API error: 503 Service Unavailable".to_string()
+            )),
             true,
             false
         ));
@@ -5058,15 +5482,15 @@ mod tests {
     #[test]
     fn semantic_empty_completion_retries_once_then_fails_visibly() {
         assert_eq!(
-            empty_completion_action("", &[], false, false),
+            empty_completion_action("", &[], false, false, false),
             EmptyCompletionAction::Retry
         );
         assert_eq!(
-            empty_completion_action("  \n", &[], true, false),
+            empty_completion_action("  \n", &[], false, true, false),
             EmptyCompletionAction::Fail
         );
         assert_eq!(
-            empty_completion_action("", &[], false, true),
+            empty_completion_action("", &[], false, false, true),
             EmptyCompletionAction::Fail
         );
     }
@@ -5080,11 +5504,11 @@ mod tests {
         };
 
         assert_eq!(
-            empty_completion_action("done", &[], false, false),
+            empty_completion_action("done", &[], false, false, false),
             EmptyCompletionAction::None
         );
         assert_eq!(
-            empty_completion_action("", &[tool_call], false, false),
+            empty_completion_action("", &[tool_call], false, false, false),
             EmptyCompletionAction::None
         );
     }
@@ -5111,6 +5535,7 @@ mod tests {
         assert!(landing.web_search.is_none());
         assert!(landing.web_fetch.is_none());
         assert!(!landing.codex_parallel_tool_calls);
+        assert_eq!(landing.parallel_tool_calls, Some(false));
         assert_eq!(options.tools.as_ref().map(Vec::len), Some(1));
 
         let instruction = super::loop_guard_landing_instruction(&LoopGuardLanding {
@@ -5257,9 +5682,7 @@ mod tests {
         let skills = RwLock::new(SkillsManager::with_defaults(repo));
         let conversation = vec![ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "hello".to_string(),
-            }],
+            content: vec![Content::text("hello".to_string())],
         }];
         let db_path = repo.join("krusty.db");
 
@@ -5297,16 +5720,23 @@ mod tests {
         assert!(hive_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
-                Content::Text { text }
+                Content::Text { text, .. }
                     if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]") && text.contains("Always Swimming.")
             )
         }));
         assert!(!code_injected.iter().any(|message| {
             matches!(
                 &message.content[0],
-                Content::Text { text } if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]")
+                Content::Text { text, .. } if text.contains("[HIVE PROJECT OVERLAY - HIVE.md]")
             )
         }));
         Ok(())
+    }
+    #[test]
+    fn sources_only_completion_is_meaningful_output() {
+        assert_eq!(
+            empty_completion_action("", &[], true, false, false),
+            EmptyCompletionAction::None
+        );
     }
 }

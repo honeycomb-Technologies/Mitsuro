@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::ai::types::{AiToolCall, Content};
+use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
+use crate::storage::DelegationMode;
 use crate::tools::registry::{
     agent_call_action, agent_call_requests_write, effective_tool_call, tool_policy_for_call,
     trusted_changed, ToolCategory,
@@ -38,8 +39,8 @@ pub const MAX_INTENTS_PER_IDENTICAL_OUTCOME: usize = 8;
 /// short sequence of distinct build steps, then require independent evidence
 /// before more unverified effects can keep the run alive.
 pub const MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS: usize = 6;
-/// Broad parent-side observation should either converge or be split into a
-/// named child task. Keep this above quick one- or two-turn inspection.
+/// Offer delegation advice after sustained multi-area investigation. This is
+/// not a stop threshold: productive observation may continue without a child.
 pub const DELEGATION_NUDGE_TURN_THRESHOLD: usize = 3;
 pub const DELEGATION_NUDGE_AREA_THRESHOLD: usize = 3;
 
@@ -93,9 +94,36 @@ impl ProgressGuardTelemetry {
     }
 
     pub fn replan_instruction(&self) -> Option<&'static str> {
-        matches!(self.action, ProgressGuardAction::Replan).then_some(
-            "[PROGRESS GUARD]\nThe last actions repeated existing evidence or produced no state change. Do not repeat the same command with cosmetic variations. Reassess the current evidence, choose a materially different action, finish with the answer if the task is already complete, or ask for missing input.",
-        )
+        (!self.triggered).then_some(if self.guard == "evidence_reuse" {
+            EVIDENCE_REUSE_FEEDBACK
+        } else {
+            PROGRESS_FEEDBACK
+        })
+    }
+}
+
+const EVIDENCE_REUSE_FEEDBACK: &str = "[EVIDENCE REUSE]\nSome observations repeat evidence already in this conversation. Retain new findings, but do not reread unchanged facts merely to reconfirm them. Before further tools, identify a specific unresolved requirement that needs fresh evidence. If requirements are satisfied, report the verified outcome and any limitations. Do not repeat inspection announcements. This advisory does not mark any requirement satisfied.";
+
+const PROGRESS_FEEDBACK: &str = "[PROGRESS GUARD]\nThe last tool batch added no new evidence or verified change. Use the results already in this conversation; do not restart inspection or repeat equivalent checks. If work remains, identify the specific unresolved question and use a check that can resolve it. Otherwise give the final answer with verified results and any unfinished or unavailable checks. This notice does not establish success. Avoid another generic announcement of inspection.";
+
+/// Feedback describes only the latest batch; never leave a stale continuation
+/// instruction in the model context after productive work resumes.
+pub(crate) fn refresh_progress_feedback(
+    messages: &mut Vec<ModelMessage>,
+    telemetry: Option<&ProgressGuardTelemetry>,
+) {
+    messages.retain(|message| {
+        !(message.role == Role::System
+            && message.content.iter().any(|content| {
+                matches!(content,
+            Content::Text { text, .. } if text == PROGRESS_FEEDBACK || text == EVIDENCE_REUSE_FEEDBACK)
+            }))
+    });
+    if let Some(instruction) = telemetry.and_then(ProgressGuardTelemetry::replan_instruction) {
+        messages.push(ModelMessage {
+            role: Role::System,
+            content: vec![Content::text(instruction.into())],
+        });
     }
 }
 
@@ -174,17 +202,9 @@ fn turn_has_verified_mutation(tool_calls: &[AiToolCall], tool_results: &[Content
     })
 }
 
-/// Parent-only pressure toward delegation after sustained, successful
-/// observation across multiple repository areas. Small/local work never has
-/// to delegate. Broad work gets one model-visible checkpoint; if the parent
-/// ignores it and performs another observation-only turn, the caller gets a
-/// bounded landing diagnostic instead of allowing open-ended archaeology.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DelegationCheckpoint {
-    Nudge(String),
-    Land(String),
-}
-
+/// One advisory nudge per observation sequence, when session policy and the
+/// current tool surface permit delegation. Only the semantic progress guard
+/// may stop evidence-free work; breadth alone never forces a final response.
 #[derive(Debug, Default)]
 pub(crate) struct DelegationNudgeTracker {
     consecutive_observation_turns: usize,
@@ -205,8 +225,12 @@ impl DelegationNudgeTracker {
         &mut self,
         tool_calls: &[AiToolCall],
         tool_results: &[Content],
-    ) -> Option<DelegationCheckpoint> {
-        if tool_calls.is_empty()
+        mode: DelegationMode,
+        can_delegate: bool,
+    ) -> Option<String> {
+        if mode == DelegationMode::ExplicitOnly
+            || !can_delegate
+            || tool_calls.is_empty()
             || !tool_calls
                 .iter()
                 .all(|call| action_fingerprint(call).class == ActionClass::Observe)
@@ -225,17 +249,13 @@ impl DelegationNudgeTracker {
             return None;
         }
 
+        if self.nudged {
+            return None;
+        }
+
         self.consecutive_observation_turns = self.consecutive_observation_turns.saturating_add(1);
         for call in tool_calls {
             self.observed_areas.extend(observation_areas(call));
-        }
-
-        if self.nudged {
-            return Some(DelegationCheckpoint::Land(format!(
-                "Broad parent-only observation continued after the delegation checkpoint for {} consecutive turns across {} repository areas. Synthesize the evidence already gathered now. If a later turn needs more substantial investigation, delegate one precise bounded child instead of continuing parent-side archaeology.",
-                self.consecutive_observation_turns,
-                self.observed_areas.len(),
-            )));
         }
 
         if self.consecutive_observation_turns < DELEGATION_NUDGE_TURN_THRESHOLD
@@ -245,11 +265,11 @@ impl DelegationNudgeTracker {
         }
 
         self.nudged = true;
-        Some(DelegationCheckpoint::Nudge(format!(
-            "[BROAD OBSERVATION CHECKPOINT]\nThe parent has completed {} consecutive observation turns across {} repository areas. If the remaining investigation is substantial and separable, start one named `agent` child with precise bounded instructions. Set `run_in_background=true` only when that field is available on the current Agent tool surface; in that case, continue independent work while the child runs. Otherwise run the named child in the foreground and use its result before continuing. If the evidence is already sufficient or the remaining work is small, synthesize or act directly. Do not delegate merely to satisfy this checkpoint.",
+        Some(format!(
+            "[BROAD OBSERVATION CHECKPOINT]\nThe parent has completed {} consecutive observation turns across {} repository areas. If the remaining investigation is substantial and separable, consider one named `agent` child with precise bounded instructions. Set `run_in_background=true` only when that field is available on the current Agent tool surface; in that case, continue independent work while the child runs. Otherwise run the named child in the foreground and use its result before continuing. Continue productive direct investigation when it best serves the user's scope. If the evidence is sufficient, synthesize or act directly. Do not delegate merely to satisfy this checkpoint.",
             self.consecutive_observation_turns,
             self.observed_areas.len(),
-        )))
+        ))
     }
 
     fn reset_sequence(&mut self) {
@@ -344,6 +364,7 @@ pub struct ProgressLedger {
     seen_evidence: HashSet<String>,
     seen_changed_effects: HashSet<String>,
     seen_unverified_effects: HashSet<String>,
+    seen_unverified_outputs: HashSet<String>,
     outcome_variants: HashMap<String, HashSet<String>>,
     outcome_intents: HashMap<String, HashSet<String>>,
     consecutive_unverified_effect_turns: usize,
@@ -360,6 +381,7 @@ impl ProgressLedger {
         self.seen_evidence.clear();
         self.seen_changed_effects.clear();
         self.seen_unverified_effects.clear();
+        self.seen_unverified_outputs.clear();
         self.outcome_variants.clear();
         self.outcome_intents.clear();
         self.consecutive_unverified_effect_turns = 0;
@@ -388,6 +410,7 @@ impl ProgressLedger {
         let mut action_classes = Vec::new();
         let mut discovered_new_changed_effect = false;
         let mut discovered_new_unverified_effect = false;
+        let mut unverified_effect_has_new_output = false;
 
         for (call, fingerprint) in tool_calls.iter().zip(&fingerprints) {
             let Some(result) = results.get(call.id.as_str()) else {
@@ -432,6 +455,17 @@ impl ProgressLedger {
                     .insert(fingerprint.intent.clone())
             {
                 discovered_new_unverified_effect = true;
+                let (name, _) = effective_tool_call(&call.name, &call.arguments);
+                // Do not infer shell permissions or successful effects from stdout.
+                // Only deny extra novelty to same-output command variants mixed
+                // with already-known observations. Empty-output build steps keep
+                // their existing bounded runway.
+                unverified_effect_has_new_output |= !matches!(name, "bash" | "shell" | "execute")
+                    || extract_output_text(&result.output)
+                        .is_none_or(|text| text.trim().is_empty())
+                    || self
+                        .seen_unverified_outputs
+                        .insert(bash_output_signature(result));
             }
 
             // Intent spelling never proves progress by itself. Successful
@@ -461,13 +495,16 @@ impl ProgressLedger {
             self.outcome_variants.clear();
             self.outcome_intents.clear();
             self.seen_unverified_effects.clear();
+            self.seen_unverified_outputs.clear();
             self.consecutive_unverified_effect_turns = 0;
         }
 
         let mut accepted_evidence = Vec::new();
+        let mut repeated_observations = 0;
         for (intent, evidence, bound_cross_intent_churn) in &evidence_candidates {
             let evidence_identity = format!("{intent}:{evidence}");
             if self.seen_evidence.contains(&evidence_identity) {
+                repeated_observations += 1;
                 continue;
             }
             let variants = self.outcome_variants.entry(intent.clone()).or_default();
@@ -492,18 +529,21 @@ impl ProgressLedger {
         }
 
         if !accepted_evidence.is_empty() {
-            self.seen_unverified_effects.clear();
+            // New observations reset the streak, not command identity. Only a
+            // verified mutation or steering may make an old opaque effect new.
             self.consecutive_unverified_effect_turns = 0;
             self.no_progress_turns = 0;
-            return None;
+            return self.evidence_reuse_advisory(repeated_observations, action_classes);
         }
 
-        if discovered_new_unverified_effect {
+        if discovered_new_unverified_effect
+            && (evidence_candidates.is_empty() || unverified_effect_has_new_output)
+        {
             self.consecutive_unverified_effect_turns =
                 self.consecutive_unverified_effect_turns.saturating_add(1);
             if self.consecutive_unverified_effect_turns <= MAX_CONSECUTIVE_UNVERIFIED_EFFECT_TURNS {
                 self.no_progress_turns = 0;
-                return None;
+                return self.evidence_reuse_advisory(repeated_observations, action_classes);
             }
         }
 
@@ -530,6 +570,25 @@ impl ProgressLedger {
         };
 
         Some(self.telemetry(action_classes, &diagnostic))
+    }
+
+    /// Overlap can be wasteful even when a batch discovers one new fact.
+    /// Preserve that progress and offer reuse guidance, never a terminal stop.
+    fn evidence_reuse_advisory(
+        &self,
+        repeated: usize,
+        classes: Vec<ActionClass>,
+    ) -> Option<ProgressGuardTelemetry> {
+        (repeated >= 2).then(|| ProgressGuardTelemetry {
+            guard: "evidence_reuse".into(),
+            no_progress_turns: 0,
+            threshold: NO_PROGRESS_TURN_THRESHOLD,
+            mutation_epoch: self.mutation_epoch,
+            action_classes: classes,
+            evidence_signature: hash_text("overlapping_observations"),
+            action: ProgressGuardAction::Warn,
+            triggered: false,
+        })
     }
 
     fn telemetry(
@@ -914,14 +973,11 @@ mod tests {
         for (index, (id, path)) in turns.into_iter().enumerate() {
             let calls = [call(id, "read", json!({"file_path": path}))];
             let results = [result(id, "observed", false)];
-            let nudge = tracker.record_turn(&calls, &results);
+            let nudge = tracker.record_turn(&calls, &results, DelegationMode::Balanced, true);
             if index + 1 < DELEGATION_NUDGE_TURN_THRESHOLD {
                 assert!(nudge.is_none());
             } else {
                 let nudge = nudge.expect("broad sustained observation should nudge");
-                let DelegationCheckpoint::Nudge(nudge) = nudge else {
-                    panic!("first broad checkpoint must be a nudge");
-                };
                 assert!(nudge.contains("named `agent` child"));
                 assert!(
                     nudge.contains("`run_in_background=true` only when that field is available")
@@ -935,14 +991,17 @@ mod tests {
             "read",
             json!({"file_path": "docs/architecture.md"}),
         )];
-        let landing = tracker
-            .record_turn(&calls, &[result("read-4", "observed", false)])
-            .expect("ignoring the checkpoint must converge");
-        let DelegationCheckpoint::Land(diagnostic) = landing else {
-            panic!("second broad checkpoint must land");
-        };
-        assert!(diagnostic.contains("Synthesize the evidence"));
-        assert!(diagnostic.contains("delegate one precise bounded child"));
+        assert!(
+            tracker
+                .record_turn(
+                    &calls,
+                    &[result("read-4", "new architectural evidence", false)],
+                    DelegationMode::Balanced,
+                    true,
+                )
+                .is_none(),
+            "productive investigation must not force synthesis"
+        );
     }
 
     #[test]
@@ -956,7 +1015,12 @@ mod tests {
                 json!({"file_path": format!("crates/mitsuro-core/src/agent/file_{index}.rs")}),
             )];
             assert!(tracker
-                .record_turn(&calls, &[result(&id, "observed", false)])
+                .record_turn(
+                    &calls,
+                    &[result(&id, "observed", false)],
+                    DelegationMode::Balanced,
+                    true
+                )
                 .is_none());
         }
 
@@ -966,7 +1030,12 @@ mod tests {
             json!({"file_path": "crates/mitsuro-core/src/agent/file.rs"}),
         )];
         assert!(tracker
-            .record_turn(&edit, &[result("edit-1", "changed", false)])
+            .record_turn(
+                &edit,
+                &[result("edit-1", "changed", false)],
+                DelegationMode::Balanced,
+                true
+            )
             .is_none());
 
         let calls = [call(
@@ -975,8 +1044,76 @@ mod tests {
             json!({"file_path": "apps/mobile/src/app.tsx"}),
         )];
         assert!(tracker
-            .record_turn(&calls, &[result("read-new", "observed", false)])
+            .record_turn(
+                &calls,
+                &[result("read-new", "observed", false)],
+                DelegationMode::Balanced,
+                true
+            )
             .is_none());
+    }
+
+    #[test]
+    fn delegation_advice_respects_policy_and_current_capabilities() {
+        for (mode, can_delegate) in [
+            (DelegationMode::ExplicitOnly, true),
+            (DelegationMode::Balanced, false),
+            (DelegationMode::Proactive, false),
+            (DelegationMode::Orchestrator, false),
+        ] {
+            let mut tracker = DelegationNudgeTracker::new();
+            for index in 0..8 {
+                let id = format!("read-{index}");
+                let calls = [call(
+                    &id,
+                    "read",
+                    json!({"file_path": format!("crates/area_{index}/src/lib.rs")}),
+                )];
+                assert!(
+                    tracker
+                        .record_turn(
+                            &calls,
+                            &[result(&id, &format!("new evidence {index}"), false)],
+                            mode,
+                            can_delegate,
+                        )
+                        .is_none(),
+                    "no policy-inconsistent advice: {mode:?}/{can_delegate}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn productive_multi_area_audit_remains_live_after_advisory_checkpoint() {
+        let mut tracker = DelegationNudgeTracker::new();
+        let mut guard = LoopGuard::new();
+        let mut nudges = 0;
+        for index in 0..20 {
+            let id = format!("audit-{index}");
+            let calls = [call(
+                &id,
+                "read",
+                json!({"file_path": format!("crates/area_{index}/src/lib.rs")}),
+            )];
+            let results = [result(&id, &format!("distinct finding {index}"), false)];
+            let outcome = guard.evaluate(&calls, &results);
+            assert!(outcome.progress.is_none());
+            assert!(outcome.repeated_failure.is_none());
+            assert!(outcome.repeated_read_only.is_none());
+            nudges += usize::from(
+                tracker
+                    .record_turn(&calls, &results, DelegationMode::Balanced, true)
+                    .is_some(),
+            );
+        }
+        assert_eq!(nudges, 1);
+
+        // Explicit steering opens a fresh sequence; the advice itself never
+        // consumes the user's permission or becomes a terminal loop decision.
+        tracker.reset_for_steering();
+        assert!(!tracker.nudged);
+        assert!(tracker.observed_areas.is_empty());
     }
 
     #[test]
@@ -1397,6 +1534,169 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn overlapping_observations_advise_reuse_without_discarding_new_progress() {
+        let mut ledger = ProgressLedger::new();
+        let a = call("a", "read", json!({"file_path":"a"}));
+        let b = call("b", "read", json!({"file_path":"b"}));
+        ledger.record_turn(
+            &[a.clone(), b.clone()],
+            &[result("a", "one", false), result("b", "two", false)],
+        );
+        for index in 0..8 {
+            let fresh = call("new", "read", json!({"file_path":format!("new-{index}")}));
+            let feedback = ledger
+                .record_turn(
+                    &[a.clone(), b.clone(), fresh],
+                    &[
+                        result("a", "one", false),
+                        result("b", "two", false),
+                        result("new", &format!("new evidence {index}"), false),
+                    ],
+                )
+                .unwrap();
+            assert_eq!(feedback.guard, "evidence_reuse");
+            assert_eq!(feedback.no_progress_turns, 0);
+            assert!(!feedback.triggered);
+            assert!(feedback.diagnostic().is_none());
+        }
+        // New facts are retained; seeing the last one again is a duplicate.
+        assert_eq!(
+            ledger
+                .record_turn(
+                    &[call("new", "read", json!({"file_path":"new-7"}))],
+                    &[result("new", "new evidence 7", false)]
+                )
+                .unwrap()
+                .no_progress_turns,
+            1
+        );
+    }
+
+    #[test]
+    fn equivalent_shell_rechecks_cannot_hide_repeated_file_evidence() {
+        let mut ledger = ProgressLedger::new();
+        for index in 0..=NO_PROGRESS_TURN_THRESHOLD {
+            let calls = [
+                call("read", "read", json!({"file_path":"complete.txt"})),
+                call(
+                    "inspect",
+                    "bash",
+                    json!({"command":format!("python3 inspect_{index}.py")}),
+                ),
+            ];
+            let results = [
+                result("read", "DONE", false),
+                result("inspect", "complete.txt: b'DONE\\n'", false),
+            ];
+            let telemetry = ledger.record_turn(&calls, &results);
+            if index == 0 {
+                assert!(telemetry.is_none());
+            } else {
+                let telemetry = telemetry.expect("same evidence is not new work");
+                assert_eq!(telemetry.no_progress_turns, index);
+                assert_eq!(telemetry.triggered, index == NO_PROGRESS_TURN_THRESHOLD);
+                if index == 1 {
+                    assert!(telemetry
+                        .replan_instruction()
+                        .unwrap()
+                        .contains("specific unresolved question"));
+                }
+            }
+        }
+        // A changed read is new evidence even when the shell output is unchanged.
+        assert!(ledger
+            .record_turn(
+                &[call("read", "read", json!({"file_path":"complete.txt"}))],
+                &[result("read", "external change", false)],
+            )
+            .is_none());
+        // Verified edits and explicit steering each rearm the original check.
+        for steering in [false, true] {
+            if steering {
+                ledger.reset_for_steering();
+            } else {
+                ledger.record_turn(
+                    &[call("write", "write", json!({"file_path":"complete.txt"}))],
+                    &[result_with_changed("write", true)],
+                );
+            }
+            assert!(ledger
+                .record_turn(
+                    &[
+                        call("read", "read", json!({"file_path":"complete.txt"})),
+                        call("inspect", "bash", json!({"command":"python3 inspect_0.py"}))
+                    ],
+                    &[
+                        result("read", "DONE", false),
+                        result("inspect", "complete.txt: b'DONE\\n'", false)
+                    ],
+                )
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn progress_feedback_expires_and_never_replaces_user_requirements() {
+        let mut ledger = ProgressLedger::new();
+        let calls = [call("read", "read", json!({"file_path":"app.py"}))];
+        let results = [result("read", "same code", false)];
+        ledger.record_turn(&calls, &results);
+        let warning = ledger.record_turn(&calls, &results).unwrap();
+        let mut messages = vec![ModelMessage {
+            role: Role::User,
+            content: vec![Content::text(
+                "Run the acceptance tests before claiming success.".into(),
+            )],
+        }];
+        refresh_progress_feedback(&mut messages, Some(&warning));
+        refresh_progress_feedback(&mut messages, Some(&warning));
+        assert_eq!(messages.len(), 2, "feedback must not accumulate");
+        assert!(messages[1].content.iter().any(
+            |c| matches!(c, Content::Text{text,..} if text.contains("does not establish success"))
+        ));
+        refresh_progress_feedback(&mut messages, None);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, Role::User);
+    }
+
+    #[test]
+    fn fresh_observation_does_not_recredit_an_opaque_command() {
+        let mut ledger = ProgressLedger::new();
+        let inspect = call("inspect", "bash", json!({"command": "python3 inspect.py"}));
+        let output = result("inspect", "same bytes", false);
+        assert!(ledger
+            .record_turn(
+                std::slice::from_ref(&inspect),
+                std::slice::from_ref(&output)
+            )
+            .is_none());
+        assert!(ledger
+            .record_turn(
+                &[call("read", "read", json!({"file_path": "checkpoint.txt"}))],
+                &[result("read", "READY", false)]
+            )
+            .is_none());
+        for turn in 1..=NO_PROGRESS_TURN_THRESHOLD {
+            let telemetry = ledger
+                .record_turn(
+                    std::slice::from_ref(&inspect),
+                    std::slice::from_ref(&output),
+                )
+                .expect("read evidence must not make a known command new again");
+            assert_eq!(telemetry.no_progress_turns, turn);
+            assert_eq!(telemetry.triggered, turn == NO_PROGRESS_TURN_THRESHOLD);
+        }
+        // Re-running after a verified change is a new state and stays allowed.
+        assert!(ledger
+            .record_turn(
+                &[call("edit", "edit", json!({"file_path": "checkpoint.txt"}))],
+                &[result_with_changed("edit", true)]
+            )
+            .is_none());
+        assert!(ledger.record_turn(&[inspect], &[output]).is_none());
     }
 
     #[test]

@@ -62,6 +62,119 @@ describe("KrustyClient request errors", () => {
 	});
 });
 
+describe("MitsuroClient Browser control leases", () => {
+	it("carries the opaque lease on every controller mutation", async () => {
+		const requests: Array<{ path: string; body: unknown }> = [];
+		const client = new KrustyClient({
+			baseUrl: "https://mitsuro.test",
+			fetchImpl: async (input, init) => {
+				const path = new URL(String(input)).pathname;
+				requests.push({
+					path,
+					body: init?.body ? JSON.parse(String(init.body)) : null,
+				});
+				if (path.endsWith("/control")) {
+					return Response.json({
+						lease: {
+							resource_id: "browser-1",
+							client_id: "mobile-a",
+							lease_token: "opaque-lease",
+							expires_at: "2026-08-30T12:01:00Z",
+						},
+					});
+				}
+				if (path.endsWith("/actions")) {
+					return Response.json({ ok: true, results: [] });
+				}
+				return Response.json({ id: "browser-1" });
+			},
+		});
+
+		const lease = (await client.takeBrowserControl("browser-1", "mobile-a"))
+			.lease;
+		await client.heartbeatBrowserSession(
+			"browser-1",
+			"controller",
+			"mobile-a",
+			lease,
+		);
+		await client.runBrowserActions("browser-1", lease, [{ type: "reload" }]);
+		await client.stopBrowserSession("browser-1", lease);
+
+		expect(requests).toEqual([
+			{
+				path: "/api/browser/browser-1/control",
+				body: { client_id: "mobile-a" },
+			},
+			{
+				path: "/api/browser/browser-1/heartbeat",
+				body: {
+					capability: "controller",
+					client_id: "mobile-a",
+					lease_token: "opaque-lease",
+				},
+			},
+			{
+				path: "/api/browser/browser-1/actions",
+				body: {
+					lease_token: "opaque-lease",
+					actions: [{ type: "reload" }],
+				},
+			},
+			{
+				path: "/api/browser/browser-1/stop",
+				body: { lease_token: "opaque-lease" },
+			},
+		]);
+	});
+
+	it("keeps account authorization out of Browser stream query strings", () => {
+		const client = new KrustyClient({
+			baseUrl: "https://mitsuro.test",
+			token: "private-account-bearer",
+		});
+		const lease = {
+			resource_id: "browser-1",
+			client_id: "mobile-a",
+			lease_token: "opaque-lease",
+			expires_at: "2026-08-30T12:01:00Z",
+		};
+		const controller = client.browserStreamUrl(
+			"/api/browser/browser-1/stream",
+			"controller",
+			"mobile-a",
+			lease,
+		);
+		expect(controller).toBe(
+			"wss://mitsuro.test/api/browser/browser-1/stream?capability=controller&client_id=mobile-a&lease_token=opaque-lease",
+		);
+		expect(controller).not.toContain("private-account-bearer");
+		expect(
+			client.browserStreamUrl(
+				"/api/browser/browser-1/stream",
+				"viewer",
+				"mobile-b",
+			),
+		).toBe(
+			"wss://mitsuro.test/api/browser/browser-1/stream?capability=viewer&client_id=mobile-b",
+		);
+		expect(() =>
+			client.browserStreamUrl(
+				"https://attacker.invalid/api/browser/browser-1/stream",
+				"viewer",
+				"mobile-b",
+			),
+		).toThrow("Invalid Mitsuro Browser stream path");
+		expect(() =>
+			client.browserStreamUrl(
+				"/api/browser/browser-1/stream",
+				"controller",
+				"mobile-a",
+			),
+		).toThrow("Browser control lease is required");
+	});
+});
+
 describe("KrustyClient content-free request diagnostics", () => {
 	it("requests delegated history only for full session hydration", async () => {
 		const urls: string[] = [];

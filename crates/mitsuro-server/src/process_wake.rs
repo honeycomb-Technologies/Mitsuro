@@ -113,7 +113,7 @@ fn completion_steer_content(event: &ProcessCompletionEvent) -> Vec<Content> {
         "\nContinue from this result. Do not re-poll process status for this process_id unless you need more output.\n",
     );
 
-    vec![Content::Text { text: body }]
+    vec![Content::text(body)]
 }
 
 #[cfg(test)]
@@ -137,7 +137,7 @@ mod tests {
         };
         let content = completion_steer_content(&event);
         let text = match &content[0] {
-            Content::Text { text } => text.as_str(),
+            Content::Text { text, .. } => text.as_str(),
             _ => panic!("expected text"),
         };
         assert!(text.contains("process_id: p1"));

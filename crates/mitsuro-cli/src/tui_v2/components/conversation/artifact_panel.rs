@@ -396,7 +396,6 @@ fn role_color(
         SyntaxRole::Comment => theme.foreground_muted,
         SyntaxRole::Type => theme.link,
         SyntaxRole::Variable => theme.foreground,
-        SyntaxRole::Operator => theme.accent,
         SyntaxRole::Punctuation => theme.foreground_muted,
     }
 }

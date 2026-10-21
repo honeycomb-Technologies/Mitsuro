@@ -1,13 +1,6 @@
 //! Mitsuro TUI v2.
 //!
-//! This module is intentionally isolated from the legacy TUI presentation
-//! state. Shared runtime services will be introduced through typed adapters as
-//! vertical slices reach parity.
-
-#![allow(
-    dead_code,
-    reason = "phase-gated v2 contracts intentionally precede their route and service consumers"
-)]
+//! Terminal presentation and typed adapters to the shared agent runtime.
 
 mod app;
 mod components;
@@ -33,7 +26,7 @@ pub enum TuiOutcome {
     ApplyUpdate { version: String },
 }
 
-/// Run the opt-in TUI v2 developer preview.
+/// Run the terminal interface.
 pub async fn run() -> Result<TuiOutcome> {
     app::run().await
 }

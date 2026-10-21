@@ -54,28 +54,6 @@ impl<'a, 'b> RequestBuilder<'a, 'b> {
         self.format_handler
             .build_request_body(model, converted_messages, &request_options)
     }
-
-    /// Build request body with pre-converted messages
-    ///
-    /// Used when messages need special handling before conversion.
-    pub fn build_request_body_with_messages(
-        &self,
-        model: &str,
-        messages: Vec<Value>,
-        options: &BuildOptions,
-    ) -> Value {
-        let request_options = RequestOptions {
-            max_tokens: options.max_tokens,
-            system_prompt: options.system_prompt.as_deref(),
-            tools: options.tools.as_deref(),
-            temperature: options.temperature,
-            streaming: options.streaming,
-            call_options: options.call_options,
-        };
-
-        self.format_handler
-            .build_request_body(model, messages, &request_options)
-    }
 }
 
 /// Options for building requests

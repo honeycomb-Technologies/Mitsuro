@@ -329,7 +329,7 @@ async fn run_compaction_pipeline_inner(
     }
     if let Some(boundary) = compacted_conversation.first_mut() {
         if let Some(text) = boundary.content.first_mut().and_then(|content| {
-            if let crate::ai::types::Content::Text { text } = content {
+            if let crate::ai::types::Content::Text { text, .. } = content {
                 Some(text)
             } else {
                 None
@@ -635,7 +635,7 @@ fn compaction_flush_content(messages: &[ModelMessage]) -> String {
 
 fn first_text(content: &[Content]) -> Option<&str> {
     content.iter().find_map(|content| match content {
-        Content::Text { text } => Some(text.as_str()),
+        Content::Text { text, .. } => Some(text.as_str()),
         _ => None,
     })
 }
@@ -863,7 +863,7 @@ fn kept_tail_contains_objective(messages: &[IndexedMessage], objective: &str) ->
     messages.iter().any(|indexed| {
         indexed.message.role == Role::User
             && indexed.message.content.iter().any(|content| {
-                matches!(content, Content::Text { text } if normalize_text(text) == normalized_objective)
+                matches!(content, Content::Text { text, .. } if normalize_text(text) == normalized_objective)
             })
     })
 }
@@ -953,9 +953,7 @@ mod snapshot_tests {
         for index in 0..7 {
             conversation.push(ModelMessage {
                 role: Role::Assistant,
-                content: vec![Content::Text {
-                    text: format!("assistant {index}"),
-                }],
+                content: vec![Content::text(format!("assistant {index}"))],
             });
         }
         save_conversation(&db_path, &session_id, &conversation);
@@ -990,15 +988,11 @@ mod snapshot_tests {
         let conversation = vec![
             ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: "before".to_string(),
-                }],
+                content: vec![Content::text("before".to_string())],
             },
             ModelMessage {
                 role: Role::Assistant,
-                content: vec![Content::Text {
-                    text: "reply".to_string(),
-                }],
+                content: vec![Content::text("reply".to_string())],
             },
         ];
         save_conversation(&db_path, &session_id, &conversation);

@@ -1,127 +1,138 @@
-# What Is Mitsuro?
+# Mitsuro architecture and module inventory
 
-Mitsuro is an AI coding assistant that lives where you work. It runs as a single binary on your machine and gives you access to large language models — like Claude, GPT, and others — through whatever interface fits your workflow: a terminal, a web browser, a mobile app, or directly inside your code editor.
+Mitsuro combines a shared Rust agent runtime with terminal, editor, desktop,
+and Expo clients. The HTTP server and the independently supervised Hive daemon
+own different runtime responsibilities. A Rust module or shared package is not
+necessarily a separate application or process.
 
-What makes Mitsuro different from a chatbot is that it can actually do things. It can read your files, edit your code, run shell commands, search your codebase, and manage background processes. It plans complex tasks, breaks them into phases, and executes them with your oversight. It's not just answering questions — it's an agent that takes action.
+## Applications and entry points
 
-## The Problem It Solves
+| Surface | Entry point | Responsibility |
+| --- | --- | --- |
+| CLI and terminal UI | [`crates/mitsuro-cli/src/main.rs`](../../crates/mitsuro-cli/src/main.rs) | `mitsuro` opens the TUI; subcommands start the server, ACP, Hive control, updates, and identity migration |
+| Server and web client | [`crates/mitsuro-server/src/lib.rs`](../../crates/mitsuro-server/src/lib.rs) | `mitsuro serve` starts the API; release builds embed the Expo web export from `apps/mobile/dist` |
+| Hive service | [`crates/mitsuro-hive/src/main.rs`](../../crates/mitsuro-hive/src/main.rs) | `mitsuro-hive` runs the Unix IPC service and durable background scheduler |
+| Native Canvas desktop | [`apps/desktop/canvas/src/main.rs`](../../apps/desktop/canvas/src/main.rs) | `mitsuro-canvas` presents Agent, browser, terminal, and spatial workspace resources |
+| Expo mobile/web | [`apps/mobile/app`](../../apps/mobile/app) | React Native client, web export, connection setup, chat, sessions, settings, and Hive surfaces |
+| Editor integration | [`crates/mitsuro-core/src/acp`](../../crates/mitsuro-core/src/acp) | `mitsuro acp` exposes the agent over the editor protocol; it is a mode of the CLI |
+| Product website | [`apps/website`](../../apps/website) | Separate static SvelteKit website and plugin catalog; it is not the server's web client |
 
-Modern AI coding tools tend to lock you into one interface and one AI provider. You use one tool in your terminal, another in your browser, and yet another in your editor — and they don't share context, sessions, or configuration. Switching between them means losing your conversation, re-explaining your project, and managing multiple API keys.
+The Expo project has iOS and Android configuration. Widgets, Live Activities,
+MetricKit diagnostics, and Liquid Glass native integration are Apple-specific.
+The repository's native mobile release workflow targets iOS/TestFlight; web
+export or TypeScript checks do not establish Android native build acceptance.
 
-Mitsuro solves this by being a unified platform. One binary, one configuration, one set of sessions — accessible from anywhere. Start a conversation in the terminal, continue it from your phone, or hand it off to an autonomous agent that works while you sleep.
+## Rust workspace
 
-## The Four Interfaces
+The [workspace manifest](../../Cargo.toml) includes `crates/*` and
+`apps/desktop/canvas`: eight packages, seven Mitsuro packages and `grok-auth`.
+The `crates/mitsuro-cli` directory contains the package named `mitsuro`.
 
-Mitsuro exposes the same core engine through four different surfaces. They all share the same agent orchestrator, tool system, storage, and configuration — the only difference is how you interact with them.
+| Package | Source | Role |
+| --- | --- | --- |
+| `mitsuro` | [`crates/mitsuro-cli`](../../crates/mitsuro-cli) | CLI entry points and terminal presentation; depends on core and server |
+| `mitsuro-core` | [`crates/mitsuro-core`](../../crates/mitsuro-core) | Shared agent, provider, tool, persistence, and integration logic |
+| `mitsuro-server` | [`crates/mitsuro-server`](../../crates/mitsuro-server) | Axum server library linked into the CLI; also supplies the shared Hive execution host |
+| `mitsuro-hive` | [`crates/mitsuro-hive`](../../crates/mitsuro-hive) | Supervised daemon, scheduler, recovery, deliveries, heartbeat, and group execution |
+| `mitsuro-hive-protocol` | [`crates/mitsuro-hive-protocol`](../../crates/mitsuro-hive-protocol) | Versioned, authenticated Unix IPC contracts, framing, client, and event subscription |
+| `mitsuro-client` | [`crates/mitsuro-client`](../../crates/mitsuro-client) | Typed Rust HTTP/SSE/WebSocket transport used by Canvas |
+| `mitsuro-canvas` | [`apps/desktop/canvas`](../../apps/desktop/canvas) | Native desktop executable and local server supervision |
+| `grok-auth` | [`crates/grok-auth`](../../crates/grok-auth) | Reusable Grok login, token refresh, credential storage, and authenticated HTTP client |
 
-### 1. Terminal UI (TUI)
+The deprecated command aliases are compatibility entry points,
+not separate implementations. Expo uses the TypeScript `packages/state`; there
+is no active Rust client-state crate.
 
-The flagship interface. Run `mitsuro` in your terminal and you get a full-featured chat interface built with Ratatui. It has syntax-highlighted code blocks, streaming responses, markdown rendering, 29 color themes, and a slash command system for everything from switching models to managing plugins. You can attach files, open an embedded terminal, scroll through conversation history, and toggle between plan mode (where the AI designs before it acts) and build mode (where it executes).
+## Core modules
 
-This is the interface for engineers who live in the terminal. It's fast, keyboard-driven, and designed for deep coding sessions.
+These are all top-level modules declared by
+[`mitsuro-core/src/lib.rs`](../../crates/mitsuro-core/src/lib.rs).
 
-### 2. Web Server & API
+| Module | Responsibility |
+| --- | --- |
+| [`acp`](../../crates/mitsuro-core/src/acp) | Editor protocol server, sessions, event bridge, tool and workspace adapters |
+| [`agent`](../../crates/mitsuro-core/src/agent) | Canonical orchestrator, loop events, execution, approvals/hooks, cancellation, context, compaction, learning, delegated agents, and autonomous Worker execution |
+| [`ai`](../../crates/mitsuro-core/src/ai) | Provider clients/catalogs, model identity, request transforms, parsers, streaming, reasoning, retries, and usage |
+| [`auth`](../../crates/mitsuro-core/src/auth) | Provider login, OAuth/device flows, credential resolution and refresh |
+| [`constants`](../../crates/mitsuro-core/src/constants.rs) | Shared runtime constants |
+| [`extensions`](../../crates/mitsuro-core/src/extensions) | WASM extension host plus local agent-extension runtime and manifests |
+| [`git`](../../crates/mitsuro-core/src/git) | Shared Git commands, status, changes, and pull-request helpers |
+| [`hive`](../../crates/mitsuro-core/src/hive) | Scheduling primitives: recurrence, retry, misfire, state transitions, and time |
+| [`identity`](../../crates/mitsuro-core/src/identity.rs) | Canonical identifiers, bounded legacy readers, and offline state migration |
+| [`mcp`](../../crates/mitsuro-core/src/mcp) | MCP server connections, discovery, OAuth, stdio/HTTP transports, and tool adapters |
+| [`paths`](../../crates/mitsuro-core/src/paths.rs) | Shared configuration and data-path resolution |
+| [`plan`](../../crates/mitsuro-core/src/plan) | Session-linked plans, lifecycle, persistence coordination, and plan-file handling |
+| [`plugins`](../../crates/mitsuro-core/src/plugins) | Package catalogs, trust/signatures, installation, permissions, and lockfiles |
+| [`ports`](../../crates/mitsuro-core/src/ports) | Local TCP listener discovery for preview/resource surfaces |
+| [`process`](../../crates/mitsuro-core/src/process) | Background process registry, environments, completion events, and signals |
+| [`server_instance`](../../crates/mitsuro-core/src/server_instance.rs) | Canonical server PID/lock ownership, health identity, and reuse |
+| [`skills`](../../crates/mitsuro-core/src/skills) | Filesystem skill discovery, validation, loading, and package-root precedence |
+| [`storage`](../../crates/mitsuro-core/src/storage) | SQLite migrations and durable sessions/messages, recovery, credentials, plans, delegation, Hive, memory/reports, diagnostics, push, and canvases |
+| [`tailscale`](../../crates/mitsuro-core/src/tailscale.rs) | Tailnet device discovery and HTTPS serve integration |
+| [`tools`](../../crates/mitsuro-core/src/tools) | Tool registry, context/governance, file and shell tools, search, browser/web, plans/workflows, skills, memory, reports, and delegation |
+| [`updater`](../../crates/mitsuro-core/src/updater) | Update channels, release discovery, staged updates, and managed installation |
+| [`workflow`](../../crates/mitsuro-core/src/workflow) | Durable Goals, plan revisions, dependencies, bounded attempts, acceptance, and Worker workflow lifecycle |
 
-Run `mitsuro serve` and the binary launches an HTTP server with an embedded web frontend. The same React-based UI that powers the mobile app gets served directly from the binary — no separate frontend deployment needed. The API exposes REST endpoints and SSE streaming for chat, plus WebSocket support for terminal emulation.
+Within `agent`, `orchestrator` and `loop_kernel` coordinate provider and tool
+turns; `executor` executes calls; `subagent` owns delegated isolation and
+scheduling; `autonomy` owns classification/tick machinery; `worker_conversation`,
+`worker_goal`, and `worker_introduction` implement the corresponding Hive work.
+`plan` and `workflow` are distinct active boundaries, not interchangeable stores.
 
-This is the interface for when you want a graphical UI, or when you need to access Mitsuro from another device on your network. If Tailscale is installed, it automatically configures remote HTTPS access so you can reach your Mitsuro instance from anywhere.
+## Server and interface internals
 
-### 3. Editor Integration (ACP)
+The [server router](../../crates/mitsuro-server/src/routes/mod.rs) exposes sessions,
+chat, models, tools, files/Git, projects, canvases/resources, browser, terminals,
+processes, ports, Hive, memories/reports, credentials/OAuth, extensions/plugins,
+MCP, skills, hooks, push/APNs, diagnostics, preview settings, and server control.
+Server modules also own authentication, remote pairing/access, SSE delivery,
+control leases, presence, notifications, and Hive execution/IPC integration.
+The Hive daemon reuses the execution host without starting an HTTP listener.
 
-Run `mitsuro acp` and it becomes an Agent Client Protocol server that communicates over JSON-RPC via stdin/stdout. This lets code editors — Zed, Neovim, JetBrains, and others — spawn Mitsuro as a subprocess and interact with it through a standardized protocol. The editor sends prompts and receives structured responses, including tool calls that the editor can render natively.
+The terminal's [`tui_v2`](../../crates/mitsuro-cli/src/tui_v2) contains app state,
+reducer/effects, conversation projection, input/slash commands, layout, rendering,
+themes/motion, and runtime services. [`tui_support`](../../crates/mitsuro-cli/src/tui_support)
+provides service construction, auth, Markdown, and terminal graphics helpers.
+Canvas has its own app/agent presentation, spatial model, resource journal,
+server supervisor, browser/terminal surfaces, preferences, and themes.
 
-This is the interface for when you want AI assistance without leaving your editor.
+## Frontend and native packages
 
-### 4. Hive (Autonomous Agent)
+| Path | Responsibility |
+| --- | --- |
+| [`packages/api`](../../packages/api) | TypeScript client, wire contracts, stream parsing, citations, and compatibility adapters |
+| [`packages/state`](../../packages/state) | Zustand session/workspace/Git/plan state, streaming, persistence/recovery, performance, and diagnostic recording |
+| [`packages/ui`](../../packages/ui) | Shared design tokens and theme definitions |
+| [`apps/mobile/components`](../../apps/mobile/components) | Chat, Hive, settings, toolbox, layout, and reusable presentation |
+| [`apps/mobile/hooks`](../../apps/mobile/hooks) | Connection, stores, navigation/deep links, notifications, widget and Live Activity lifecycles |
+| [`apps/mobile/platform`](../../apps/mobile/platform) | Native/web adapters, storage identity, recovery boundaries, and browser stream auth |
+| [`apps/mobile/diagnostics`](../../apps/mobile/diagnostics) | Client diagnostics collection/upload and native bridge coordination |
+| [`apps/mobile/modules/mitsuro-diagnostics`](../../apps/mobile/modules/mitsuro-diagnostics) | Optional Apple MetricKit and performance bridge, including legacy native-name compatibility |
+| [`apps/mobile/modules/mitsuro-liquid-glass`](../../apps/mobile/modules/mitsuro-liquid-glass) | Optional Apple glass view with non-Apple fallbacks |
+| [`apps/mobile/widgets`](../../apps/mobile/widgets) | Chat/Hive widgets, legacy widget-kind compatibility, and chat Live Activity |
+| [`apps/mobile/plugins`](../../apps/mobile/plugins) | Expo configuration hook for the Ghostty keyboard accessory |
 
-Hive is Mitsuro's autonomous mode. You submit a task — "refactor the authentication module" or "write integration tests for the API" — and Hive works on it in the background. It has a tick-based execution engine that wakes up, does work, sleeps, and repeats. You can attach to its event stream, pause it, resume it, or cancel it from the CLI.
+`apps/mobile/components/desktop` contains the web terminal used by Expo. Its
+name does not make it a retired desktop application.
 
-Hive operates through the same tool system as interactive sessions, but with an auto-classifier that evaluates each tool call for safety and appropriateness without requiring human approval for every step.
+## Integrations, delivery, and support
 
-This is the interface for tasks that are well-defined enough to delegate but would take too long to babysit.
+- [`wit`](../../wit) defines the WASM extension interface; [`examples/plugins`](../../examples/plugins)
+  contains sample JavaScript/TypeScript and native Rust plugin packages.
+- [`docs/extensions/catalog.json`](../extensions/catalog.json) feeds the static
+  website catalog. Provider, ACP, MCP, extension, and skill adapters remain core
+  integrations rather than standalone applications.
+- [`deploy/systemd`](../../deploy/systemd) supplies server and Hive service/socket
+  units; [`install.sh`](../../install.sh), [`aur`](../../aur), and
+  [Homebrew templates](../../.github/homebrew) handle distribution.
+- [CI/release workflows](../../.github/workflows), [Sampo configuration](../../.sampo/config.toml),
+  [scripts](../../scripts), and [Canvas packaging](../../apps/desktop/canvas/packaging)
+  manage checks, versioning, release artifacts, runtime smoke/evaluation, and operations.
+- [`assets`](../../assets) and [`icons`](../../icons) hold shared visual resources;
+  [`docs`](..) holds architecture, contracts, operating instructions, and compatibility records.
 
-## How the Pieces Fit Together
-
-At the heart of everything is the **agent orchestrator**. This is a loop that:
-
-1. Takes a conversation (user messages plus any prior assistant responses)
-2. Sends it to an AI provider (Anthropic, OpenAI, OpenRouter, or others)
-3. Streams the response back
-4. When the AI wants to use a tool (read a file, run a command, etc.), pauses the stream, executes the tool, and feeds the result back
-5. Repeats until the AI is done or the user interrupts
-
-The orchestrator doesn't know or care which interface is using it. It emits events (`LoopEvent`) and accepts inputs (`LoopInput`). The TUI maps those events to terminal rendering. The web server maps them to SSE messages. The ACP server maps them to JSON-RPC notifications. Hive maps them to its tick engine. Same brain, different faces.
-
-Surrounding the orchestrator are the supporting systems:
-
-- **AI Provider Layer** — Abstracts away the differences between LLM APIs. Anthropic uses one message format, OpenAI uses another, Google uses a third. The provider layer normalizes them so the orchestrator only sees one interface.
-
-- **Tool Registry** — Manages 50+ built-in tools (file I/O, shell execution, code search, sub-agent spawning) plus any tools discovered via MCP servers. Each tool has permission policies, pre/post hooks, and truncation rules.
-
-- **Storage** — SQLite database that persists everything: conversation sessions, user preferences, API credentials, plan state, push notification subscriptions, and runtime traces for Hive.
-
-- **Extension System** — A WebAssembly runtime (using Wasmtime) that can load Zed-compatible extensions for language server support and other capabilities.
-
-- **MCP Client** — Connects to Model Context Protocol servers to discover additional tools and resources at runtime.
-
-## The Codebase Structure
-
-The project is organized as a Rust workspace with three crates, plus TypeScript packages for the frontend:
-
-```
-crates/
-  mitsuro-core/     The shared library. Everything the orchestrator needs: AI clients,
-                   tool registry, storage, ACP server, MCP client, extensions, auth,
-                   planning, skills, plugins. This is where the brain lives.
-
-  mitsuro-cli/      The binary. Entry point (main.rs), TUI implementation, serve mode
-                   setup. This is the executable you install and run.
-
-  mitsuro-server/   The HTTP API. Axum-based web server with REST routes, WebSocket
-                   terminal, push notifications, and Hive runtime management. Gets
-                   compiled into the CLI binary.
-
-apps/
-  mobile/          Expo/React Native app. Serves as both the mobile app (iOS/Android)
-                   and the web frontend that gets embedded into the server binary.
-
-  desktop/gpui/    Native GPUI desktop. Renders product state from the normalized
-                   Mitsuro HTTP/SSE or Codex app-server backend.
-
-  desktop/shell/   Legacy Tauri/Expo host retained during desktop migration; it is
-                   not the canonical tagged Linux desktop artifact.
-
-packages/
-  api/             TypeScript API client shared between mobile and desktop.
-  state/           State management (Zustand) shared between mobile and desktop.
-  ui/              Design tokens and theme definitions shared between mobile and desktop.
-```
-
-The key insight is that `mitsuro-core` is the shared brain, and everything else is a presentation layer. The CLI, the server, the ACP server, and Hive all import `mitsuro-core` and use the same orchestrator, the same tools, and the same storage.
-
-## Multi-Provider AI
-
-Mitsuro doesn't tie you to one AI provider. It supports:
-
-- **Anthropic** — Live Claude catalog via direct API or OAuth, with curated Opus/Fable/Sonnet/Haiku fallbacks
-- **OpenAI** — GPT and Codex catalogs via API key or account-scoped ChatGPT OAuth
-- **OpenRouter** — Live tool-capable catalog spanning multiple upstream providers
-- **MiniMax** — Live catalog with curated MiniMax M3 and M2.7 capability overlays
-- **Z.ai** — Static GLM 5.2, GLM 5 Turbo, and GLM 4.7 catalog
-- **Grok** — Live Grok Build catalog through the X subscription CLI proxy
-
-You can switch providers and models mid-conversation. The provider layer handles the format differences (Anthropic's message format vs OpenAI's vs Google's) so the rest of the system doesn't have to care.
-
-## What Makes It Interesting
-
-A few architectural choices worth noting:
-
-**Single binary distribution.** The entire system — Rust backend, web frontend, SQLite database — ships as one executable. No Docker, no microservices, no separate database server. You install it and it works. The web frontend is literally embedded in the binary at compile time.
-
-**Local-first.** Everything runs on your machine and your data stays on your machine. Sessions are stored in SQLite at `~/.mitsuro/`. API keys are encrypted locally. There's no cloud service in the middle (unless you choose to use OpenRouter or similar).
-
-**Presentation-agnostic core.** The orchestrator loop is completely decoupled from how you interact with it. This means adding a new interface (say, a Slack bot or a VS Code extension) requires writing only the thin presentation layer — the entire agent capability comes for free.
-
-**Real tool execution.** Unlike chatbots that can only generate text, Mitsuro actually executes tools in your environment. It reads and writes files, runs shell commands, searches codebases, and manages processes. The safety model is permission-based: in supervised mode, write operations require your approval; in autonomous mode, the AI operates freely.
-
-**WASM extensions.** The extension system uses WebAssembly with the same interface definitions as Zed editor extensions. This means the growing ecosystem of Zed extensions — language servers, formatters, linters — can potentially run inside Mitsuro without modification.
+The old terminal v1, GPUI desktop, Tauri shell, Expo desktop application,
+desktop-backend crate, GPUI mobile/iOS experiment, and its Rust client-state
+crate are retired. Git history preserves them; they are not current product
+modules. Installed-data readers, identity aliases, and widget compatibility
+remain intentional boundaries with separate retirement requirements.

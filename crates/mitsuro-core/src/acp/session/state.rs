@@ -390,11 +390,6 @@ impl SessionState {
         self.messages.read().await.clone()
     }
 
-    /// Clear messages (for session reset).
-    pub async fn clear_messages(&self) {
-        self.messages.write().await.clear();
-    }
-
     /// Get conversation history (alias for get_messages).
     pub async fn history(&self) -> Vec<ModelMessage> {
         self.get_messages().await
@@ -408,9 +403,10 @@ impl SessionState {
             .take()
             .map(|recovery_state| ModelMessage {
                 role: Role::System,
-                content: vec![crate::ai::types::Content::Text {
-                    text: format!("[RECOVERY NOTICE] {}", recovery_state.notice()),
-                }],
+                content: vec![crate::ai::types::Content::text(format!(
+                    "[RECOVERY NOTICE] {}",
+                    recovery_state.notice()
+                ))],
             })
     }
 
@@ -419,7 +415,7 @@ impl SessionState {
         use crate::ai::types::Content;
         self.add_message(ModelMessage {
             role: Role::User,
-            content: vec![Content::Text { text }],
+            content: vec![Content::text(text)],
         })
         .await;
     }
@@ -438,41 +434,7 @@ impl SessionState {
         use crate::ai::types::Content;
         self.add_message(ModelMessage {
             role: Role::Assistant,
-            content: vec![Content::Text { text }],
-        })
-        .await;
-    }
-
-    /// Add a tool call to the conversation history.
-    pub async fn add_tool_call(&self, id: String, name: String, input: serde_json::Value) {
-        use crate::ai::types::Content;
-        self.add_message(ModelMessage {
-            role: Role::Assistant,
-            content: vec![Content::ToolUse { id, name, input }],
-        })
-        .await;
-    }
-
-    /// Add a tool result to the conversation history.
-    pub async fn add_tool_result(&self, tool_use_id: &str, output: String, is_error: bool) {
-        use crate::ai::types::Content;
-        self.add_message(ModelMessage {
-            role: Role::Tool,
-            content: vec![Content::ToolResult {
-                tool_use_id: tool_use_id.to_string(),
-                output: serde_json::Value::String(output),
-                is_error: if is_error { Some(true) } else { None },
-            }],
-        })
-        .await;
-    }
-
-    /// Add system context to the conversation.
-    pub async fn add_system_context(&self, context: String) {
-        use crate::ai::types::Content;
-        self.add_message(ModelMessage {
-            role: Role::System,
-            content: vec![Content::Text { text: context }],
+            content: vec![Content::text(text)],
         })
         .await;
     }

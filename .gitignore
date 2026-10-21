@@ -7,6 +7,10 @@
 target/
 .fastembed_cache/
 /.tmp/
+/.canvas-target/
+/.canvas-target-smoke/
+/.canvas-target-smoke-*/
+/.canvas-smoke/
 **/target/
 **/dist/
 **/.mitsuro-shadow/

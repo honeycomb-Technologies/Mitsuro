@@ -37,8 +37,8 @@ fn canonical_tool_messages(messages: &[ModelMessage]) -> Vec<Value> {
                 .content
                 .iter()
                 .filter_map(|block| match block {
-                    Content::Text { text } if !text.is_empty() => {
-                        Some(json!({"type": "text", "text": text}))
+                    Content::Text { text, citations } if !text.is_empty() || !citations.is_empty() => {
+                        Some(json!({"type": "text", "text": crate::ai::format::provider_text(text, citations)}))
                     }
                     Content::ToolUse { id, name, input } => Some(json!({
                         "type": "tool_use",
@@ -250,6 +250,27 @@ mod tests {
     use std::time::Duration;
     use tiny_http::{Header, Response, Server};
 
+    #[test]
+    fn portable_tool_history_preserves_citations_as_plain_reference_text() {
+        let citations = vec![crate::ai::types::Citation {
+            url: "https://example.com/docs".into(),
+            title: "Docs".into(),
+            cited_text: "Answer".into(),
+        }];
+        let expected = crate::ai::format::provider_text("Answer", &citations).into_owned();
+        let messages = vec![ModelMessage {
+            role: Role::Assistant,
+            content: vec![Content::Text {
+                text: "Answer".into(),
+                citations,
+            }],
+        }];
+        assert_eq!(
+            canonical_tool_messages(&messages),
+            vec![json!({"role":"assistant","content":[{"type":"text","text":expected}]})]
+        );
+    }
+
     fn openai_test_client(url: String) -> AiClient {
         AiClient::new(
             AiClientConfig {
@@ -268,9 +289,7 @@ mod tests {
     fn user_message() -> ModelMessage {
         ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "reply with ok".to_string(),
-            }],
+            content: vec![Content::text("reply with ok".to_string())],
         }
     }
 

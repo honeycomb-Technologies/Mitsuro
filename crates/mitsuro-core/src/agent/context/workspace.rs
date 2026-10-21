@@ -3,35 +3,17 @@ use tracing::warn;
 
 use git2::{Repository, Status, StatusOptions};
 
-use crate::storage::ProjectSettings;
-
-use super::project::build_project_context;
+use super::project::build_subagent_project_instructions;
 
 /// Build combined workspace + project context for a subagent system prompt.
 pub fn build_subagent_project_context(working_dir: &Path, project_dir: Option<&Path>) -> String {
     let workspace = build_workspace_context(working_dir, project_dir);
-    let project = project_dir.map(build_project_context).unwrap_or_default();
-    let project_settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
-
-    let mut ctx = String::new();
-    if !workspace.is_empty() {
-        ctx.push_str(&workspace);
-    }
-    if !project.is_empty() {
-        if !ctx.is_empty() {
-            ctx.push_str("\n\n");
-        }
-        ctx.push_str(&project);
-    }
-    if let Some(ref append) = project_settings.system_prompt_append {
-        if !append.is_empty() {
-            if !ctx.is_empty() {
-                ctx.push_str("\n\n");
-            }
-            ctx.push_str(&format!("[PROJECT SETTINGS]\n{}", append));
-        }
-    }
-    ctx
+    let project = build_subagent_project_instructions(working_dir, project_dir);
+    [workspace, project]
+        .into_iter()
+        .filter(|section| !section.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 pub(super) fn build_workspace_context(working_dir: &Path, project_dir: Option<&Path>) -> String {
@@ -77,8 +59,9 @@ pub(super) fn build_workspace_context(working_dir: &Path, project_dir: Option<&P
 }
 
 fn open_git_repository(working_dir: &Path) -> Option<Repository> {
-    match Repository::open(working_dir) {
+    match Repository::discover(working_dir) {
         Ok(repo) => Some(repo),
+        Err(error) if error.code() == git2::ErrorCode::NotFound => None,
         Err(error) => {
             warn!(
                 working_dir = %working_dir.display(),
@@ -193,21 +176,21 @@ pub(super) fn build_environment_context(working_dir: &Path, model_id: Option<&st
         format!("Working directory: {}", working_dir.display()),
     ];
 
-    let is_git_repo = working_dir.join(".git").exists();
+    let repository = open_git_repository(working_dir);
     lines.push(format!(
         "Git repository: {}",
-        if is_git_repo { "yes" } else { "no" }
+        if repository.is_some() { "yes" } else { "no" }
     ));
 
-    if is_git_repo {
-        if let Some(repo) = open_git_repository(working_dir) {
-            if let Some(branch) = current_git_branch(&repo) {
-                lines.push(format!("Git branch: {}", branch));
-            }
-
-            if let Some(summary) = summarize_git_statuses(&repo) {
-                lines.push(format!("Git status: {}", summary));
-            }
+    if let Some(repo) = repository {
+        if let Some(root) = repo.workdir() {
+            lines.push(format!("Git root: {}", root.display()));
+        }
+        if let Some(branch) = current_git_branch(&repo) {
+            lines.push(format!("Git branch: {}", branch));
+        }
+        if let Some(summary) = summarize_git_statuses(&repo) {
+            lines.push(format!("Git status: {}", summary));
         }
     }
 

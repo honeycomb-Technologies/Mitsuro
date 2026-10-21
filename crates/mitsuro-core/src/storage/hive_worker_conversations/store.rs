@@ -73,9 +73,7 @@ pub fn stage_worker_conversation_input_in_transaction(
 ) -> Result<StageWorkerConversationInputResult> {
     validate_input(input)?;
     let accepted_at = canonical_timestamp(input.accepted_at);
-    let content_json = serde_json::to_string(&vec![Content::Text {
-        text: input.body.clone(),
-    }])?;
+    let content_json = serde_json::to_string(&vec![Content::text(input.body.clone())])?;
     ensure!(
         content_json.len() <= MAX_INPUT_CONTENT_JSON_BYTES,
         "encoded Worker conversation input exceeds the byte limit"
@@ -235,7 +233,7 @@ fn map_input(row: &Row<'_>) -> rusqlite::Result<WorkerConversationInput> {
         rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error))
     })?;
     let body = match content.as_slice() {
-        [Content::Text { text }] if !text.trim().is_empty() => text.clone(),
+        [Content::Text { text, .. }] if !text.trim().is_empty() => text.clone(),
         _ => {
             return Err(rusqlite::Error::FromSqlConversionFailure(
                 6,

@@ -107,14 +107,16 @@ fn is_valid_cut_point(message: &ModelMessage) -> bool {
 pub(crate) fn is_compaction_boundary(message: &ModelMessage) -> bool {
     message.role == Role::User
         && message.content.iter().any(|content| {
-            matches!(content, Content::Text { text } if text.starts_with(super::COMPACTION_BOUNDARY_PREFIX))
+            matches!(content, Content::Text { text, .. } if text.starts_with(super::COMPACTION_BOUNDARY_PREFIX))
         })
 }
 
 pub(crate) fn is_compaction_summary(message: &ModelMessage) -> bool {
-    message.role == Role::User
+    // User-role summaries remain readable for checkpoints created before the
+    // generated context was correctly attributed to the assistant.
+    matches!(message.role, Role::User | Role::Assistant)
         && message.content.iter().any(|content| {
-            matches!(content, Content::Text { text } if text.starts_with(super::COMPACTION_SUMMARY_PREFIX))
+            matches!(content, Content::Text { text, .. } if text.starts_with(super::COMPACTION_SUMMARY_PREFIX))
         })
 }
 
@@ -164,9 +166,7 @@ mod tests {
             id,
             message: ModelMessage {
                 role,
-                content: vec![Content::Text {
-                    text: text.to_string(),
-                }],
+                content: vec![Content::text(text.to_string())],
             },
         }
     }

@@ -2,10 +2,12 @@
 
 mod approvals;
 mod cancellation;
+mod control;
 mod crud;
 mod pinch;
 mod presence;
 mod state;
+mod stream;
 mod workflow;
 
 use axum::{
@@ -22,12 +24,14 @@ use mitsuro_core::SessionManager;
 
 use self::approvals::tool_approval_for_session;
 use self::cancellation::cancel_session;
+use self::control::{get_session_control, heartbeat_session_control, take_session_control};
 use self::crud::{
     create_session, delete_session, get_session, list_directories, list_sessions, update_session,
 };
 use self::pinch::pinch_session;
 use self::presence::{get_session_presence, heartbeat_session_presence, remove_session_presence};
 use self::state::{get_session_state, get_session_trace};
+use self::stream::observe_agent_stream;
 use self::workflow::{execute_workflow_command, get_workflow};
 
 use super::session_access::{
@@ -49,10 +53,17 @@ pub fn router() -> Router<AppState> {
                 .delete(delete_session),
         )
         .route("/:id/state", get(get_session_state))
+        .route("/:id/stream", get(observe_agent_stream))
         .route("/:id/workflow", get(get_workflow))
         .route("/:id/workflow/commands", post(execute_workflow_command))
         .route("/:id/trace", get(get_session_trace))
         .route("/:id/cancel", post(cancel_session))
+        .route(
+            "/:id/control",
+            get(get_session_control)
+                .post(take_session_control)
+                .put(heartbeat_session_control),
+        )
         .route(
             "/:id/presence",
             get(get_session_presence).put(heartbeat_session_presence),

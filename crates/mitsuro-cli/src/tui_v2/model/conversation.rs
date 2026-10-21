@@ -80,8 +80,6 @@ pub enum TimelinePart {
     AgentText(AgentTextPart),
     Thinking(ThinkingPart),
     Tool(ToolPart),
-    Approval(ApprovalPart),
-    Question(QuestionPart),
     Notice(NoticePart),
     Attachment(AttachmentPart),
     Compaction(CompactionPart),
@@ -94,8 +92,6 @@ impl TimelinePart {
             Self::AgentText(part) => &part.id,
             Self::Thinking(part) => &part.id,
             Self::Tool(part) => &part.id,
-            Self::Approval(part) => &part.id,
-            Self::Question(part) => &part.id,
             Self::Notice(part) => &part.id,
             Self::Attachment(part) => &part.id,
             Self::Compaction(part) => &part.id,
@@ -158,26 +154,9 @@ pub struct ToolPart {
     pub server_side: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ApprovalPart {
-    pub id: PartId,
-    pub tool_call_id: String,
-    pub settled: bool,
-    pub approved: Option<bool>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct QuestionPart {
-    pub id: PartId,
-    pub tool_call_id: String,
-    pub title: String,
-    pub settled: bool,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NoticeLevel {
     Neutral,
-    Authority,
     Success,
     Warning,
 }

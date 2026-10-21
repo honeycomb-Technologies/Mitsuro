@@ -265,7 +265,7 @@ fn websocket_query_token(headers: &HeaderMap, uri: &Uri) -> Option<String> {
 ///
 /// Handles `%XX` escapes and `+` as space (common form encoding). Returns `None`
 /// on malformed sequences so we never accept a half-decoded token.
-fn percent_decode_query_component(input: &str) -> Option<String> {
+pub(crate) fn percent_decode_query_component(input: &str) -> Option<String> {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -486,6 +486,10 @@ mod tests {
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             session_inputs: Arc::new(RwLock::new(HashMap::new())),
             session_presence: Arc::new(RwLock::new(HashMap::new())),
+            session_control_leases: Arc::new(RwLock::new(
+                crate::control_leases::SessionControlLeaseRegistry::default(),
+            )),
+            agent_streams: Arc::new(RwLock::new(crate::agent_streams::AgentStreamHub::default())),
             delegated_state: Arc::new(RwLock::new(HashMap::new())),
             remote_access: Arc::new(RwLock::new(RemoteAccessConfig {
                 enabled: true,

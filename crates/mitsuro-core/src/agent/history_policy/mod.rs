@@ -9,8 +9,6 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
-use crate::ai::types::{Content, ModelMessage, Role};
-
 use self::summaries::{summarize_tool_result, summarized_result};
 
 const MAX_PREVIEW_CHARS: usize = 2_000;
@@ -48,48 +46,6 @@ pub(crate) fn tool_retention(name: &str) -> ToolRetention {
         }
         _ => ToolRetention::RetainFull,
     }
-}
-
-/// Build the model-facing transcript for the next provider call.
-///
-/// UI and the durable DB may keep mid-turn status prose ("I'll implement…",
-/// "Next I'll…") so the user can follow along. Feeding that prose back into
-/// the model causes imitation loops: every tool round restates the same plan.
-///
-/// Codex-class harnesses keep preambles tiny; Pi barely has them. We enforce
-/// the same separation structurally: assistant turns that also issued tools
-/// keep thinking + tool_use for the model, and drop user-visible text. Final
-/// answers (no tool_use) keep their full text.
-pub(crate) fn model_facing_messages(messages: &[ModelMessage]) -> Vec<ModelMessage> {
-    messages
-        .iter()
-        .map(|message| {
-            if message.role != Role::Assistant {
-                return message.clone();
-            }
-            let has_tool_use = message
-                .content
-                .iter()
-                .any(|block| matches!(block, Content::ToolUse { .. }));
-            if !has_tool_use {
-                return message.clone();
-            }
-
-            let filtered: Vec<Content> = message
-                .content
-                .iter()
-                .filter(|block| !matches!(block, Content::Text { .. }))
-                .cloned()
-                .collect();
-            if filtered.is_empty() {
-                return message.clone();
-            }
-            ModelMessage {
-                role: Role::Assistant,
-                content: filtered,
-            }
-        })
-        .collect()
 }
 
 pub(crate) fn build_history_tool_result(
@@ -770,67 +726,6 @@ mod tests {
             .and_then(|value| value.get("diff_preview"))
             .and_then(|value| value.as_str())
             .is_some_and(|value| value.contains("+++ src/lib.rs")));
-    }
-
-    #[test]
-    fn model_facing_history_drops_tool_turn_preambles() {
-        use crate::ai::types::{Content, ModelMessage, Role};
-        use serde_json::json;
-
-        let messages = vec![
-            ModelMessage {
-                role: Role::User,
-                content: vec![Content::Text {
-                    text: "ship it".into(),
-                }],
-            },
-            ModelMessage {
-                role: Role::Assistant,
-                content: vec![
-                    Content::Thinking {
-                        thinking: "plan steps".into(),
-                        signature: String::new(),
-                    },
-                    Content::Text {
-                        text: "I'll implement hybrid stream density next: short live bash tails..."
-                            .into(),
-                    },
-                    Content::ToolUse {
-                        id: "c1".into(),
-                        name: "read".into(),
-                        input: json!({"path": "a.rs"}),
-                    },
-                ],
-            },
-            ModelMessage {
-                role: Role::User,
-                content: vec![Content::ToolResult {
-                    tool_use_id: "c1".into(),
-                    output: json!({"ok": true}),
-                    is_error: Some(false),
-                }],
-            },
-            ModelMessage {
-                role: Role::Assistant,
-                content: vec![Content::Text {
-                    text: "Done. Hybrid stream is in place.".into(),
-                }],
-            },
-        ];
-
-        let model = super::model_facing_messages(&messages);
-        assert_eq!(model.len(), 4);
-
-        // Tool-using turn: keep thinking + tool, drop the status preamble.
-        assert_eq!(model[1].content.len(), 2);
-        assert!(matches!(model[1].content[0], Content::Thinking { .. }));
-        assert!(matches!(model[1].content[1], Content::ToolUse { .. }));
-
-        // Final answer without tools keeps prose.
-        assert!(matches!(
-            &model[3].content[0],
-            Content::Text { text } if text.contains("Done")
-        ));
     }
 
     #[test]

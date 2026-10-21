@@ -437,14 +437,6 @@ impl PluginManager {
         ])
     }
 
-    pub async fn install_from_package_ref(
-        &self,
-        package_ref: &str,
-    ) -> Result<Vec<InstalledPlugin>> {
-        self.install_from_package_ref_with_options(package_ref, PluginInstallOptions::default())
-            .await
-    }
-
     pub async fn install_from_package_ref_with_options(
         &self,
         package_ref: &str,

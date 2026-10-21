@@ -10,7 +10,12 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import type { BrowserAction, BrowserSession, PortEntry } from '@mitsuro/api';
+import type {
+  BrowserAction,
+  BrowserControlLease,
+  BrowserSession,
+  PortEntry,
+} from '@mitsuro/api';
 import type { WebViewProps } from 'react-native-webview';
 import {
   ArrowLeft,
@@ -28,8 +33,13 @@ import {
 import { colors } from '@mitsuro/ui';
 import { useConnection } from '../../hooks/useConnection';
 import { useThemeContext } from '../../hooks/useTheme';
+import { withBrowserStreamAuthQuery } from '../../platform/browser-stream-auth';
 
 const FALLBACK_BROWSER_URL = 'https://example.com';
+
+function createBrowserClientId(): string {
+  return `mitsuro-mobile-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 function currentWebPort(): number | null {
   if (Platform.OS !== 'web' || typeof window === 'undefined') return null;
@@ -119,8 +129,9 @@ function browserErrorMessage(cause: unknown, fallback: string): string {
   return message;
 }
 
-function streamDocument(url: string): string {
+function streamDocument(url: string, interactive: boolean): string {
   const encodedUrl = JSON.stringify(url).replace(/</g, '\\u003c');
+  const encodedInteractive = interactive ? 'true' : 'false';
   return `<!doctype html>
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <style>
@@ -130,23 +141,24 @@ html,body,#surface{margin:0;width:100%;height:100%;overflow:hidden;background:#0
 #keyboard{position:fixed;left:-1000px;top:-1000px;width:1px;height:1px;opacity:0}
 </style></head><body><div id="surface"><img id="frame"><div id="status">Connecting to Browser…</div><textarea id="keyboard"></textarea></div>
 <script>
-const socket=new WebSocket(${encodedUrl});const frame=document.getElementById('frame');const status=document.getElementById('status');const surface=document.getElementById('surface');const keyboard=document.getElementById('keyboard');let latest=null,meta=null;
+const interactive=${encodedInteractive};const socket=new WebSocket(${encodedUrl});const frame=document.getElementById('frame');const status=document.getElementById('status');const surface=document.getElementById('surface');const keyboard=document.getElementById('keyboard');let latest=null,meta=null;
 const send=(value)=>socket.readyState===1&&socket.send(JSON.stringify(value));
+const mutate=(value)=>interactive&&send(value);
 socket.onopen=()=>{status.style.display='none';send({type:'config',pacing:'ack',maxFps:24})};
 socket.onerror=()=>{status.textContent='Browser stream unavailable';status.style.display='grid'};
 socket.onmessage=(event)=>{try{const value=JSON.parse(event.data);if(value.type==='frame'){latest=value;meta=value.metadata||null;frame.src='data:image/jpeg;base64,'+value.data}}catch{}};
 frame.onload=()=>latest&&send({type:'ack',seq:latest.seq});
 const point=(touch)=>{const box=surface.getBoundingClientRect();return{x:(touch.clientX-box.left)/box.width*(meta?.deviceWidth||box.width),y:(touch.clientY-box.top)/box.height*(meta?.deviceHeight||box.height)}};
-surface.addEventListener('touchstart',(event)=>{event.preventDefault();keyboard.focus();send({type:'input_touch',eventType:'touchStart',touchPoints:[...event.touches].map(point)})},{passive:false});
-surface.addEventListener('touchmove',(event)=>{event.preventDefault();send({type:'input_touch',eventType:'touchMove',touchPoints:[...event.touches].map(point)})},{passive:false});
-surface.addEventListener('touchend',(event)=>{event.preventDefault();send({type:'input_touch',eventType:'touchEnd',touchPoints:[...event.touches].map(point)})},{passive:false});
-keyboard.addEventListener('beforeinput',(event)=>{if(event.data){for(const key of event.data){send({type:'input_keyboard',eventType:'keyDown',key,text:key});send({type:'input_keyboard',eventType:'keyUp',key})}keyboard.value=''}});
-keyboard.addEventListener('keydown',(event)=>{if(event.key.length>1){event.preventDefault();send({type:'input_keyboard',eventType:'keyDown',key:event.key,code:event.code});send({type:'input_keyboard',eventType:'keyUp',key:event.key,code:event.code})}});
+surface.addEventListener('touchstart',(event)=>{if(!interactive)return;event.preventDefault();keyboard.focus();mutate({type:'input_touch',eventType:'touchStart',touchPoints:[...event.touches].map(point)})},{passive:false});
+surface.addEventListener('touchmove',(event)=>{if(!interactive)return;event.preventDefault();mutate({type:'input_touch',eventType:'touchMove',touchPoints:[...event.touches].map(point)})},{passive:false});
+surface.addEventListener('touchend',(event)=>{if(!interactive)return;event.preventDefault();mutate({type:'input_touch',eventType:'touchEnd',touchPoints:[...event.touches].map(point)})},{passive:false});
+keyboard.addEventListener('beforeinput',(event)=>{if(interactive&&event.data){for(const key of event.data){mutate({type:'input_keyboard',eventType:'keyDown',key,text:key});mutate({type:'input_keyboard',eventType:'keyUp',key})}keyboard.value=''}});
+keyboard.addEventListener('keydown',(event)=>{if(interactive&&event.key.length>1){event.preventDefault();mutate({type:'input_keyboard',eventType:'keyDown',key:event.key,code:event.code});mutate({type:'input_keyboard',eventType:'keyUp',key:event.key,code:event.code})}});
 const mousePoint=(event)=>{const box=surface.getBoundingClientRect();return{x:(event.clientX-box.left)/box.width*(meta?.deviceWidth||box.width),y:(event.clientY-box.top)/box.height*(meta?.deviceHeight||box.height)}};
-surface.addEventListener('pointerdown',(event)=>{if(event.pointerType==='touch')return;event.preventDefault();keyboard.focus();const point=mousePoint(event);send({type:'input_mouse',eventType:'mousePressed',...point,button:event.button===2?'right':event.button===1?'middle':'left',clickCount:1})});
-surface.addEventListener('pointermove',(event)=>{if(event.pointerType==='touch')return;const point=mousePoint(event);send({type:'input_mouse',eventType:'mouseMoved',...point,button:'none'})});
-surface.addEventListener('pointerup',(event)=>{if(event.pointerType==='touch')return;const point=mousePoint(event);send({type:'input_mouse',eventType:'mouseReleased',...point,button:event.button===2?'right':event.button===1?'middle':'left',clickCount:1})});
-surface.addEventListener('wheel',(event)=>{event.preventDefault();const point=mousePoint(event);send({type:'input_mouse',eventType:'mouseWheel',...point,deltaX:event.deltaX,deltaY:event.deltaY})},{passive:false});
+surface.addEventListener('pointerdown',(event)=>{if(!interactive||event.pointerType==='touch')return;event.preventDefault();keyboard.focus();const point=mousePoint(event);mutate({type:'input_mouse',eventType:'mousePressed',...point,button:event.button===2?'right':event.button===1?'middle':'left',clickCount:1})});
+surface.addEventListener('pointermove',(event)=>{if(!interactive||event.pointerType==='touch')return;const point=mousePoint(event);mutate({type:'input_mouse',eventType:'mouseMoved',...point,button:'none'})});
+surface.addEventListener('pointerup',(event)=>{if(!interactive||event.pointerType==='touch')return;const point=mousePoint(event);mutate({type:'input_mouse',eventType:'mouseReleased',...point,button:event.button===2?'right':event.button===1?'middle':'left',clickCount:1})});
+surface.addEventListener('wheel',(event)=>{if(!interactive)return;event.preventDefault();const point=mousePoint(event);mutate({type:'input_mouse',eventType:'mouseWheel',...point,deltaX:event.deltaX,deltaY:event.deltaY})},{passive:false});
 </script></body></html>`;
 }
 
@@ -268,6 +280,9 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
   const { theme } = useThemeContext();
   const { client, serverUrl, serverToken } = useConnection();
   const t = theme.colors;
+  const browserClientId = useRef(createBrowserClientId()).current;
+  const controlLeases = useRef(new Map<string, BrowserControlLease>());
+  const [controlRevision, setControlRevision] = useState(0);
   const [sessions, setSessions] = useState<BrowserSession[]>([]);
   const [ports, setPorts] = useState<PortEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -279,13 +294,44 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
   const [portsOpen, setPortsOpen] = useState(false);
   const autoOpenedRef = useRef(false);
 
+  const setControlLease = useCallback((sessionId: string, lease: BrowserControlLease | null) => {
+    const current = controlLeases.current.get(sessionId);
+    if (lease) {
+      controlLeases.current.set(sessionId, lease);
+    } else {
+      controlLeases.current.delete(sessionId);
+    }
+    if (current !== lease) setControlRevision((revision) => revision + 1);
+  }, []);
+
   const selected = sessions.find((session) => session.id === selectedId) ?? sessions[0] ?? null;
+  const selectedLease = selected ? controlLeases.current.get(selected.id) ?? null : null;
+  const hasSelectedControl = Boolean(
+    selectedLease &&
+      selectedLease.client_id === browserClientId &&
+      selectedLease.resource_id === selected?.id &&
+      (!selected?.controller || selected.controller.client_id === browserClientId),
+  );
 
   const refresh = useCallback(async () => {
     if (!client) return;
     const portsRequest = client.getPorts().catch(() => null);
     try {
       const response = await client.listBrowserSessions();
+      const liveSessions = new Map(response.sessions.map((session) => [session.id, session]));
+      let leasesChanged = false;
+      for (const [sessionId, lease] of controlLeases.current) {
+        const session = liveSessions.get(sessionId);
+        if (
+          !session ||
+          lease.client_id !== browserClientId ||
+          (session.controller && session.controller.client_id !== browserClientId)
+        ) {
+          controlLeases.current.delete(sessionId);
+          leasesChanged = true;
+        }
+      }
+      if (leasesChanged) setControlRevision((revision) => revision + 1);
       setSessions(response.sessions);
       setSelectedId((current) => current ?? response.sessions[0]?.id ?? null);
       setAvailable(response.capability.available);
@@ -302,12 +348,40 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
       );
       setLoaded(true);
     }
-  }, [client]);
+  }, [browserClientId, client]);
 
   useEffect(() => {
     if (!visible) return;
     void refresh();
   }, [refresh, visible]);
+
+  const takeControl = useCallback(async (session: BrowserSession) => {
+    if (!client) return null;
+    const response = await client.takeBrowserControl(session.id, browserClientId);
+    // Lease tokens live only in this mounted surface's in-memory map. They are
+    // never written to storage, diagnostics, URLs other than the scoped stream,
+    // or error messages.
+    setControlLease(session.id, response.lease);
+    const updated = await client.getBrowserSession(session.id);
+    setSessions((current) =>
+      current.map((item) => (item.id === updated.id ? updated : item)),
+    );
+    return response.lease;
+  }, [browserClientId, client, setControlLease]);
+
+  const takeSelectedControl = useCallback(async () => {
+    if (!selected || !client) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await takeControl(selected);
+    } catch (cause) {
+      setControlLease(selected.id, null);
+      setError(browserErrorMessage(cause, 'Could not take Browser control.'));
+    } finally {
+      setBusy(false);
+    }
+  }, [client, selected, setControlLease, takeControl]);
 
   const navigateTo = useCallback(async (nextAddress: string, newTab = false) => {
     if (!client) return;
@@ -318,8 +392,20 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
       setAddress(url);
       let session: BrowserSession;
       if (!newTab && selected && selected.status !== 'stopped' && selected.status !== 'error') {
-        await client.heartbeatBrowserSession(selected.id, 'controller');
-        const response = await client.runBrowserActions(selected.id, [{ type: 'navigate', url }]);
+        if (!selectedLease || !hasSelectedControl) {
+          throw new Error('Observer mode · choose Take control before navigating.');
+        }
+        await client.heartbeatBrowserSession(
+          selected.id,
+          'controller',
+          browserClientId,
+          selectedLease,
+        );
+        const response = await client.runBrowserActions(
+          selected.id,
+          selectedLease,
+          [{ type: 'navigate', url }],
+        );
         if (!response.ok) throw new Error('Browser could not open that address.');
         session = await client.getBrowserSession(selected.id);
       } else {
@@ -329,6 +415,13 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
           url,
           launch_local: true,
         });
+        try {
+          const response = await client.takeBrowserControl(session.id, browserClientId);
+          setControlLease(session.id, response.lease);
+          session = await client.getBrowserSession(session.id);
+        } catch (cause) {
+          setError(browserErrorMessage(cause, 'Browser opened in observer mode.'));
+        }
       }
       setSessions((current) => [session, ...current.filter((item) => item.id !== session.id)]);
       setSelectedId(session.id);
@@ -337,7 +430,15 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
     } finally {
       setBusy(false);
     }
-  }, [client, selected, serverUrl]);
+  }, [
+    browserClientId,
+    client,
+    hasSelectedControl,
+    selected,
+    selectedLease,
+    serverUrl,
+    setControlLease,
+  ]);
 
   const selectTab = useCallback((session: BrowserSession) => {
     setSelectedId(session.id);
@@ -348,20 +449,27 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
   const closeTab = useCallback(async (session: BrowserSession) => {
     if (!client) return;
     setError(null);
-    const remaining = sessions.filter((item) => item.id !== session.id);
-    const closingSelectedTab = selectedId === session.id;
-    setSessions(remaining);
-    if (closingSelectedTab) {
-      setSelectedId(remaining[0]?.id ?? null);
-      setAddress(remaining[0]?.url ?? defaultBrowserAddress(serverUrl));
-    }
     try {
-      if (session.status !== 'stopped') await client.stopBrowserSession(session.id);
+      if (session.status !== 'stopped') {
+        const lease = controlLeases.current.get(session.id);
+        if (!lease || lease.client_id !== browserClientId) {
+          throw new Error('Observer mode · take control before ending this Browser session.');
+        }
+        await client.stopBrowserSession(session.id, lease);
+      }
+      setControlLease(session.id, null);
+      const remaining = sessions.filter((item) => item.id !== session.id);
+      const closingSelectedTab = selectedId === session.id;
+      setSessions(remaining);
+      if (closingSelectedTab) {
+        setSelectedId(remaining[0]?.id ?? null);
+        setAddress(remaining[0]?.url ?? defaultBrowserAddress(serverUrl));
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Could not close Browser tab.');
       await refresh();
     }
-  }, [client, refresh, selectedId, serverUrl, sessions]);
+  }, [browserClientId, client, refresh, selectedId, serverUrl, sessions, setControlLease]);
 
   const openPort = useCallback((port: PortEntry) => {
     setPortsOpen(false);
@@ -376,13 +484,57 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
     void openAddress();
   }, [available, loaded, openAddress, sessions.length, visible]);
 
+  useEffect(() => {
+    if (!visible || !client || !selected?.id) return;
+    let disposed = false;
+    const sessionId = selected.id;
+    const heartbeat = async () => {
+      const lease = controlLeases.current.get(sessionId);
+      try {
+        const session = await client.heartbeatBrowserSession(
+          sessionId,
+          lease ? 'controller' : 'viewer',
+          browserClientId,
+          lease,
+        );
+        if (!disposed) {
+          setSessions((current) =>
+            current.map((item) => (item.id === session.id ? session : item)),
+          );
+        }
+      } catch (cause) {
+        if (!disposed && lease) {
+          setControlLease(sessionId, null);
+          setError(browserErrorMessage(cause, 'Browser control lease ended.'));
+        }
+      }
+    };
+    void heartbeat();
+    // Server control leases expire after 15 seconds. Renew well inside that
+    // window so ordinary timer jitter or one slow request cannot demote an
+    // active controller before its first periodic heartbeat.
+    const timer = setInterval(() => void heartbeat(), 5_000);
+    return () => {
+      disposed = true;
+      clearInterval(timer);
+    };
+  }, [browserClientId, client, controlRevision, selected?.id, setControlLease, visible]);
+
   const runNavigationAction = useCallback(async (action: BrowserAction) => {
     if (!client || !selected) return;
     setBusy(true);
     setError(null);
     try {
-      await client.heartbeatBrowserSession(selected.id, 'controller');
-      const response = await client.runBrowserActions(selected.id, [action]);
+      if (!selectedLease || !hasSelectedControl) {
+        throw new Error('Observer mode · choose Take control before changing this Browser.');
+      }
+      await client.heartbeatBrowserSession(
+        selected.id,
+        'controller',
+        browserClientId,
+        selectedLease,
+      );
+      const response = await client.runBrowserActions(selected.id, selectedLease, [action]);
       if (!response.ok) throw new Error('Browser navigation failed.');
       const session = await client.getBrowserSession(selected.id);
       setSessions((current) => current.map((item) => item.id === session.id ? session : item));
@@ -392,7 +544,7 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
     } finally {
       setBusy(false);
     }
-  }, [client, selected]);
+  }, [browserClientId, client, hasSelectedControl, selected, selectedLease]);
 
   const toggleViewport = useCallback(() => {
     const mode = selected?.viewport_mode === 'desktop' ? 'mobile' : 'desktop';
@@ -400,12 +552,30 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
   }, [runNavigationAction, selected?.viewport_mode]);
 
   const streamHtml = useMemo(() => {
-    if (!serverUrl || !selected?.stream_url) return null;
-    const base = serverUrl.replace(/^http/i, 'ws').replace(/\/+$/, '');
-    const separator = selected.stream_url.includes('?') ? '&' : '?';
-    const token = serverToken?.trim() ? `&token=${encodeURIComponent(serverToken.trim())}` : '';
-    return streamDocument(`${base}${selected.stream_url}${separator}capability=controller${token}`);
-  }, [selected?.stream_url, serverToken, serverUrl]);
+    if (!client || !selected?.stream_url) return null;
+    try {
+      const url = client.browserStreamUrl(
+        selected.stream_url,
+        hasSelectedControl ? 'controller' : 'viewer',
+        browserClientId,
+        hasSelectedControl ? selectedLease ?? undefined : undefined,
+      );
+      return streamDocument(
+        withBrowserStreamAuthQuery(url, serverToken),
+        hasSelectedControl,
+      );
+    } catch {
+      return null;
+    }
+  }, [
+    browserClientId,
+    client,
+    controlRevision,
+    hasSelectedControl,
+    selected?.stream_url,
+    selectedLease,
+    serverToken,
+  ]);
 
   return (
     <View style={[styles.root, { backgroundColor: t.background }]}>
@@ -477,7 +647,7 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
           accessibilityRole="button"
           accessibilityLabel="Back"
           onPress={() => void runNavigationAction({ type: 'back' })}
-          disabled={busy || !selected}
+          disabled={busy || !selected || !hasSelectedControl}
           style={styles.iconButton}
         >
           <ArrowLeft size={15} color={selected ? t.mutedForeground : t.border} strokeWidth={1.8} />
@@ -486,7 +656,7 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
           accessibilityRole="button"
           accessibilityLabel="Forward"
           onPress={() => void runNavigationAction({ type: 'forward' })}
-          disabled={busy || !selected}
+          disabled={busy || !selected || !hasSelectedControl}
           style={styles.iconButton}
         >
           <ArrowRight size={15} color={selected ? t.mutedForeground : t.border} strokeWidth={1.8} />
@@ -495,7 +665,7 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
           accessibilityRole="button"
           accessibilityLabel="Reload"
           onPress={() => void runNavigationAction({ type: 'reload' })}
-          disabled={busy || !selected}
+          disabled={busy || !selected || !hasSelectedControl}
           style={styles.iconButton}
         >
           <RefreshCw size={15} color={selected ? t.mutedForeground : t.border} strokeWidth={1.8} />
@@ -515,7 +685,7 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
           accessibilityRole="button"
           accessibilityLabel={`Switch to ${selected?.viewport_mode === 'desktop' ? 'mobile' : 'desktop'} viewport`}
           onPress={toggleViewport}
-          disabled={busy || !selected}
+          disabled={busy || !selected || !hasSelectedControl}
           style={styles.iconButton}
         >
           {selected?.viewport_mode === 'desktop' ? (
@@ -528,12 +698,35 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
           accessibilityRole="button"
           accessibilityLabel="Open address"
           onPress={() => void openAddress()}
-          disabled={busy || !client}
+          disabled={busy || !client || Boolean(selected && !hasSelectedControl)}
           style={styles.iconButton}
         >
           {busy ? <ActivityIndicator size="small" color={t.userMessage} /> : <Play size={15} color={t.foreground} />}
         </Pressable>
       </View>
+
+      {selected && !hasSelectedControl ? (
+        <View style={[styles.controlNotice, { borderColor: t.border }]}>
+          <Text style={[styles.controlNoticeText, { color: t.mutedForeground }]} numberOfLines={1}>
+            {selected.controller && selected.controller.client_id !== browserClientId
+              ? `Observer · ${selected.controller.client_id} controls this Browser`
+              : 'Observer · take control to interact'}
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Take control of Browser"
+            onPress={() => void takeSelectedControl()}
+            disabled={busy}
+            style={[styles.controlButton, { borderColor: t.userMessage }]}
+          >
+            {busy ? (
+              <ActivityIndicator size="small" color={t.userMessage} />
+            ) : (
+              <Text style={[styles.controlButtonText, { color: t.foreground }]}>Take control</Text>
+            )}
+          </Pressable>
+        </View>
+      ) : null}
 
       {portsOpen ? (
         <View style={[styles.portDrawer, { borderColor: t.border }]}>
@@ -559,7 +752,11 @@ export function AtlasMobileSurface({ visible }: { visible: boolean }) {
 
       <View style={styles.viewport}>
         {streamHtml && visible ? (
-          <AtlasStream key={selected?.id} html={streamHtml} serverUrl={serverUrl} />
+          <AtlasStream
+            key={`${selected?.id}:${controlRevision}:${hasSelectedControl ? 'controller' : 'viewer'}`}
+            html={streamHtml}
+            serverUrl={serverUrl}
+          />
         ) : (
           <View style={styles.empty}>
             <Text style={{ color: t.mutedForeground }}>
@@ -624,6 +821,25 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: colors.glass.border,
   },
+  controlNotice: {
+    minHeight: 36,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 10,
+  },
+  controlNoticeText: { flex: 1, minWidth: 0, fontSize: 11 },
+  controlButton: {
+    minWidth: 92,
+    height: 26,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  controlButtonText: { fontSize: 11, fontWeight: '600' },
   addressInput: {
     flex: 1,
     minWidth: 60,

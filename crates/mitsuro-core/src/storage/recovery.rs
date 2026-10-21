@@ -226,6 +226,8 @@ impl PendingInteractionSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PartialAssistantState {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub citations: Vec<crate::ai::types::Citation>,
     #[serde(default)]
     pub thinking: String,
     #[serde(default)]
@@ -651,6 +653,7 @@ mod tests {
             Some(LoopStopReason::StreamIdleTimeout),
             None,
             PartialAssistantState {
+                citations: Vec::new(),
                 text: "partial answer".to_string(),
                 thinking: "reasoning".to_string(),
                 tool_calls: Vec::new(),
@@ -672,6 +675,7 @@ mod tests {
             Some(LoopStopReason::ProviderError),
             Some("provider failed".to_string()),
             PartialAssistantState {
+                citations: Vec::new(),
                 text: String::new(),
                 thinking: String::new(),
                 tool_calls: vec![RecoveryToolCall::summary("tool-1", "bash")],

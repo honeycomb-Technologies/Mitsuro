@@ -37,6 +37,7 @@ pub mod tool_search;
 pub mod web_fetch;
 pub mod web_search;
 pub mod workflow_propose;
+pub mod workflow_read;
 pub mod workflow_update;
 pub mod write;
 
@@ -78,5 +79,6 @@ pub use tool_search::ToolSearchTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search::WebSearchTool;
 pub use workflow_propose::WorkflowProposeTool;
+pub use workflow_read::WorkflowReadTool;
 pub use workflow_update::WorkflowUpdateTool;
 pub use write::WriteTool;

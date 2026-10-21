@@ -352,26 +352,6 @@ pub enum LoopEvent {
         reason: String,
         stage: u8,
     },
-
-    /// A teammate was spawned.
-    TeammateSpawned { name: String, role: String },
-
-    /// A teammate completed a task.
-    TeammateTaskCompleted {
-        name: String,
-        task_id: String,
-        result: String,
-    },
-
-    /// A teammate failed a task.
-    TeammateTaskFailed {
-        name: String,
-        task_id: String,
-        error: String,
-    },
-
-    /// A teammate was cancelled.
-    TeammateCancelled { name: String },
 }
 
 /// Simple plan task info for event transport.
@@ -665,9 +645,7 @@ mod input_tests {
     use super::*;
 
     fn text(value: &str) -> Vec<Content> {
-        vec![Content::Text {
-            text: value.to_string(),
-        }]
+        vec![Content::text(value.to_string())]
     }
 
     #[tokio::test]
@@ -695,11 +673,11 @@ mod input_tests {
         assert_eq!(steering.len(), 2);
         assert!(matches!(
             &steering[0].content[0],
-            Content::Text { text } if text == "first"
+            Content::Text { text, .. } if text == "first"
         ));
         assert!(matches!(
             &steering[1].content[0],
-            Content::Text { text } if text == "second"
+            Content::Text { text, .. } if text == "second"
         ));
     }
 

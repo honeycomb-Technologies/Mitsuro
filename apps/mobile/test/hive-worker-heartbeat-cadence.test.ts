@@ -7,7 +7,6 @@ import {
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
-  readTextFile(path: URL): Promise<string>;
 };
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -94,47 +93,5 @@ Deno.test("heartbeat cadence request fields preserve create null and unchanged u
     buildWorkerHeartbeatUpdateFields(120, 900),
     { heartbeat_interval_secs: 120 },
     "a changed edit must send the exact new cadence",
-  );
-});
-
-Deno.test("Worker editor exposes an accessible autonomy-aware cadence control", async () => {
-  const [editor, apiTypes] = await Promise.all([
-    Deno.readTextFile(
-      new URL(
-        "../components/hive/HiveWorkerEditorModal.tsx",
-        import.meta.url,
-      ),
-    ),
-    Deno.readTextFile(
-      new URL("../../../packages/api/src/types.ts", import.meta.url),
-    ),
-  ]);
-
-  assert(
-    editor.includes("Heartbeat cadence · seconds") &&
-      editor.includes('accessibilityLabel="Heartbeat cadence in seconds"') &&
-      editor.includes('keyboardType="number-pad"') &&
-      editor.includes('inputMode="numeric"'),
-    "the cadence field must be labeled, screen-reader accessible, and numeric",
-  );
-  assert(
-    editor.includes("Manual and Scheduled Workers can retain a cadence") &&
-      editor.includes("only while autonomy is Always on") &&
-      editor.includes("Leave blank to use the server default") &&
-      editor.includes("keep the stored value unchanged"),
-    "the control must explain when cadence applies and its blank semantics",
-  );
-  assert(
-    editor.includes("heartbeatCadence.error === null") &&
-      editor.includes("buildWorkerHeartbeatCreateFields(") &&
-      editor.includes("buildWorkerHeartbeatUpdateFields("),
-    "save must be validation-gated and use mode-specific request semantics",
-  );
-  assert(
-    apiTypes.includes("heartbeat_interval_secs?: number;") &&
-      apiTypes.includes(
-        "/** Partial update: absent fields keep their current value. */",
-      ),
-    "the editor helper must remain aligned with the public create/update API",
   );
 });

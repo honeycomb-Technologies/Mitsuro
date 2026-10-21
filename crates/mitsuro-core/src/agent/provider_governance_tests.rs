@@ -307,9 +307,7 @@ async fn ambiguous_governed_transport_failure_leaves_one_started_slot_without_re
     );
     let messages = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: "perform one governed attempt".to_string(),
-        }],
+        content: vec![Content::text("perform one governed attempt".to_string())],
     }];
 
     client

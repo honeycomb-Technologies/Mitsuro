@@ -16,8 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::ai::client::AiClient;
 use crate::tools::registry::{DelegationPolicy, ToolRegistry};
 
-use self::config::BuilderConfig;
-pub(crate) use self::config::{AgentConfig, SingleChildConfig};
+use self::config::{BuilderConfig, SingleChildConfig};
 pub(crate) use self::runtime::execute_agent_loop;
 
 use super::build_context::SharedBuildContext;
@@ -57,45 +56,6 @@ Current working directory: {working_dir}\n\
 - Run validation from the current working directory. The parent will integrate accepted changes into the authoritative source workspace.\n\
 [/DELEGATED EXECUTION AUTHORITY]"
     )
-}
-
-/// Legacy explorer-pool compatibility wrapper.
-pub async fn execute_single_explorer(
-    client: Arc<AiClient>,
-    task: SubAgentTask,
-    registry: Arc<ToolRegistry>,
-    policy: DelegationPolicy,
-    project_context: String,
-    model: String,
-    cancellation: CancellationToken,
-    progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
-) -> SubAgentResult {
-    execute_single_child(
-        client,
-        task,
-        registry,
-        policy,
-        project_context,
-        model,
-        cancellation,
-        progress_tx,
-    )
-    .await
-}
-
-/// Execute any agent type via the standard agent loop.
-///
-/// This is the generic version. Specific helpers like `execute_single_explorer`
-/// construct their config internally and call this.
-pub(crate) async fn execute_single_agent<C: AgentConfig>(
-    client: &AiClient,
-    task: SubAgentTask,
-    config: C,
-    model: &str,
-    cancellation: CancellationToken,
-    progress_tx: Option<mpsc::UnboundedSender<AgentProgress>>,
-) -> SubAgentResult {
-    execute_agent_loop(client, &task, model, cancellation, &config, progress_tx).await
 }
 
 /// Execute a builder agent with progress reporting.

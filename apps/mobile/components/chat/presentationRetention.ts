@@ -6,6 +6,12 @@ export const RICH_RECENT_TURN_COUNT = 3;
 /** Cap retained tool output in historical (non-rich) turns. */
 export const HISTORICAL_TOOL_OUTPUT_PREVIEW = 800;
 
+function compactThinking(content: string): string {
+  return content.length > HISTORICAL_TOOL_OUTPUT_PREVIEW
+    ? `${content.slice(0, HISTORICAL_TOOL_OUTPUT_PREVIEW)}\n…[older thinking collapsed]`
+    : content;
+}
+
 export function isTurnInRichWindow(
   turnIndex: number,
   turnCount: number,
@@ -53,11 +59,16 @@ export function compactHistoricalMessage(message: ChatMessage): ChatMessage {
 
   return {
     ...message,
-    thinking:
-      message.thinking && message.thinking.length > HISTORICAL_TOOL_OUTPUT_PREVIEW
-        ? `${message.thinking.slice(0, HISTORICAL_TOOL_OUTPUT_PREVIEW)}
-…[older thinking collapsed]`
-        : message.thinking,
+    thinking: message.thinking
+      ? compactThinking(message.thinking)
+      : message.thinking,
+    // The renderer prefers ordered parts. Compact that projection too, without
+    // mutating canonical history or truncating any part of the final answer.
+    renderParts: message.renderParts?.map((part) =>
+      part.type === "thinking" && part.content.length > HISTORICAL_TOOL_OUTPUT_PREVIEW
+        ? { ...part, content: compactThinking(part.content) }
+        : part,
+    ),
     toolCalls: message.toolCalls?.map(compactHistoricalToolCall),
     attachments: message.attachments?.map((attachment) => ({
       type: attachment.type,

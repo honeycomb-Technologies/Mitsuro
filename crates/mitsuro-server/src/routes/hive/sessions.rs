@@ -3,11 +3,11 @@ use std::convert::Infallible;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::sse::{Event, KeepAlive, Sse},
+    response::sse::{Event, Sse},
     Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use mitsuro_core::ai::models::ModelKey;
@@ -490,7 +490,7 @@ pub(super) async fn observe_events(
         .replay_limit
         .unwrap_or(DEFAULT_HIVE_REPLAY_LIMIT)
         .min(MAX_HIVE_REPLAY_LIMIT);
-    let (mut receiver, replay_events) = if state.hive_runtime.is_daemon_backed() {
+    let (receiver, replay_events) = if state.hive_runtime.is_daemon_backed() {
         // The daemon sequence is the sole production replay cursor. Mixing it
         // with the server's legacy runtime-trace sequence duplicates events for
         // the first observer and drops history for later observers.
@@ -512,44 +512,8 @@ pub(super) async fn observe_events(
     };
     let (tx, rx) =
         mpsc::channel::<std::result::Result<Event, Infallible>>(HIVE_EVENT_STREAM_BUFFER);
-
-    tokio::spawn(async move {
-        for event in replay_events {
-            let Ok(sse_event) = Event::default().json_data(event) else {
-                continue;
-            };
-            if tx.send(Ok(sse_event)).await.is_err() {
-                return;
-            }
-        }
-
-        loop {
-            match receiver.recv().await {
-                Ok(event) => {
-                    let Ok(sse_event) = Event::default().json_data(event) else {
-                        continue;
-                    };
-                    if tx.send(Ok(sse_event)).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    let event = AgenticEvent::Lagged {
-                        skipped: usize::try_from(skipped).unwrap_or(usize::MAX),
-                    };
-                    let Ok(sse_event) = Event::default().json_data(event) else {
-                        continue;
-                    };
-                    if tx.send(Ok(sse_event)).await.is_err() {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-
-    Ok(Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default()))
+    crate::routes::sse::spawn_broadcast_sse_pump(receiver, tx, replay_events, false);
+    Ok(crate::routes::sse::sse_response(rx))
 }
 
 pub(super) async fn send_message(

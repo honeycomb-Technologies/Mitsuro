@@ -1,4 +1,4 @@
-use crate::ai::types::{AiToolCall, Content, ModelMessage, Role};
+use crate::ai::types::{AiToolCall, Citation, Content, ModelMessage, Role};
 
 use super::super::stream::ThinkingBlock;
 
@@ -6,9 +6,12 @@ pub(super) fn build_assistant_message(
     text: &str,
     thinking_blocks: &[ThinkingBlock],
     tool_calls: &[AiToolCall],
+    citations: &[Citation],
 ) -> ModelMessage {
     let mut content = Vec::with_capacity(
-        thinking_blocks.len() + tool_calls.len() + usize::from(!text.is_empty()),
+        thinking_blocks.len()
+            + tool_calls.len()
+            + usize::from(!text.is_empty() || !citations.is_empty()),
     );
 
     for block in thinking_blocks {
@@ -21,9 +24,10 @@ pub(super) fn build_assistant_message(
         });
     }
 
-    if !text.is_empty() {
+    if !text.is_empty() || !citations.is_empty() {
         content.push(Content::Text {
             text: text.to_string(),
+            citations: citations.to_vec(),
         });
     }
 
@@ -127,6 +131,7 @@ mod tests {
                     signature: "opaque-signature".to_string(),
                 },
             ],
+            &[],
             &[],
         );
 

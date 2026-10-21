@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::Citation;
+
 /// AI SDK Tool definition (for provider communication only)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiTool {
@@ -35,7 +37,13 @@ pub enum Role {
 #[serde(tag = "type")]
 pub enum Content {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        /// Source references associated with this text block. Older stored
+        /// messages omit this field; older readers still recognize the text.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        citations: Vec<Citation>,
+    },
 
     #[serde(rename = "image")]
     Image {
@@ -70,6 +78,16 @@ pub enum Content {
     /// Redacted thinking (when thinking contains sensitive content)
     #[serde(rename = "redacted_thinking")]
     RedactedThinking { data: String },
+}
+
+impl Content {
+    /// Plain text without provider source annotations.
+    pub fn text(text: String) -> Self {
+        Self::Text {
+            text,
+            citations: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,4 +132,30 @@ pub enum FinishReason {
     ToolCalls,
     ContentFilter,
     Other(String),
+}
+
+#[cfg(test)]
+mod citation_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn annotated_text_preserves_old_wire_shape_and_roundtrips_sources() {
+        let old = json!({"type": "text", "text": "Old answer."});
+        let decoded: Content = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), old);
+
+        let annotated = json!({
+            "type": "text", "text": "A supported finding.",
+            "citations": [{"url":"https://example.org/evidence", "title":"Evidence", "cited_text":"Supported finding"}]
+        });
+        let decoded: Content = serde_json::from_value(annotated.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), annotated);
+        #[derive(Deserialize)]
+        struct LegacyText {
+            text: String,
+        }
+        let legacy: LegacyText = serde_json::from_value(annotated).unwrap();
+        assert_eq!(legacy.text, "A supported finding.");
+    }
 }

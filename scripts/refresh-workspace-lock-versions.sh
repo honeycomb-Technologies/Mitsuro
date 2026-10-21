@@ -53,16 +53,12 @@ check = sys.argv[2] == "1"
 lock_path = root / "Cargo.lock"
 
 workspace_versions: dict[str, str] = {}
-for manifest in sorted((root / "crates").glob("*/Cargo.toml")):
+manifests = [
+    *sorted((root / "crates").glob("*/Cargo.toml")),
+    root / "apps" / "desktop" / "canvas" / "Cargo.toml",
+]
+for manifest in manifests:
     data = tomllib.loads(manifest.read_text())
-    package = data.get("package") or {}
-    name = package.get("name")
-    version = package.get("version")
-    if name and version:
-        workspace_versions[name] = version
-gpui = root / "apps" / "desktop" / "gpui" / "Cargo.toml"
-if gpui.exists():
-    data = tomllib.loads(gpui.read_text())
     package = data.get("package") or {}
     name = package.get("name")
     version = package.get("version")

@@ -156,15 +156,11 @@ fn provider_request_trace_keeps_contract_metadata_but_redacts_request_contents()
     let messages = vec![
         ModelMessage {
             role: Role::System,
-            content: vec![Content::Text {
-                text: SYSTEM_SECRET.to_string(),
-            }],
+            content: vec![Content::text(SYSTEM_SECRET.to_string())],
         },
         ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: USER_SECRET.to_string(),
-            }],
+            content: vec![Content::text(USER_SECRET.to_string())],
         },
     ];
     let options = CallOptions {

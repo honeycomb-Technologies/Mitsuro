@@ -22,14 +22,6 @@ impl MotionPreference {
             Self::Full
         }
     }
-
-    pub const fn storage_value(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Reduced => "reduced",
-            Self::Off => "off",
-        }
-    }
 }
 
 #[cfg(test)]

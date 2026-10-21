@@ -155,6 +155,13 @@ pub(super) async fn execute_workflow_command(
         &command,
         WorkflowCommand::ActivateGoal { .. } | WorkflowCommand::ResumeGoal { .. }
     );
+    let stops_execution = matches!(
+        &command,
+        WorkflowCommand::PauseGoal { .. }
+            | WorkflowCommand::BlockGoal { .. }
+            | WorkflowCommand::CancelGoal { .. }
+            | WorkflowCommand::CompleteGoal { .. }
+    );
     let mut execution_guard = if starts_execution {
         state.try_lock_session(&session_id).await
     } else {
@@ -372,6 +379,20 @@ pub(super) async fn execute_workflow_command(
     }
     .map_err(map_workflow_error)?;
 
+    let live_sender = state.session_inputs.read().await.get(&session_id).cloned();
+    let current = manager
+        .get_snapshot(&session_id)
+        .map_err(map_workflow_error)?;
+    if !current.as_ref().is_some_and(|snapshot| {
+        snapshot.goal.id == mutation.snapshot.goal.id
+            && snapshot.aggregate_revision == mutation.snapshot.aggregate_revision
+            && snapshot.goal.status == mutation.snapshot.goal.status
+    }) {
+        // Idempotency returns the original receipt. It must not repeat stale
+        // control effects after a later command or a replacement Goal.
+        return Ok(Json(mutation));
+    }
+
     // Collaboration mode remains a conversational posture. Only the explicit
     // user activation command switches the session into executable Build mode.
     if matches!(
@@ -382,22 +403,30 @@ pub(super) async fn execute_workflow_command(
             .update_session_work_mode(&session_id, mitsuro_core::storage::WorkMode::Build)?;
     }
 
+    // Existing runs observe every committed workflow change. Explicit stop
+    // controls also interrupt an in-flight provider request; they never wake
+    // an idle session merely to stop it again.
+    let workflow_input = LoopInput::WorkflowUpdated {
+        goal_id: mutation.snapshot.goal.id.clone(),
+        aggregate_revision: mutation.snapshot.aggregate_revision,
+        operation_id: mutation.operation_id.clone(),
+    };
+    let delivered_to_live_run = live_sender
+        .as_ref()
+        .is_some_and(|sender| sender.send(workflow_input).is_ok());
+    if stops_execution {
+        if let Some(sender) = &live_sender {
+            let _ = sender.send(LoopInput::Cancel);
+        }
+    }
+
     if starts_execution
         && matches!(
             mutation.snapshot.goal.status,
             mitsuro_core::workflow::GoalStatus::Active
         )
     {
-        let workflow_input = LoopInput::WorkflowUpdated {
-            goal_id: mutation.snapshot.goal.id.clone(),
-            aggregate_revision: mutation.snapshot.aggregate_revision,
-            operation_id: mutation.operation_id.clone(),
-        };
-        let live_sender = state.session_inputs.read().await.get(&session_id).cloned();
-        if live_sender
-            .as_ref()
-            .is_some_and(|sender| sender.send(workflow_input.clone()).is_ok())
-        {
+        if delivered_to_live_run {
             drop(execution_guard.take());
         } else {
             if execution_guard.is_none() {

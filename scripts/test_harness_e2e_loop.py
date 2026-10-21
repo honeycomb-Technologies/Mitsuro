@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 from typing import Any
 
 
@@ -103,6 +104,173 @@ class CandidateSafetyTests(unittest.TestCase):
             HARNESS.validate_candidate_base_url("http://127.0.0.1:3000")
         with self.assertRaises(HARNESS.AcceptanceFailure):
             HARNESS.validate_candidate_base_url("http://honey:3100")
+
+
+class RecordingControlApi(HARNESS.MitsuroApi):
+    def __init__(self, resource_id: str = "session/one") -> None:
+        super().__init__("http://127.0.0.1:3100", 1.0)
+        self.resource_id = resource_id
+        self.control_calls: list[tuple[str, str, Any, Any]] = []
+
+    def json_request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> Any:
+        self.control_calls.append((method, path, payload, headers))
+        return {
+            "lease": {
+                "resource_id": self.resource_id,
+                "client_id": self.agent_control_client_id,
+                "lease_token": f"opaque-agent-token-{len(self.control_calls)}",
+                "expires_at": "later",
+            }
+        }
+
+
+class FakeSseResponse:
+    def __enter__(self) -> "FakeSseResponse":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        return None
+
+    def __iter__(self):
+        return iter([b'data: {"type":"finish"}\n'])
+
+
+class FakeJsonResponse:
+    def __enter__(self) -> "FakeJsonResponse":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return b'{"ok":true}'
+
+
+class AgentControlLeaseTests(unittest.TestCase):
+    def test_claims_are_fresh_nonforcing_encoded_and_not_retained(self) -> None:
+        session_id = "session/one ?#%"
+        api = RecordingControlApi(session_id)
+
+        first_headers = api.agent_mutation_headers(session_id)
+        second_headers = api.agent_mutation_headers(session_id)
+
+        self.assertEqual(
+            first_headers,
+            {"x-mitsuro-control-lease": "opaque-agent-token-1"},
+        )
+        self.assertEqual(
+            second_headers,
+            {"x-mitsuro-control-lease": "opaque-agent-token-2"},
+        )
+        self.assertEqual(
+            api.control_calls,
+            [
+                (
+                    "POST",
+                    "/api/sessions/session%2Fone%20%3F%23%25/control",
+                    {"client_id": api.agent_control_client_id, "force": False},
+                    None,
+                ),
+                (
+                    "POST",
+                    "/api/sessions/session%2Fone%20%3F%23%25/control",
+                    {"client_id": api.agent_control_client_id, "force": False},
+                    None,
+                ),
+            ],
+        )
+        self.assertNotIn("opaque-agent-token", repr(api.__dict__))
+
+    def test_code_chat_payload_explicitly_selects_control_contract(self) -> None:
+        payload = HARNESS.chat_payload("session/one", "hello", None)
+
+        self.assertEqual(payload["session_type"], "code")
+
+    def test_chat_stream_claims_and_carries_control_header(self) -> None:
+        api = RecordingControlApi()
+        requests = []
+
+        def open_stream(request: Any, *, timeout: float) -> FakeSseResponse:
+            requests.append((request, timeout))
+            return FakeSseResponse()
+
+        with patch.object(HARNESS, "urlopen", side_effect=open_stream):
+            events, disconnected = api.chat_incremental(
+                {
+                    "session_id": "session/one",
+                    "session_type": "code",
+                    "message": "hello",
+                }
+            )
+
+        self.assertFalse(disconnected)
+        self.assertEqual(events, [{"type": "finish"}])
+        self.assertEqual(len(requests), 1)
+        request, timeout = requests[0]
+        self.assertEqual(timeout, 1.0)
+        self.assertEqual(
+            request.get_header("X-mitsuro-control-lease"),
+            "opaque-agent-token-1",
+        )
+
+    def test_json_mutation_forwards_control_header_without_retaining_it(self) -> None:
+        api = HARNESS.MitsuroApi("http://127.0.0.1:3100", 1.0)
+        requests = []
+
+        def open_json(request: Any, *, timeout: float) -> FakeJsonResponse:
+            requests.append((request, timeout))
+            return FakeJsonResponse()
+
+        with patch.object(HARNESS, "urlopen", side_effect=open_json):
+            response = api.json_request(
+                "POST",
+                "/api/chat/steer",
+                {"session_id": "session/one", "message": "steer", "content": []},
+                headers={"x-mitsuro-control-lease": "transient-token"},
+            )
+
+        self.assertEqual(response, {"ok": True})
+        self.assertEqual(len(requests), 1)
+        request, timeout = requests[0]
+        self.assertEqual(timeout, 1.0)
+        self.assertEqual(
+            request.get_header("X-mitsuro-control-lease"),
+            "transient-token",
+        )
+        self.assertNotIn("transient-token", repr(api.__dict__))
+
+    def test_chat_and_hive_streams_do_not_claim_or_send_control_header(self) -> None:
+        api = RecordingControlApi()
+        requests = []
+
+        def open_stream(request: Any, *, timeout: float) -> FakeSseResponse:
+            requests.append((request, timeout))
+            return FakeSseResponse()
+
+        with patch.object(HARNESS, "urlopen", side_effect=open_stream):
+            for session_type in ("chat", "hive"):
+                events, disconnected = api.chat_incremental(
+                    {
+                        "session_id": f"{session_type}-session",
+                        "session_type": session_type,
+                        "message": "hello",
+                    }
+                )
+                self.assertFalse(disconnected)
+                self.assertEqual(events, [{"type": "finish"}])
+
+        self.assertEqual(api.control_calls, [])
+        self.assertEqual(len(requests), 2)
+        for request, timeout in requests:
+            self.assertEqual(timeout, 1.0)
+            self.assertIsNone(request.get_header("X-mitsuro-control-lease"))
 
 
 class TraceConvergenceTests(unittest.TestCase):

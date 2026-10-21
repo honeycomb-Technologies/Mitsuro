@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copy cargo/mitsuro's SemVer into Expo marketing version fields.
+# Sync Expo marketing and Canvas AppStream metadata to the product version.
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
@@ -13,8 +13,9 @@ if [ -z "$version" ]; then
   exit 1
 fi
 
-python3 - "$version" "$app_json" "$mobile_pkg" <<'PY'
+python3 - "$version" "$app_json" "$mobile_pkg" "$root/apps/desktop/canvas/packaging/io.mitsuro.canvas.metainfo.xml" <<'PY'
 import json
+import datetime
 import sys
 from pathlib import Path
 
@@ -27,5 +28,15 @@ app_path.write_text(json.dumps(app, indent=2) + "\n")
 pkg = json.loads(pkg_path.read_text())
 pkg["version"] = version
 pkg_path.write_text(json.dumps(pkg, indent=2) + "\n")
-print(f"Synced Expo marketing version to {version}")
+metadata = Path(sys.argv[4])
+text = metadata.read_text()
+if f'<release version="{version}"' not in text:
+    date = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    entry = (f'\n    <release version="{version}" date="{date}" type="development">\n'
+             '      <description><p>Mitsuro Native Canvas desktop update.</p></description>\n'
+             '    </release>')
+    if '<releases>' not in text:
+        raise SystemExit("Canvas AppStream releases element is missing")
+    metadata.write_text(text.replace('<releases>', '<releases>' + entry, 1))
+print(f"Synced Expo and Canvas metadata to {version}")
 PY

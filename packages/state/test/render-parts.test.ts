@@ -4,6 +4,10 @@
  * Run: deno test packages/state/test/render-parts.test.ts
  */
 
+import { processStoredMessages } from "../src/session/messages.ts";
+import { getMessageText } from "../src/session/messageText.ts";
+import { MAX_MESSAGE_CONTENT_LENGTH } from "../src/session/constants.ts";
+
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
 };
@@ -44,4 +48,30 @@ Deno.test("joinAdjacentText does not invent separators", () => {
   assertEquals(joinAdjacentText("a\n", "b"), "a\nb", "preserve existing newline");
   assertEquals(joinAdjacentText("", "only"), "only", "empty existing");
   assertEquals(joinAdjacentText("only", ""), "only", "empty next");
+});
+
+Deno.test("canonical reload and plain text preserve ordered prose and exact separators", () => {
+  const [message] = processStoredMessages([{
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "Private reasoning is separate" },
+      { type: "text", text: "Hello " },
+      { type: "text", text: "world.\n" },
+      { type: "tool_use", id: "read-1", name: "Read", input: { path: "a.ts" } },
+      { type: "text", text: "The answer is complete." },
+    ],
+  }]);
+  assertEquals(message.content, "Hello world.\nThe answer is complete.", "reload must not invent newlines");
+  assertEquals(getMessageText(message), message.content, "ordered copy and convenience text agree below the bound");
+  assertEquals(getMessageText({ content: "legacy prose" }), "legacy prose", "old messages without parts retain copy support");
+});
+
+Deno.test("canonical reload bounds only the convenience text and keeps the complete answer", () => {
+  const answer = "a".repeat(MAX_MESSAGE_CONTENT_LENGTH) + "COMPLETE_TAIL";
+  const [message] = processStoredMessages([{
+    role: "assistant",
+    content: [{ type: "text", text: answer }],
+  }]);
+  assertEquals(message.content.length, MAX_MESSAGE_CONTENT_LENGTH, "one oversized block must respect the convenience bound");
+  assertEquals(getMessageText(message), answer, "the semantic answer must remain complete");
 });

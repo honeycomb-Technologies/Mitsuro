@@ -31,6 +31,21 @@ fn estimate_tokens(bytes: usize) -> usize {
     bytes.saturating_add(3) / 4
 }
 
+/// Count the exact serialized size without allocating a JSON copy of history.
+#[derive(Default)]
+struct JsonByteCounter(usize);
+
+impl std::io::Write for JsonByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 pub(crate) fn request_component_metrics(
     sections: &SystemPromptSections,
     messages: &[ModelMessage],
@@ -40,18 +55,20 @@ pub(crate) fn request_component_metrics(
     let identity_bytes = sections.identity_context.len();
     let project_bytes = sections.project_context.len();
     let session_bytes = sections.session_context.len();
-    let system_message_count = messages
-        .iter()
-        .filter(|message| message.role == Role::System)
-        .count();
-    let history_messages = messages
-        .iter()
-        .filter(|message| message.role != Role::System)
-        .collect::<Vec<_>>();
-    let history_bytes = history_messages
-        .iter()
-        .map(|message| serde_json::to_vec(message).map_or(0, |value| value.len()))
-        .sum();
+    let mut system_message_count = 0;
+    let mut history_message_count = 0;
+    let mut history_bytes = 0;
+    for message in messages {
+        if message.role == Role::System {
+            system_message_count += 1;
+        } else {
+            history_message_count += 1;
+            let mut size = JsonByteCounter::default();
+            if serde_json::to_writer(&mut size, message).is_ok() {
+                history_bytes += size.0;
+            }
+        }
+    }
 
     let mut sorted_tools = tools.unwrap_or_default().iter().collect::<Vec<_>>();
     sorted_tools.sort_by(|a, b| a.name.cmp(&b.name));
@@ -95,7 +112,7 @@ pub(crate) fn request_component_metrics(
         tool_schema_bytes,
         history_bytes,
         system_message_count,
-        history_message_count: history_messages.len(),
+        history_message_count,
         tool_count: sorted_tools.len(),
         request_content_bytes,
         estimated_tokens: estimate_tokens(request_content_bytes),
@@ -289,9 +306,7 @@ mod tests {
     fn message(role: Role, text: &str) -> ModelMessage {
         ModelMessage {
             role,
-            content: vec![Content::Text {
-                text: text.to_string(),
-            }],
+            content: vec![Content::text(text.to_string())],
         }
     }
 
@@ -426,3 +441,7 @@ mod tests {
             .expect("drop signal should be delivered");
     }
 }
+
+#[cfg(test)]
+#[path = "metrics_benchmark.rs"]
+mod metrics_benchmark;

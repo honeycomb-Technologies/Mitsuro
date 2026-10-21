@@ -36,9 +36,8 @@ use super::governance::{build_subagent_tool_context, delegated_is_explore, deleg
 const MAX_DELEGATED_POLICY_VIOLATIONS: usize = 3;
 const EXPLORER_STALE_SEQUENCE_THRESHOLD: usize = 3;
 const EXPLORER_SYNTHESIS_FILE_THRESHOLD: usize = 8;
-const LOOP_GUARD_LANDING_FALLBACK: &str =
-    "The delegated loop stopped after repeated work without enough new semantic progress.";
 const TURN_BUDGET_LANDING_INSTRUCTION: &str = "[TURN BUDGET LANDING]\nThis is the final provider turn reserved inside the delegated turn budget. No tools are available. Using only canonical evidence already gathered, give the parent a concise, truthful handoff now. State completed work, verification actually performed, and any unresolved gap. Do not request or describe another tool call, and do not claim unverified work succeeded.";
+const LOOP_GUARD_LANDING_FALLBACK: &str = crate::agent::loop_kernel::LANDING_FALLBACK_PARENT_AGENT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EvidenceCompletionDecision {
@@ -182,8 +181,9 @@ fn enforce_canonical_evidence(mut result: SubAgentResult, task: &SubAgentTask) -
 }
 
 fn loop_guard_landing_instruction(diagnostic: &str) -> String {
-    format!(
-        "[LOOP GUARD LANDING]\n{diagnostic}\n\nThis is the one bounded synthesis turn. No tools are available. Using only evidence already gathered, return a concise report to the parent with established findings, paths or changes, unresolved gaps, and the materially different direction needed to continue. Do not request or describe another tool call."
+    crate::agent::loop_kernel::loop_guard_landing_instruction(
+        diagnostic,
+        crate::agent::loop_kernel::LandingAudience::ParentAgent,
     )
 }
 
@@ -247,20 +247,16 @@ fn delegated_evidence_kind(
 }
 
 fn tool_call_requires_completion_shield(tool_name: &str, input: &serde_json::Value) -> bool {
-    let (effective_name, effective_input) = effective_tool_call(tool_name, input);
-    matches!(
-        tool_policy_for_call(effective_name, effective_input).category,
-        ToolCategory::Write
-    ) && effective_name != "bash"
+    crate::agent::loop_kernel::tool_call_requires_completion_shield(tool_name, input)
 }
 
 fn append_parent_messages(messages: &mut Vec<ModelMessage>, parent_messages: Vec<String>) {
     for message in parent_messages {
         messages.push(ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: format!("[PARENT MESSAGE]\n{message}\n[/PARENT MESSAGE]"),
-            }],
+            content: vec![Content::text(format!(
+                "[PARENT MESSAGE]\n{message}\n[/PARENT MESSAGE]"
+            ))],
         });
     }
 }
@@ -275,7 +271,7 @@ fn append_late_mailbox_continuation(
             role: Role::Assistant,
             content: assistant_text
                 .iter()
-                .map(|text| Content::Text { text: text.clone() })
+                .map(|text| Content::text(text.clone()))
                 .collect(),
         });
     }
@@ -458,11 +454,9 @@ fn compact_delegated_history(
         1,
         ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: format!(
+            content: vec![Content::text(format!(
                     "[DELEGATED COMPACTION CHECKPOINT]\nTrigger: {trigger}\nCompacted messages: {removed}\nEvidence paths: {paths}\nLatest synthesis: {last_output}\nContinue the original objective from this checkpoint; do not repeat completed work.\n[/DELEGATED COMPACTION CHECKPOINT]"
-                ),
-            }],
+                ))],
         },
     );
     true
@@ -549,9 +543,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
 
     let mut messages: Vec<ModelMessage> = vec![ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: task.prompt.clone(),
-        }],
+        content: vec![Content::text(task.prompt.clone())],
     }];
 
     let mut files_examined: Vec<String> = vec![];
@@ -858,9 +850,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
         ) {
             messages.push(ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: TURN_BUDGET_LANDING_INSTRUCTION.to_string(),
-                }],
+                content: vec![Content::text(TURN_BUDGET_LANDING_INSTRUCTION.to_string())],
             });
             turn_budget_landing_pending = true;
             send_progress(
@@ -881,9 +871,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
             if last_dynamic_context.as_deref() != Some(context.as_str()) {
                 messages.push(ModelMessage {
                     role: Role::User,
-                    content: vec![Content::Text {
-                        text: context.clone(),
-                    }],
+                    content: vec![Content::text(context.clone())],
                 });
                 last_dynamic_context = Some(context);
             }
@@ -1397,16 +1385,14 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
                         role: Role::Assistant,
                         content: text_parts
                             .iter()
-                            .map(|text| Content::Text { text: text.clone() })
+                            .map(|text| Content::text(text.clone()))
                             .collect(),
                     });
                 }
                 messages.push(ModelMessage {
                     role: Role::User,
-                    content: vec![Content::Text {
-                        text: "Your previous response hit the provider output limit and is incomplete. Using only evidence already gathered, return one concise final answer now. Do not call more tools. State what is established and any remaining gap; omit repeated detail."
-                            .to_string(),
-                    }],
+                    content: vec![Content::text("Your previous response hit the provider output limit and is incomplete. Using only evidence already gathered, return one concise final answer now. Do not call more tools. State what is established and any remaining gap; omit repeated detail."
+                            .to_string())],
                 });
                 send_progress(
                     AgentProgressStatus::Running,
@@ -1532,9 +1518,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
             tool_truth_corrections += 1;
             messages.push(ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: "Correction: the previous tool calls returned real data. You must treat successful tool output as ground truth and use it directly. Do not claim the results were empty or that nothing worked. Summarize the evidence from the returned paths/content instead of rechecking blindly.".to_string(),
-                }],
+                content: vec![Content::text("Correction: the previous tool calls returned real data. You must treat successful tool output as ground truth and use it directly. Do not claim the results were empty or that nothing worked. Summarize the evidence from the returned paths/content instead of rechecking blindly.".to_string())],
             });
             send_progress(
                 AgentProgressStatus::Running,
@@ -1558,10 +1542,8 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
                     canonical_evidence_correction_requested = true;
                     messages.push(ModelMessage {
                         role: Role::User,
-                        content: vec![Content::Text {
-                            text: "You have not gathered canonical evidence from the governed tool surface yet. Before finishing, use at least one available tool that directly supports the assigned objective, then report only what that tool result establishes. Do not claim completion from prose alone."
-                                .to_string(),
-                        }],
+                        content: vec![Content::text("You have not gathered canonical evidence from the governed tool surface yet. Before finishing, use at least one available tool that directly supports the assigned objective, then report only what that tool result establishes. Do not claim completion from prose alone."
+                                .to_string())],
                     });
                     send_progress(
                         AgentProgressStatus::Running,
@@ -1611,9 +1593,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
                     forced_read_before_completion = true;
                     messages.push(ModelMessage {
                         role: Role::User,
-                        content: vec![Content::Text {
-                            text: "You have not gathered any real path evidence yet. Before you finish, use the current working directory to inspect the most relevant files or directories, then produce the required <explore_report> with those paths in `paths_examined` and any concrete reads in `files_examined`. Do not stop yet.".to_string(),
-                        }],
+                        content: vec![Content::text("You have not gathered any real path evidence yet. Before you finish, use the current working directory to inspect the most relevant files or directories, then produce the required <explore_report> with those paths in `paths_examined` and any concrete reads in `files_examined`. Do not stop yet.".to_string())],
                     });
                     send_progress(
                         AgentProgressStatus::Running,
@@ -1630,9 +1610,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
                     structured_report_repair_requested = true;
                     messages.push(ModelMessage {
                         role: Role::User,
-                        content: vec![Content::Text {
-                            text: "Your previous response did not include the required <explore_report> JSON block. Using only the evidence you already gathered, reply now with exactly one valid <explore_report> block followed by exactly one valid <delegated_handoff> block as the final content. Include all supporting paths in `paths_examined`, concrete reads in `files_examined`, and a truthful objective status. Do not call more tools unless a single critical read is required.".to_string(),
-                        }],
+                        content: vec![Content::text("Your previous response did not include the required <explore_report> JSON block. Using only the evidence you already gathered, reply now with exactly one valid <explore_report> block followed by exactly one valid <delegated_handoff> block as the final content. Include all supporting paths in `paths_examined`, concrete reads in `files_examined`, and a truthful objective status. Do not call more tools unless a single critical read is required.".to_string())],
                     });
                     send_progress(
                         AgentProgressStatus::Running,
@@ -1660,9 +1638,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
                 };
                 messages.push(ModelMessage {
                     role: Role::User,
-                    content: vec![Content::Text {
-                        text: repair_instruction.to_string(),
-                    }],
+                    content: vec![Content::text(repair_instruction.to_string())],
                 });
                 send_progress(
                     AgentProgressStatus::Running,
@@ -1684,12 +1660,10 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
                 browser_acceptance_correction_requested = true;
                 messages.push(ModelMessage {
                     role: Role::User,
-                    content: vec![Content::Text {
-                        text: format!(
+                    content: vec![Content::text(format!(
                             "Your handoff is missing required canonical browser evidence: {}. The governed browser_check tool is present and authorized in your current tool list. Use it now against the tracked loopback preview; start or repair that preview with bash first if needed. Do not report browser_check as unavailable. A build, curl, or HTTP 200 is not a substitute. If the check fails, fix an in-scope product issue and retry once before returning a truthful handoff.",
                             missing_browser_proofs.join(", ")
-                        ),
-                    }],
+                        ))],
                 });
                 send_progress(
                     AgentProgressStatus::Running,
@@ -1808,7 +1782,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
 
         let mut assistant_content: Vec<Content> = text_parts
             .iter()
-            .map(|t| Content::Text { text: t.clone() })
+            .map(|t| Content::text(t.clone()))
             .collect();
 
         let mut cycle_new_files = 0usize;
@@ -2070,10 +2044,8 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
             structured_handoff_repair_pending = true;
             messages.push(ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: "The one bounded critical-gap tool cycle is complete. No more tools are available. Using the evidence now gathered, return the concise final report and the exact required structured handoff with every acceptance-check id. Do not describe another intended tool call."
-                        .to_string(),
-                }],
+                content: vec![Content::text("The one bounded critical-gap tool cycle is complete. No more tools are available. Using the evidence now gathered, return the concise final report and the exact required structured handoff with every acceptance-check id. Do not describe another intended tool call."
+                        .to_string())],
             });
             send_progress(
                 AgentProgressStatus::Running,
@@ -2085,17 +2057,10 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
             );
             continue;
         }
-        if let Some(instruction) = progress_telemetry
-            .as_ref()
-            .and_then(|telemetry| telemetry.replan_instruction())
-        {
-            messages.push(ModelMessage {
-                role: Role::User,
-                content: vec![Content::Text {
-                    text: instruction.to_string(),
-                }],
-            });
-        }
+        crate::agent::progress::refresh_progress_feedback(
+            &mut messages,
+            progress_telemetry.as_ref(),
+        );
         if let Some(completion) = validation_completion {
             info!(
                 task_id = %task_id,
@@ -2151,9 +2116,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
             );
             messages.push(ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: loop_guard_landing_instruction(&diagnostic),
-                }],
+                content: vec![Content::text(loop_guard_landing_instruction(&diagnostic))],
             });
             loop_guard_landing = Some(diagnostic);
             send_progress(
@@ -2185,9 +2148,7 @@ async fn execute_agent_loop_inner<C: AgentConfig>(
                     stale_readonly_cycles = 0;
                     messages.push(ModelMessage {
                         role: Role::User,
-                        content: vec![Content::Text {
-                            text: "You now have enough evidence to answer the investigation. Stop exploring. Do not call more tools unless a critical gap prevents answering. Provide a concise summary covering architecture, key modules, design patterns, main concerns, and the most important files examined.".to_string(),
-                        }],
+                        content: vec![Content::text("You now have enough evidence to answer the investigation. Stop exploring. Do not call more tools unless a critical gap prevents answering. Provide a concise summary covering architecture, key modules, design patterns, main concerns, and the most important files examined.".to_string())],
                     });
                     send_progress(
                         AgentProgressStatus::Running,
@@ -2775,9 +2736,7 @@ mod tests {
     fn delegated_compaction_keeps_objective_checkpoint_and_complete_tail() {
         let mut messages = vec![ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "original objective".to_string(),
-            }],
+            content: vec![Content::text("original objective".to_string())],
         }];
         for index in 0..20 {
             messages.push(ModelMessage {
@@ -2786,9 +2745,7 @@ mod tests {
                 } else {
                     Role::User
                 },
-                content: vec![Content::Text {
-                    text: format!("turn {index}"),
-                }],
+                content: vec![Content::text(format!("turn {index}"))],
             });
         }
         let original_len = messages.len();
@@ -2804,7 +2761,7 @@ mod tests {
         assert!(matches!(messages[1].role, Role::User));
         assert!(matches!(messages[2].role, Role::Assistant));
         let checkpoint = match &messages[1].content[0] {
-            Content::Text { text } => text,
+            Content::Text { text, .. } => text,
             _ => panic!("checkpoint must be text"),
         };
         assert!(checkpoint.contains("DELEGATED COMPACTION CHECKPOINT"));

@@ -85,7 +85,6 @@ fn resolve_scroll(
     match anchor_mode {
         AnchorMode::FollowLive => (maximum_scroll, None),
         AnchorMode::ScrollTop(offset) => ((*offset).min(maximum_scroll), None),
-        AnchorMode::Top => (0, None),
         AnchorMode::Fixed(anchor) => {
             let absolute_row = items
                 .iter()

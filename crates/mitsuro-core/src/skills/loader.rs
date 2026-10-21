@@ -427,65 +427,6 @@ pub(crate) fn read_utf8_file_bounded(path: &Path, max_bytes: usize, label: &str)
         .with_context(|| format!("{label} is not valid UTF-8: {}", path.display()))
 }
 
-pub fn ensure_skills_dir(dir: &Path) -> Result<()> {
-    if !dir.exists() {
-        fs::create_dir_all(dir)?;
-    }
-    Ok(())
-}
-
-/// Scaffold a valid Agent Skills directory.
-pub fn scaffold_skill(dir: &Path, name: &str, description: &str) -> Result<PathBuf> {
-    validate_skill_name(name)?;
-    let description = description.trim();
-    if !(1..=1024).contains(&description.chars().count()) {
-        return Err(anyhow!(
-            "Skill description must be between 1 and 1024 characters"
-        ));
-    }
-
-    let skill_dir = dir.join(name);
-    if skill_dir.exists() {
-        return Err(anyhow!("Skill '{name}' already exists"));
-    }
-    fs::create_dir_all(&skill_dir)?;
-
-    #[derive(Serialize)]
-    struct ScaffoldFrontmatter<'a> {
-        name: &'a str,
-        description: &'a str,
-        version: &'a str,
-    }
-    let frontmatter = ScaffoldFrontmatter {
-        name,
-        description,
-        version: "0.1.0",
-    };
-    let yaml = serde_yaml::to_string(&frontmatter)?;
-    let skill_content = format!(
-        "---\n{yaml}---\n\n# {}\n\n## Quick Start\n\n[Add quick start instructions here]\n\n## Usage\n\n[Add usage instructions here]\n\n## Examples\n\n[Add examples here]\n",
-        humanize_skill_name(name)
-    );
-    fs::write(skill_dir.join("SKILL.md"), skill_content)?;
-    Ok(skill_dir)
-}
-
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => String::new(),
-    }
-}
-
-fn humanize_skill_name(name: &str) -> String {
-    name.split('-')
-        .filter(|part| !part.is_empty())
-        .map(capitalize_first)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,15 +440,6 @@ mod tests {
             format!("---\nname: {name}\ndescription: Test skill\n---\nBody"),
         )
         .unwrap();
-    }
-
-    #[test]
-    fn scaffold_is_valid_and_yaml_safe() {
-        let temp = tempdir().unwrap();
-        let result = scaffold_skill(temp.path(), "test-skill", "A: test skill").unwrap();
-        let skill = load_skill(&result, SkillSource::Global).unwrap();
-        assert_eq!(skill.name, "test-skill");
-        assert_eq!(skill.description, "A: test skill");
     }
 
     #[test]

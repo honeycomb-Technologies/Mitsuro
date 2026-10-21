@@ -36,11 +36,9 @@ pub(super) fn load_tick_conversation(
 fn build_tick_message(tick_number: usize) -> ModelMessage {
     ModelMessage {
         role: Role::User,
-        content: vec![Content::Text {
-            text: format!(
+        content: vec![Content::text(format!(
                 "<tick>\nAutonomous wake #{tick_number}. Reassess the current task graph, recent progress, and whether to act, communicate, or sleep again.\n</tick>"
-            ),
-        }],
+            ))],
     }
 }
 
@@ -89,7 +87,7 @@ mod tests {
         assert_eq!(conversation.len(), 3);
         assert!(matches!(
             &conversation[2].content[0],
-            Content::Text { text }
+            Content::Text { text, .. }
                 if text.contains("<tick>")
                     && text.contains("Autonomous wake #2")
                     && text.contains("sleep again")

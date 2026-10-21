@@ -189,6 +189,8 @@ pub(super) async fn get_session_state(
         .last()
         .map(|event| event.event_id)
         .or(query.delegation_after_cursor);
+    let (agent_stream_generation, agent_stream_sequence) =
+        state.agent_streams.read().await.cursor(&id);
 
     Ok(Json(SessionStateResponse {
         id,
@@ -208,6 +210,8 @@ pub(super) async fn get_session_state(
         delegation_events,
         delegation_event_cursor,
         last_event_sequence,
+        agent_stream_generation,
+        agent_stream_sequence,
     }))
 }
 

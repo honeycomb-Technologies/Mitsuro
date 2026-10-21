@@ -38,8 +38,8 @@ use super::{
     prepare_chat_contract_for_test, run_delegated_progress_bridge, run_orchestrator_event_bridge,
     select_model_for_chat_request, setup_chat_session, steer, tool_approval, RequestedModel,
 };
-use crate::auth::{AuthenticatedUser, CurrentUser};
 use crate::error::AppError;
+use crate::routes::test_support::current_user;
 use crate::types::{ChatRequest, ContentBlock, SteerRequest, ToolApprovalRequest};
 use crate::AppState;
 
@@ -69,6 +69,10 @@ fn create_test_state() -> (AppState, PathBuf) {
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             session_inputs: Arc::new(RwLock::new(HashMap::new())),
             session_presence: Arc::new(RwLock::new(HashMap::new())),
+            session_control_leases: Arc::new(RwLock::new(
+                crate::control_leases::SessionControlLeaseRegistry::default(),
+            )),
+            agent_streams: Arc::new(RwLock::new(crate::agent_streams::AgentStreamHub::default())),
             delegated_state: Arc::new(RwLock::new(HashMap::new())),
             remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                 enabled: true,
@@ -96,11 +100,19 @@ fn create_test_user(state: &AppState, user_id: &str) {
         .expect("user should insert");
 }
 
-fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
-    CurrentUser(AuthenticatedUser {
-        user_id: Some(user_id.to_string()),
-        home_dir: Some(home_dir.to_path_buf()),
-    })
+async fn code_control_headers(state: &AppState, session_id: &str) -> HeaderMap {
+    let lease = state
+        .session_control_leases
+        .write()
+        .await
+        .take(session_id, "server-test-controller".to_owned(), false)
+        .expect("test controller should acquire the exact Code session lease");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        crate::control_leases::CONTROL_LEASE_HEADER,
+        lease.lease_token.parse().expect("lease token header value"),
+    );
+    headers
 }
 
 fn test_delegated_progress(
@@ -911,7 +923,7 @@ fn build_user_content_appends_message_when_only_images_are_provided() {
     assert!(matches!(content.first(), Some(Content::Image { .. })));
     assert!(matches!(
         content.last(),
-        Some(Content::Text { text }) if text == "describe this"
+        Some(Content::Text { text, .. }) if text == "describe this"
     ));
 }
 
@@ -930,7 +942,7 @@ fn build_user_content_does_not_duplicate_message_when_text_block_exists() {
     assert_eq!(content.len(), 1);
     assert!(matches!(
         content.first(),
-        Some(Content::Text { text }) if text == "block text"
+        Some(Content::Text { text, .. }) if text == "block text"
     ));
 }
 
@@ -950,7 +962,7 @@ fn build_user_content_preserves_file_attachment_text_block() {
     assert_eq!(content.len(), 1);
     assert!(matches!(
         content.first(),
-        Some(Content::Text { text }) if text == file_text
+        Some(Content::Text { text, .. }) if text == file_text
     ));
 }
 
@@ -974,7 +986,7 @@ fn build_user_content_rejects_unsupported_image_media_type() {
 }
 
 #[tokio::test]
-async fn select_model_for_chat_request_falls_back_to_configured_vision_model() {
+async fn select_model_for_chat_request_rejects_non_vision_session_model() {
     let (state, _temp_dir) = create_test_state();
     {
         let mut credentials = state.credential_store.write().await;
@@ -1015,9 +1027,14 @@ async fn select_model_for_chat_request_falls_back_to_configured_vision_model() {
     )
     .await;
 
+    // Silent model substitution is a product rule violation: the request must
+    // fail explicitly instead of switching to another vision model.
     match selected {
-        Ok(selected) => assert_eq!(selected.as_deref(), Some("gpt-4.1")),
-        Err(_) => panic!("vision fallback should resolve"),
+        Ok(_) => panic!("non-vision session model must not be silently substituted"),
+        Err(AppError::BadRequest(detail)) => {
+            assert!(detail.contains("does not support image input"));
+        }
+        Err(other) => panic!("unexpected error: {other:?}"),
     }
 }
 
@@ -1103,9 +1120,7 @@ async fn live_steering_retries_the_replacement_run_sender_once() {
         .insert(session_id.clone(), replacement_tx);
     let input = LoopInput::Steer {
         pending_id: Some("steer-rollover".into()),
-        content: vec![Content::Text {
-            text: "use the new run".into(),
-        }],
+        content: vec![Content::text("use the new run".into())],
     };
 
     assert!(
@@ -1118,7 +1133,7 @@ async fn live_steering_retries_the_replacement_run_sender_once() {
             pending_id: Some(pending_id),
             content,
         }) if pending_id == "steer-rollover"
-            && matches!(content.first(), Some(Content::Text { text }) if text == "use the new run")
+            && matches!(content.first(), Some(Content::Text { text, .. }) if text == "use the new run")
     ));
 }
 
@@ -1152,10 +1167,11 @@ async fn live_steering_is_owner_checked_and_hidden_until_core_injection() {
     assert!(matches!(foreign, Err(AppError::NotFound(_))));
     assert!(input_rx.try_recv().is_err());
 
+    let control_headers = code_control_headers(&state, &session_id).await;
     let accepted = steer(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
+        control_headers,
         Json(SteerRequest {
             session_id: session_id.clone(),
             message: "change direction".into(),
@@ -1173,7 +1189,7 @@ async fn live_steering_is_owner_checked_and_hidden_until_core_injection() {
         Some(LoopInput::Steer {
             pending_id: Some(_),
             content,
-        }) if matches!(content.first(), Some(Content::Text { text }) if text == "change direction")
+        }) if matches!(content.first(), Some(Content::Text { text, .. }) if text == "change direction")
     ));
     assert!(
         manager
@@ -1248,10 +1264,11 @@ async fn submit_tool_approval_returns_recoverable_pending_approval_error_when_ch
         .update_recovery_state(&session_id, &recovery)
         .expect("pending approval recovery should persist");
 
+    let control_headers = code_control_headers(&state, &session_id).await;
     let result = tool_approval(
         State(state),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
-        HeaderMap::new(),
+        control_headers,
         Json(ToolApprovalRequest {
             session_id: session_id.clone(),
             run_id: None,
@@ -1302,6 +1319,7 @@ async fn tool_approval_survives_sse_disconnect_until_run_finishes() {
         None,
         Some("alice".to_string()),
         Arc::clone(&state.db_path),
+        None,
         Arc::new(Mutex::new(true)),
     ));
 
@@ -1324,10 +1342,11 @@ async fn tool_approval_survives_sse_disconnect_until_run_finishes() {
     .await
     .expect("session input should stay registered after stream loss");
 
+    let control_headers = code_control_headers(&state, &session_id).await;
     let approval = tool_approval(
         State(state.clone()),
         Some(current_user("alice", std::path::Path::new("/tmp"))),
-        HeaderMap::new(),
+        control_headers,
         Json(ToolApprovalRequest {
             session_id: session_id.clone(),
             run_id: None,
@@ -1546,6 +1565,7 @@ async fn foreground_finish_closes_sse_while_detached_progress_keeps_updating_sta
         None,
         None,
         Arc::clone(&state.db_path),
+        None,
         Arc::clone(&sse_open),
     ));
 
@@ -1786,6 +1806,7 @@ async fn full_undrained_sse_does_not_hold_foreground_finish_or_session_input_ope
         None,
         None,
         Arc::clone(&state.db_path),
+        None,
         Arc::clone(&sse_open),
     ));
 
@@ -1871,6 +1892,7 @@ async fn required_error_then_finish_does_not_hold_undrained_sse_or_session_input
         None,
         None,
         Arc::clone(&state.db_path),
+        None,
         Arc::clone(&sse_open),
     ));
 
@@ -2051,10 +2073,11 @@ async fn chat_does_not_persist_model_override_when_setup_fails() {
         )
         .expect("session should be created");
 
+    let control_headers = code_control_headers(&state, &session_id).await;
     let result = chat(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        HeaderMap::new(),
+        control_headers,
         Json(ChatRequest {
             session_id: Some(session_id.clone()),
             message: "hello".to_string(),

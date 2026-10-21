@@ -1,4 +1,4 @@
-import type { ToolCall } from "@mitsuro/api";
+import { mergeCitations, type Citation, type ToolCall } from "@mitsuro/api";
 
 export type AssistantVisualSegment =
   | {
@@ -10,6 +10,7 @@ export type AssistantVisualSegment =
       type: "text";
       id: string;
       content: string;
+      citations?: Citation[];
     }
   | {
       type: "attachments";
@@ -32,61 +33,8 @@ function isSoftInterruption(segment: AssistantVisualSegment): boolean {
   return segment.type === "exploration" || segment.type === "tool";
 }
 
-export function startsLikeNewBlock(content: string): boolean {
+function startsLikeNewBlock(content: string): boolean {
   return /^(#{1,6}\s|[-*+]\s|\d+[.)]\s|```|>|<\w)/.test(content);
-}
-
-/** Exported for unit tests — mid-stream tool interruptions rejoin prose. */
-export function shouldMergeContinuationText(
-  previousContent: string,
-  nextContent: string,
-  interveningSegments: AssistantVisualSegment[],
-): boolean {
-  return shouldMergeContinuationTextState(
-    previousContent,
-    nextContent,
-    interveningSegments.length > 0,
-    interveningSegments.every(isSoftInterruption),
-  );
-}
-
-function shouldMergeContinuationTextState(
-  previousContent: string,
-  nextContent: string,
-  hasInterveningSegments: boolean,
-  interveningSegmentsAreSoft: boolean,
-): boolean {
-  if (!hasInterveningSegments || !interveningSegmentsAreSoft) return false;
-
-  const previous = previousContent.trimEnd();
-  const next = nextContent.trimStart();
-  if (!previous || !next || startsLikeNewBlock(next)) return false;
-
-  // Do not glue across closed code fences / list boundaries left unfinished.
-  if (/```\s*$/.test(previous) || /^```/.test(next)) return false;
-
-  const previousLooksUnfinished =
-    /[A-Za-z0-9_/'")\]]$/.test(previous) || /[A-Za-z0-9]\s+$/u.test(previousContent);
-  // Lowercase continuation, punctuation, or a short trailing fragment after a tool.
-  const nextLooksContinued =
-    /^[a-z,.;:!?'"()\]}]/.test(next) ||
-    (/^[A-Za-z][A-Za-z0-9/_-]*[.!?]?$/.test(next) && previousLooksUnfinished);
-
-  return previousLooksUnfinished && nextLooksContinued;
-}
-
-export function appendContinuationText(previous: string, next: string): string {
-  if (!previous) return next;
-  if (!next) return previous;
-  if (/\s$/.test(previous) || /^\s/.test(next)) return previous + next;
-
-  const left = previous[previous.length - 1] ?? "";
-  const right = next.trimStart()[0] ?? "";
-  // "we only" + "skimmed." / "server/mobile" + "edges." need a joining space.
-  if (/[A-Za-z0-9_/'")\]]/.test(left) && /[A-Za-z0-9("'[]/.test(right)) {
-    return `${previous} ${next.trimStart()}`;
-  }
-  return previous + next.trimStart();
 }
 
 interface ActiveTextAccumulator {
@@ -200,6 +148,15 @@ export function smoothInterruptedText(
       )
     ) {
       appendToAccumulator(activeText, segment.content);
+      if (segment.citations?.length) {
+        const previous = smoothed[activeText.index];
+        if (previous.type === "text") {
+          smoothed[activeText.index] = {
+            ...previous,
+            citations: mergeCitations(previous.citations, segment.citations),
+          };
+        }
+      }
       continue;
     }
 

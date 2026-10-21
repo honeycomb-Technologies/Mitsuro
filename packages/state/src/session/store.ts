@@ -111,6 +111,8 @@ const WORKER_DM_BLOCKED_BY_NON_CONVERSATION_RUN =
   "Worker direct message is blocked by non-conversation run";
 const QUEUED_RECOVERY_UNCERTAIN_MESSAGE =
   "A queued message may already have been delivered. Review the conversation, then retry or discard that queued message.";
+const SESSION_STOP_PENDING_MESSAGE =
+  "The response is still stopping. Try this message again when Stop finishes.";
 
 function isWorkerDmBlockedByNonConversationRunMessage(
   message: string,
@@ -257,7 +259,16 @@ export function createSessionStore(
     sessionId: string;
     generation: number;
   } | null = null;
-  let workerStopSettlementGeneration = 0;
+  let stopGeneration = 0;
+  // Ordinary responses keep their visible draft on Stop, but detaching SSE is
+  // not evidence that the server stopped. Reconcile the cancellation receipt
+  // against a fresh snapshot before allowing another send.
+  let activeSessionStopSettlement: {
+    sessionId: string;
+    generation: number;
+    readyForSnapshot: boolean;
+    error: string | null;
+  } | null = null;
 
   let localStreamGeneration: number | null = null;
   const stoppedStreamGenerations = new Set<number>();
@@ -426,7 +437,7 @@ export function createSessionStore(
     generation: number,
   ): void {
     if (
-      workerStopSettlementGeneration === generation &&
+      stopGeneration === generation &&
       activeWorkerStopSettlement?.sessionId === sessionId &&
       activeWorkerStopSettlement.generation === generation
     ) {
@@ -442,7 +453,7 @@ export function createSessionStore(
     settlePresentation: () => void,
   ): Promise<void> {
     const isCurrent = () =>
-      workerStopSettlementGeneration === generation &&
+      stopGeneration === generation &&
       getState().sessionId === sessionId &&
       activeWorkerStopSettlement?.sessionId === sessionId &&
       activeWorkerStopSettlement.generation === generation &&
@@ -707,6 +718,72 @@ export function createSessionStore(
 
   return create<SessionStoreState>((set, get) => {
     readStoreState = get;
+
+    function pendingSessionStop(sessionId: string | null) {
+      const pending = activeSessionStopSettlement;
+      return pending?.sessionId === sessionId &&
+          pending.generation === stopGeneration
+        ? pending
+        : null;
+    }
+
+    function reconcileSessionStopSnapshot(
+      sessionId: string,
+      serverState: ApiSessionStateResponse | null,
+    ): void {
+      const pending = pendingSessionStop(sessionId);
+      if (!pending || get().sessionId !== sessionId) return;
+      if (
+        pending.readyForSnapshot && serverState &&
+        (pending.error !== null ||
+          isTerminalSessionAgentState(serverState.agent_state) ||
+          isActionableSessionAgentState(serverState.agent_state))
+      ) {
+        // AskUser/PlanConfirm can finish before Cancel reaches the server.
+        // Their authoritative awaiting_input snapshot settles this response
+        // while preserving the interaction for a later user continuation.
+        // A live tool approval remains tool_executing and keeps Stop pending.
+        activeSessionStopSettlement = null;
+        if (pending.error) set({ error: pending.error });
+        return;
+      }
+      // A missing/old snapshot or a still-running accepted Stop must not make
+      // the composer look idle. Polling owns the terminal/actionable transition.
+      set({
+        isLoading: !pending.readyForSnapshot,
+        isStreaming: true,
+        ...(pending.error ? { error: pending.error } : {}),
+      });
+    }
+
+    async function stopOrdinarySession(sessionId: string, generation: number) {
+      const settlement = pendingSessionStop(sessionId);
+      if (!settlement || settlement.generation !== generation) return;
+      const isCurrent = () =>
+        get().sessionId === sessionId &&
+        pendingSessionStop(sessionId) === settlement;
+      try {
+        await client.cancelSession(sessionId);
+      } catch (error) {
+        if (!isCurrent()) return;
+        settlement.error = toErrorMessage(error, "Unable to stop the response");
+        set({ error: settlement.error });
+      }
+      if (!isCurrent()) return;
+      // A load started before the receipt cannot prove Stop's outcome. Let it
+      // drain, then request a fresh canonical transcript/status pair.
+      await inFlightSessionLoads.get(sessionId);
+      await inFlightSessionHydrations.get(sessionId)?.catch(() => {});
+      if (!isCurrent()) return;
+      settlement.readyForSnapshot = true;
+      await get().loadSession(sessionId, true);
+      if (!isCurrent()) return;
+      // loadSession also handles errors internally. If it could not establish
+      // terminal state, retain pending ownership and retry through normal polls.
+      reconcileSessionStopSnapshot(sessionId, null);
+      get().startStatePolling(sessionId);
+    }
+
     function applyStreamFailure(err: unknown) {
       set((s) => ({
         isLoading: false,
@@ -1126,7 +1203,7 @@ export function createSessionStore(
         const invocationSessionId = get().sessionId;
         const invocationSelectionGeneration = sessionSelectionGeneration;
         const invocationStopSettlementGeneration =
-          workerStopSettlementGeneration;
+          stopGeneration;
         if (
           invocationSessionId &&
           queuedSuccessorRecovery.isDeletionAdmitted(invocationSessionId)
@@ -1168,11 +1245,14 @@ export function createSessionStore(
         if (
           pendingStop &&
           pendingStop.sessionId === get().sessionId &&
-          pendingStop.generation === workerStopSettlementGeneration
+          pendingStop.generation === stopGeneration
         ) {
           throw new Error(
             "The Hive Worker is still stopping. Try this message again when Stop finishes.",
           );
+        }
+        if (pendingSessionStop(get().sessionId)) {
+          throw new Error(SESSION_STOP_PENDING_MESSAGE);
         }
         if (queuedSuccessor) {
           const claimSessionId = queuedSuccessor.sessionId;
@@ -1216,7 +1296,7 @@ export function createSessionStore(
             };
             if (
               !isInvocationCurrent() ||
-              workerStopSettlementGeneration !==
+              stopGeneration !==
                 invocationStopSettlementGeneration ||
               queuedSuccessorRecovery.isDeletionAdmitted(claimSessionId) ||
               queuedSuccessorClaims.get(claimSessionId) !== queuedClaimToken
@@ -1531,7 +1611,7 @@ export function createSessionStore(
           if (
             !isInvocationCurrent() ||
             queuedSuccessorRecovery.isDeletionAdmitted(steerSessionId) ||
-            workerStopSettlementGeneration !==
+            stopGeneration !==
               invocationStopSettlementGeneration
           ) {
             await releaseUndispatchedQueuedSuccessor(queuedSuccessor);
@@ -2494,7 +2574,7 @@ export function createSessionStore(
               queuedSuccessorRecovery.isDeletionAdmitted(
                 queuedSuccessor.sessionId,
               ) ||
-              workerStopSettlementGeneration !==
+              stopGeneration !==
                 invocationStopSettlementGeneration
             ) {
               await releaseUndispatchedQueuedSuccessor(queuedSuccessor);
@@ -2848,7 +2928,7 @@ export function createSessionStore(
           activeWorkerResponseBoundary = null;
           pendingStoppedWorkerResponse = null;
           activeWorkerStopSettlement = null;
-          workerStopSettlementGeneration += 1;
+          stopGeneration += 1;
           deferredCanonicalReloads.delete(sessionId);
           get().stopStatePolling();
           stopPresenceTransport(sessionId);
@@ -3084,7 +3164,7 @@ export function createSessionStore(
             activeWorkerResponseBoundary = null;
             pendingStoppedWorkerResponse = null;
             activeWorkerStopSettlement = null;
-            workerStopSettlementGeneration += 1;
+            stopGeneration += 1;
             get().stopStatePolling();
             stopPresenceTransport(previousSessionId);
             planStore.getState().setWorkflow(null);
@@ -3524,6 +3604,7 @@ export function createSessionStore(
                 finishSnapshotPublishSpan();
               }
             })();
+            reconcileSessionStopSnapshot(sessionId, serverState);
             queueMicrotask(() => resumeQueuedRecovery(sessionId));
             try {
               storage.set(
@@ -3668,7 +3749,7 @@ export function createSessionStore(
         activeWorkerResponseBoundary = null;
         pendingStoppedWorkerResponse = null;
         activeWorkerStopSettlement = null;
-        workerStopSettlementGeneration += 1;
+        stopGeneration += 1;
         get().stopStatePolling();
         stopPresenceTransport(current.sessionId);
         set({
@@ -3705,7 +3786,7 @@ export function createSessionStore(
         activeWorkerResponseBoundary = null;
         pendingStoppedWorkerResponse = null;
         activeWorkerStopSettlement = null;
-        workerStopSettlementGeneration += 1;
+        stopGeneration += 1;
         get().stopStatePolling();
         stopPresenceTransport(current.sessionId);
         const nextPermissionMode = permissionMode ?? current.permissionMode;
@@ -3923,6 +4004,9 @@ export function createSessionStore(
         if (!state.sessionId) {
           throw new Error("No active session");
         }
+        if (pendingSessionStop(state.sessionId)) {
+          throw new Error(SESSION_STOP_PENDING_MESSAGE);
+        }
 
         set((s) => ({
           messages: s.messages.map((m) => ({
@@ -4063,6 +4147,9 @@ export function createSessionStore(
       async submitToolApproval(toolCallId: string, approved: boolean) {
         const state = get();
         if (!state.sessionId) return;
+        if (pendingSessionStop(state.sessionId)) {
+          throw new Error(SESSION_STOP_PENDING_MESSAGE);
+        }
         const targetSessionId = state.sessionId;
         const approvalAttachmentGeneration = streamAttachmentGeneration;
         const isApprovalOriginCurrent = () =>
@@ -4105,7 +4192,7 @@ export function createSessionStore(
         activeWorkerResponseBoundary = null;
         pendingStoppedWorkerResponse = null;
         activeWorkerStopSettlement = null;
-        workerStopSettlementGeneration += 1;
+        stopGeneration += 1;
         get().stopStatePolling();
         get().stopPresenceHeartbeat(activeSessionId);
         set((s) => ({
@@ -4125,6 +4212,9 @@ export function createSessionStore(
           options.expectedSessionId &&
           options.expectedSessionId !== activeSessionId
         ) {
+          return;
+        }
+        if (pendingSessionStop(activeSessionId)?.readyForSnapshot === false) {
           return;
         }
         const workerBoundary = activeSessionId !== null &&
@@ -4151,7 +4241,7 @@ export function createSessionStore(
         localStreamGeneration = null;
         activeHiveStreamOwner = null;
         activeWorkerResponseBoundary = null;
-        const stopSettlementGeneration = ++workerStopSettlementGeneration;
+        const stopSettlementGeneration = ++stopGeneration;
         pendingStoppedWorkerResponse = shouldCancel && isWorkerResponse &&
             activeSessionId !== null
           ? workerBoundary ?? { sessionId: activeSessionId, runId: null }
@@ -4163,10 +4253,19 @@ export function createSessionStore(
             generation: stopSettlementGeneration,
           }
           : null;
+        activeSessionStopSettlement = shouldCancel && !isWorkerResponse &&
+            activeSessionId
+          ? {
+            sessionId: activeSessionId,
+            generation: stopSettlementGeneration,
+            readyForSnapshot: false,
+            error: null,
+          }
+          : null;
         get().stopStatePolling();
         set((s) => ({
-          isLoading: false,
-          isStreaming: false,
+          isLoading: shouldCancel && !isWorkerResponse,
+          isStreaming: shouldCancel && !isWorkerResponse,
           isThinking: false,
           thinkingContent: "",
           messages: pruneEmptyAssistantMessages(
@@ -4177,7 +4276,7 @@ export function createSessionStore(
         }));
         if (!shouldCancel || !activeSessionId) return;
         if (!workerBoundary && !isWorkerResponse) {
-          void client.cancelSession(activeSessionId).catch(() => undefined);
+          void stopOrdinarySession(activeSessionId, stopSettlementGeneration);
           return;
         }
         void (async () => {
@@ -4186,7 +4285,7 @@ export function createSessionStore(
               await client.cancelSession(activeSessionId);
             } catch (error) {
               if (
-                workerStopSettlementGeneration !== stopSettlementGeneration ||
+                stopGeneration !== stopSettlementGeneration ||
                 get().sessionId !== activeSessionId
               ) {
                 return;
@@ -4207,7 +4306,7 @@ export function createSessionStore(
                 );
               }
               if (
-                workerStopSettlementGeneration === stopSettlementGeneration &&
+                stopGeneration === stopSettlementGeneration &&
                 get().sessionId === activeSessionId
               ) {
                 set({ error: stopError });
@@ -4215,7 +4314,7 @@ export function createSessionStore(
               return;
             }
             if (
-              workerStopSettlementGeneration !== stopSettlementGeneration ||
+              stopGeneration !== stopSettlementGeneration ||
               get().sessionId !== activeSessionId
             ) {
               return;
@@ -4244,7 +4343,7 @@ export function createSessionStore(
             await client.cancelSession(activeSessionId);
           } catch (error) {
             if (
-              workerStopSettlementGeneration !== stopSettlementGeneration ||
+              stopGeneration !== stopSettlementGeneration ||
               get().sessionId !== activeSessionId
             ) {
               return;
@@ -4265,7 +4364,7 @@ export function createSessionStore(
               );
             }
             if (
-              workerStopSettlementGeneration === stopSettlementGeneration &&
+              stopGeneration === stopSettlementGeneration &&
               get().sessionId === activeSessionId
             ) {
               set({ error: stopError });
@@ -4336,6 +4435,7 @@ export function createSessionStore(
                 metadataOnly: isLocalStreamAttached(),
               },
             );
+            reconcileSessionStopSnapshot(sessionId, serverState);
             if (
               generation !== statePollingGeneration ||
               get().sessionId !== sessionId
@@ -4349,7 +4449,7 @@ export function createSessionStore(
               shouldStopSessionStatePolling(
                 serverState.agent_state,
                 serverState.delegation_groups,
-              )
+              ) && !pendingSessionStop(sessionId)
             ) {
               const terminalError = sessionAgentErrorMessage(serverState);
               const terminalSelectionGeneration = sessionSelectionGeneration;
@@ -4491,7 +4591,7 @@ export function createSessionStore(
         activeWorkerResponseBoundary = null;
         pendingStoppedWorkerResponse = null;
         activeWorkerStopSettlement = null;
-        workerStopSettlementGeneration += 1;
+        stopGeneration += 1;
         workerInputIdempotency.clear();
         hiveConversationKinds.clear();
         pendingHiveConversationKinds.clear();

@@ -58,10 +58,8 @@ fn fixture() -> Fixture {
             "INSERT INTO messages (session_id, role, content, created_at)
              VALUES ('worker-dm', 'assistant', ?1, ?2)",
             params![
-                serde_json::to_string(&vec![Content::Text {
-                    text: "What should I help with?".into()
-                }])
-                .unwrap(),
+                serde_json::to_string(&vec![Content::text("What should I help with?".into())])
+                    .unwrap(),
                 now
             ],
         )
@@ -72,10 +70,7 @@ fn fixture() -> Fixture {
             "INSERT INTO messages (session_id, role, content, created_at)
              VALUES ('worker-dm', 'user', ?1, ?2)",
             params![
-                serde_json::to_string(&vec![Content::Text {
-                    text: COMPLETE_SETUP_REPLY.into()
-                }])
-                .unwrap(),
+                serde_json::to_string(&vec![Content::text(COMPLETE_SETUP_REPLY.into())]).unwrap(),
                 now
             ],
         )
@@ -115,7 +110,7 @@ fn append_assistant(fixture: &Fixture, text: &str) -> i64 {
             "INSERT INTO messages (session_id, role, content, created_at)
              VALUES ('worker-dm', 'assistant', ?1, ?2)",
             params![
-                serde_json::to_string(&vec![Content::Text { text: text.into() }]).unwrap(),
+                serde_json::to_string(&vec![Content::text(text.into())]).unwrap(),
                 Utc::now().to_rfc3339()
             ],
         )
@@ -131,7 +126,7 @@ fn append_user(fixture: &Fixture, text: &str) -> i64 {
             "INSERT INTO messages (session_id, role, content, created_at)
              VALUES ('worker-dm', 'user', ?1, ?2)",
             params![
-                serde_json::to_string(&vec![Content::Text { text: text.into() }]).unwrap(),
+                serde_json::to_string(&vec![Content::text(text.into())]).unwrap(),
                 Utc::now().to_rfc3339()
             ],
         )
@@ -1337,10 +1332,8 @@ fn due_scan_excludes_paused_malformed_misowned_and_pending_workers() {
             "INSERT INTO messages (session_id, role, content, created_at)
              VALUES ('worker-dm', 'pending_user:race', ?1, ?2)",
             params![
-                serde_json::to_string(&vec![Content::Text {
-                    text: "One more requirement.".into()
-                }])
-                .unwrap(),
+                serde_json::to_string(&vec![Content::text("One more requirement.".into())])
+                    .unwrap(),
                 Utc::now().to_rfc3339()
             ],
         )
@@ -1453,9 +1446,9 @@ async fn pending_user_input_after_claim_wins_and_stales_the_review() {
             "INSERT INTO messages (session_id, role, content, created_at)
              VALUES ('worker-dm', 'pending_user:mid-review', ?1, ?2)",
             params![
-                serde_json::to_string(&vec![Content::Text {
-                    text: "Also never use production credentials.".into()
-                }])
+                serde_json::to_string(&vec![Content::text(
+                    "Also never use production credentials.".into()
+                )])
                 .unwrap(),
                 Utc::now().to_rfc3339()
             ],

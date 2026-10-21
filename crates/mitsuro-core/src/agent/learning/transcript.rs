@@ -121,7 +121,7 @@ pub(super) fn canonical_text_content(content_json: &str) -> Option<String> {
     let text = content
         .into_iter()
         .filter_map(|content| match content {
-            Content::Text { text } => Some(text),
+            Content::Text { text, .. } => Some(text),
             Content::Image { .. }
             | Content::Document { .. }
             | Content::ToolUse { .. }

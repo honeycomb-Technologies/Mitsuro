@@ -38,7 +38,7 @@ use mitsuro_core::workflow::{
 use super::crud::{GetSessionQuery, ListSessionsQuery};
 use super::workflow::{execute_workflow_command, get_workflow, WorkflowCommand};
 use super::*;
-use crate::auth::{AuthenticatedUser, CurrentUser};
+use crate::routes::test_support::current_user;
 use crate::types::{
     CreateSessionRequest, PinchRequest, SessionPresenceHeartbeatRequest, UpdateSessionRequest,
 };
@@ -70,6 +70,10 @@ fn create_test_state() -> (AppState, PathBuf) {
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             session_inputs: Arc::new(RwLock::new(HashMap::new())),
             session_presence: Arc::new(RwLock::new(HashMap::new())),
+            session_control_leases: Arc::new(RwLock::new(
+                crate::control_leases::SessionControlLeaseRegistry::default(),
+            )),
+            agent_streams: Arc::new(RwLock::new(crate::agent_streams::AgentStreamHub::default())),
             delegated_state: Arc::new(RwLock::new(HashMap::new())),
             remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                 enabled: true,
@@ -97,11 +101,177 @@ fn create_test_user(state: &AppState, user_id: &str) {
         .expect("user should insert");
 }
 
-fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
-    CurrentUser(AuthenticatedUser {
-        user_id: Some(user_id.to_string()),
-        home_dir: Some(home_dir.to_path_buf()),
-    })
+async fn code_control_headers(state: &AppState, session_id: &str) -> HeaderMap {
+    let lease = state
+        .session_control_leases
+        .write()
+        .await
+        .take(session_id, "server-test-controller".to_owned(), false)
+        .expect("test controller should acquire the exact Code session lease");
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        crate::control_leases::CONTROL_LEASE_HEADER,
+        lease.lease_token.parse().expect("lease token header value"),
+    );
+    headers
+}
+
+fn create_owned_code_session(state: &AppState, user_id: &str, title: &str) -> String {
+    SessionManager::new(Database::new(&state.db_path).expect("database should open"))
+        .create_session_for_user_with_config(
+            title,
+            None,
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            Some(state.working_dir.to_string_lossy().as_ref()),
+            WorkspaceMode::Selected,
+            Some(user_id),
+            None,
+            SessionType::Code,
+        )
+        .expect("Code session should create")
+}
+
+#[tokio::test]
+async fn code_agent_control_is_exact_owner_scoped_and_public_summary_has_no_token() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let session_id = create_owned_code_session(&state, "alice", "Controlled Code Agent");
+
+    let denied = get_session_control(
+        State(state.clone()),
+        Some(current_user("bob", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+    )
+    .await;
+    assert!(matches!(denied, Err(AppError::NotFound(_))));
+
+    let Json(taken) = take_session_control(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(crate::types::TakeSessionControlRequest {
+            client_id: "canvas-a".to_owned(),
+            force: false,
+        }),
+    )
+    .await
+    .expect("owner should take control");
+    assert_eq!(taken.lease.client_id, "canvas-a");
+
+    let Json(summary) = get_session_control(
+        State(state),
+        Some(current_user("alice", std::path::Path::new("/tmp"))),
+        Path(session_id),
+    )
+    .await
+    .expect("owner should read summary");
+    assert_eq!(summary.ttl_seconds, 15);
+    assert_eq!(
+        summary
+            .controller
+            .as_ref()
+            .map(|value| value.client_id.as_str()),
+        Some("canvas-a")
+    );
+    let json = serde_json::to_value(summary).expect("summary should serialize");
+    assert!(json.get("lease_token").is_none());
+    assert!(json["controller"].get("lease_token").is_none());
+}
+
+#[tokio::test]
+async fn code_agent_observer_stream_is_exact_owner_scoped() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    create_test_user(&state, "bob");
+    let session_id = create_owned_code_session(&state, "alice", "Observed Code Agent");
+
+    let denied = observe_agent_stream(
+        State(state.clone()),
+        Some(current_user("bob", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Query(super::stream::ObserveAgentStreamQuery::default()),
+    )
+    .await;
+    assert!(matches!(denied, Err(AppError::NotFound(_))));
+
+    let stream = observe_agent_stream(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id),
+        Query(super::stream::ObserveAgentStreamQuery::default()),
+    )
+    .await
+    .expect("owner can attach an observer");
+    drop(stream);
+}
+
+#[tokio::test]
+async fn code_agent_observer_cannot_mutate_and_explicit_transfer_invalidates_old_token() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let session_id = create_owned_code_session(&state, "alice", "Lease Transfer");
+    let Json(first) = take_session_control(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(crate::types::TakeSessionControlRequest {
+            client_id: "canvas-a".to_owned(),
+            force: false,
+        }),
+    )
+    .await
+    .expect("first claim");
+
+    let denied = take_session_control(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(crate::types::TakeSessionControlRequest {
+            client_id: "canvas-b".to_owned(),
+            force: false,
+        }),
+    )
+    .await;
+    assert!(matches!(denied, Err(AppError::Conflict(_))));
+
+    let Json(second) = take_session_control(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(crate::types::TakeSessionControlRequest {
+            client_id: "canvas-b".to_owned(),
+            force: true,
+        }),
+    )
+    .await
+    .expect("explicit transfer");
+
+    let old = state
+        .session_control_leases
+        .write()
+        .await
+        .authorize_mutation(&session_id, Some(&first.lease.lease_token));
+    assert!(matches!(old, Err(AppError::Conflict(_))));
+    state
+        .session_control_leases
+        .write()
+        .await
+        .authorize_mutation(&session_id, Some(&second.lease.lease_token))
+        .expect("replacement token should authorize");
+
+    let Json(heartbeat) = heartbeat_session_control(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id),
+        Json(crate::types::HeartbeatSessionControlRequest {
+            client_id: "canvas-b".to_owned(),
+            lease_token: second.lease.lease_token,
+        }),
+    )
+    .await
+    .expect("current controller heartbeat");
+    assert_eq!(heartbeat.ttl_seconds, 15);
 }
 
 #[tokio::test]
@@ -275,13 +445,130 @@ async fn workflow_routes_require_ownership_and_explicit_activation() {
     let Json(snapshot) = get_workflow(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
-        Path(session_id),
+        Path(session_id.clone()),
     )
     .await
     .expect("workflow should load");
     assert_eq!(
         snapshot.expect("workflow should exist").aggregate_revision,
         activated.snapshot.aggregate_revision
+    );
+
+    let Json(paused) = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::PauseGoal {
+            operation_id: "route-pause".into(),
+            goal_id: activated.snapshot.goal.id.clone(),
+            expected_revision: activated.snapshot.aggregate_revision,
+            reason: "User paused execution".into(),
+        }),
+    )
+    .await
+    .expect("goal should pause");
+    assert_eq!(
+        paused.snapshot.goal.status,
+        mitsuro_core::workflow::GoalStatus::Paused
+    );
+    assert!(
+        matches!(workflow_rx.try_recv(), Ok(LoopInput::WorkflowUpdated { operation_id, .. }) if operation_id == "route-pause")
+    );
+    assert!(
+        matches!(workflow_rx.try_recv(), Ok(LoopInput::Cancel)),
+        "pause must interrupt an in-flight provider"
+    );
+    assert!(workflow_rx.try_recv().is_err());
+
+    let Json(resumed) = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::ResumeGoal {
+            operation_id: "route-resume".into(),
+            goal_id: paused.snapshot.goal.id.clone(),
+            expected_revision: paused.snapshot.aggregate_revision,
+        }),
+    )
+    .await
+    .expect("goal should resume");
+    assert!(
+        matches!(workflow_rx.try_recv(), Ok(LoopInput::WorkflowUpdated { operation_id, .. }) if operation_id == "route-resume")
+    );
+    let Json(replayed_pause) = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::PauseGoal {
+            operation_id: "route-pause".into(),
+            goal_id: activated.snapshot.goal.id.clone(),
+            expected_revision: activated.snapshot.aggregate_revision,
+            reason: "User paused execution".into(),
+        }),
+    )
+    .await
+    .expect("pause retry should replay its original receipt");
+    assert_eq!(
+        replayed_pause.snapshot.aggregate_revision,
+        paused.snapshot.aggregate_revision
+    );
+    assert!(
+        workflow_rx.try_recv().is_err(),
+        "stale pause receipt must not cancel the resumed run"
+    );
+    assert_eq!(
+        WorkflowManager::new(state.db_path.as_ref().clone())
+            .unwrap()
+            .get_snapshot(&session_id)
+            .unwrap()
+            .unwrap()
+            .goal
+            .status,
+        mitsuro_core::workflow::GoalStatus::Active
+    );
+
+    let Json(cancelled) = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::CancelGoal {
+            operation_id: "route-cancel".into(),
+            goal_id: paused.snapshot.goal.id.clone(),
+            expected_revision: resumed.snapshot.aggregate_revision,
+            reason: Some("User cancelled execution".into()),
+        }),
+    )
+    .await
+    .expect("goal should cancel");
+    assert_eq!(
+        cancelled.snapshot.goal.status,
+        mitsuro_core::workflow::GoalStatus::Cancelled
+    );
+    assert!(
+        matches!(workflow_rx.try_recv(), Ok(LoopInput::WorkflowUpdated { operation_id, .. }) if operation_id == "route-cancel")
+    );
+    assert!(matches!(workflow_rx.try_recv(), Ok(LoopInput::Cancel)));
+    assert!(workflow_rx.try_recv().is_err());
+
+    let Json(replayed_activation) = execute_workflow_command(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        Json(WorkflowCommand::ActivateGoal {
+            operation_id: "route-activate".into(),
+            goal_id: approved.snapshot.goal.id.clone(),
+            expected_revision: approved.snapshot.aggregate_revision,
+        }),
+    )
+    .await
+    .expect("old activation receipt should still replay");
+    assert_eq!(
+        replayed_activation.snapshot.aggregate_revision,
+        activated.snapshot.aggregate_revision
+    );
+    assert!(
+        workflow_rx.try_recv().is_err(),
+        "stale activation must not wake a cancelled Goal"
     );
 }
 
@@ -1058,10 +1345,12 @@ async fn session_cancel_signals_the_owned_active_run() {
         child_cancellation.clone(),
     );
 
+    let control_headers = code_control_headers(&state, &session_id).await;
     let Json(response) = cancel_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
         Path(session_id),
+        control_headers,
     )
     .await
     .unwrap_or_else(|_| panic!("owned cancellation should succeed"));
@@ -1069,6 +1358,123 @@ async fn session_cancel_signals_the_owned_active_run() {
     assert!(response.ok);
     assert!(matches!(input_rx.recv().await, Some(LoopInput::Cancel)));
     assert!(child_cancellation.is_cancelled());
+}
+
+#[tokio::test]
+async fn legacy_code_agent_cancel_yields_to_explicit_native_control() {
+    let (state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let session_id = create_owned_code_session(&state, "alice", "Controlled Cancellation");
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), input_tx);
+
+    let legacy = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        HeaderMap::new(),
+    )
+    .await
+    .expect("installed client may claim an unowned Code Agent");
+    assert!(legacy.0.ok);
+    assert!(matches!(input_rx.try_recv(), Ok(LoopInput::Cancel)));
+    let renewed = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        HeaderMap::new(),
+    )
+    .await
+    .expect("the installed client may renew its compatibility control");
+    assert!(renewed.0.ok);
+    assert!(matches!(input_rx.try_recv(), Ok(LoopInput::Cancel)));
+
+    let lease = state
+        .session_control_leases
+        .write()
+        .await
+        .take(&session_id, "canvas-a".to_owned(), true)
+        .expect("control lease");
+
+    let denied = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        HeaderMap::new(),
+    )
+    .await;
+    assert!(matches!(denied, Err(AppError::Conflict(_))));
+    assert!(input_rx.try_recv().is_err());
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        crate::control_leases::CONTROL_LEASE_HEADER,
+        lease.lease_token.parse().expect("header value"),
+    );
+    let Json(response) = cancel_session(
+        State(state),
+        Some(current_user("alice", std::path::Path::new("/tmp"))),
+        Path(session_id),
+        headers,
+    )
+    .await
+    .expect("controller cancellation");
+    assert!(response.ok);
+    assert!(matches!(input_rx.recv().await, Some(LoopInput::Cancel)));
+}
+
+#[tokio::test]
+async fn expired_code_agent_lease_rejects_stale_tokens_but_allows_legacy_claim() {
+    let (mut state, _temp_dir) = create_test_state();
+    create_test_user(&state, "alice");
+    let session_id = create_owned_code_session(&state, "alice", "Expired Control");
+    state.session_control_leases = Arc::new(RwLock::new(
+        crate::control_leases::SessionControlLeaseRegistry::new(std::time::Duration::from_millis(
+            2,
+        )),
+    ));
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .session_inputs
+        .write()
+        .await
+        .insert(session_id.clone(), input_tx);
+    let lease = state
+        .session_control_leases
+        .write()
+        .await
+        .take(&session_id, "canvas-a".to_owned(), false)
+        .expect("short lease");
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let mut stale_headers = HeaderMap::new();
+    stale_headers.insert(
+        crate::control_leases::CONTROL_LEASE_HEADER,
+        lease.lease_token.parse().expect("lease header"),
+    );
+    let denied = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id.clone()),
+        stale_headers,
+    )
+    .await;
+    assert!(matches!(denied, Err(AppError::Conflict(_))));
+    assert!(input_rx.try_recv().is_err());
+    let legacy = cancel_session(
+        State(state.clone()),
+        Some(current_user("alice", state.working_dir.as_ref())),
+        Path(session_id),
+        HeaderMap::new(),
+    )
+    .await
+    .expect("installed client may claim after native expiry");
+    assert!(legacy.0.ok);
+    assert!(matches!(input_rx.try_recv(), Ok(LoopInput::Cancel)));
 }
 
 #[tokio::test]
@@ -1099,13 +1505,24 @@ async fn session_cancel_rejects_a_foreign_owner_without_signalling() {
     let result = cancel_session(
         State(state.clone()),
         Some(current_user("bob", state.working_dir.as_ref())),
-        Path(session_id),
+        Path(session_id.clone()),
+        axum::http::HeaderMap::new(),
     )
     .await;
 
     assert!(matches!(result, Err(AppError::NotFound(_))));
     assert!(input_rx.try_recv().is_err());
     assert!(!child_cancellation.is_cancelled());
+    assert!(
+        state
+            .session_control_leases
+            .write()
+            .await
+            .snapshot(&session_id)
+            .controller
+            .is_none(),
+        "a foreign tenant must not acquire even compatibility control"
+    );
 }
 
 #[tokio::test]
@@ -1152,10 +1569,12 @@ async fn session_cancel_is_idempotent_when_the_run_is_inactive() {
         child_cancellation.clone(),
     );
 
+    let control_headers = code_control_headers(&state, &session_id).await;
     let Json(first_response) = cancel_session(
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
         Path(session_id.clone()),
+        control_headers.clone(),
     )
     .await
     .unwrap_or_else(|_| panic!("idle cancellation should be idempotent"));
@@ -1163,6 +1582,7 @@ async fn session_cancel_is_idempotent_when_the_run_is_inactive() {
         State(state.clone()),
         Some(current_user("alice", state.working_dir.as_ref())),
         Path(session_id.clone()),
+        control_headers,
     )
     .await
     .unwrap_or_else(|_| panic!("repeated idle cancellation should be idempotent"));
@@ -1425,6 +1845,7 @@ async fn session_state_exposes_recovery_live_partial_and_trace_sequence() {
         Some(LoopStopReason::StreamIdleTimeout),
         None,
         PartialAssistantState {
+            citations: Vec::new(),
             text: "partial answer".to_string(),
             thinking: "working notes".to_string(),
             tool_calls: vec![RecoveryToolCall::summary("tool-1", "edit")],
@@ -2206,6 +2627,7 @@ fn live_partial_assistant_only_surfaces_for_active_states() {
         None,
         None,
         mitsuro_core::storage::PartialAssistantState {
+            citations: Vec::new(),
             text: "partial".to_string(),
             thinking: "reasoning".to_string(),
             tool_calls: Vec::new(),

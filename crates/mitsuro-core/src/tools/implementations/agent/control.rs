@@ -804,6 +804,45 @@ mod tests {
     }
 
     #[test]
+    fn legacy_planner_and_verifier_resume_through_the_shared_child_contract() {
+        use crate::agent::subagent::{AgentExecutionProfile, AgentSpec};
+
+        let (owner, _foreign, _temp) = ownership_fixture();
+        let mut record = load_owned_run(&owner, "run-owned").expect("persisted run");
+        assert!(record.capabilities.is_empty());
+        for (role, can_execute) in [
+            (DelegatedRunRole::Planner, false),
+            (DelegatedRunRole::Verifier, true),
+        ] {
+            record.role = role;
+            let mut params = Params::default();
+            apply_persisted_child_contract(
+                &mut params,
+                &record,
+                "run-owned",
+                owner.project_dir.as_deref(),
+            )
+            .expect("legacy role must remain resumable");
+            let spec = AgentSpec::resolve(
+                params.profile.as_deref(),
+                params.agent_type.as_deref(),
+                params.name.as_deref(),
+                "Continue the persisted task",
+                None,
+                None,
+                &params.capabilities,
+                None,
+                None,
+                None,
+            )
+            .expect("resume must resolve through the shared child engine");
+            assert_eq!(spec.execution_profile(), AgentExecutionProfile::Explore);
+            assert_eq!(spec.allows_execute(), can_execute);
+            assert!(!spec.capabilities.contains(&AgentCapability::Write));
+        }
+    }
+
+    #[test]
     fn resume_restores_execute_only_contract_name_and_not_fake_components() {
         let (owner, _foreign, _temp) = ownership_fixture();
         let db_path = owner.db_path.as_ref().expect("db path");

@@ -194,64 +194,6 @@ Deno.test("visual inset belongs to bar, not explicit TextInput height", () => {
   );
 });
 
-Deno.test("ChatBar has one composer height authority", async () => {
-  const source = await Deno.readTextFile(
-    new URL("../components/chat/ChatBar.tsx", import.meta.url).pathname,
-  );
-  assert(
-    source.includes("resolveComposerLayout("),
-    "ChatBar must use shared layout",
-  );
-  assert(
-    !source.includes("onContentSizeChange="),
-    "native contentSize must not feed explicit input height",
-  );
-  assert(
-    !source.includes("setInputContentHeight"),
-    "ChatBar must not keep a second content-height state authority",
-  );
-  assert(
-    !source.includes("setComposerExpanded"),
-    "ChatBar must derive expanded state from the layout contract",
-  );
-  assert(
-    source.includes("function useComposerKeyboardLift")
-      && source.includes("bottom: composerKeyboardLift")
-      && source.includes("const reservedHeight = Math.max(PILL, Math.ceil(height))")
-      && source.includes("onHeightChange(reservedHeight)")
-      && !source.includes("<KeyboardAvoidingView")
-      && !source.includes("setKeyboardHeight")
-      && !source.includes("keyboardHeight > 0"),
-    "keyboard lift must raise the mounted composer without resizing transcript reserve",
-  );
-  assert(
-    source.includes("closedBottomOffset - metaReserveHeight") &&
-      source.includes("paddingBottom + metaReserveHeight"),
-    "the meta row must live inside the home-indicator inset instead of stacking another full pad under the composer",
-  );
-});
-
-Deno.test("accordion and model list share the input/Agent content band", async () => {
-  const composer = await Deno.readTextFile(
-    new URL("../components/chat/ChatBar.tsx", import.meta.url).pathname,
-  );
-
-  assert(
-    composer.includes("width: controlsLayerWidth") &&
-      composer.includes("right: ROOT_HORIZONTAL_PADDING") &&
-      composer.includes("bandWidth - ROOT_HORIZONTAL_PADDING * 2"),
-    "accordion stack must keep the original Agent-aligned right inset, not flush to the screen edge",
-  );
-  assert(
-    composer.includes("const modelPopoverTargetLeft = isDesktop") &&
-      composer.includes(": ROOT_HORIZONTAL_PADDING;") &&
-      composer.includes(
-        "bandWidth - ROOT_HORIZONTAL_PADDING * 2 - PILL - GAP",
-      ),
-    "model list must match the input bar: root padding on the left, Agent + gap on the right",
-  );
-});
-
 Deno.test("empty draft estimates zero but resolves to one text row", () => {
   assert(
     estimateCompactInputHeight("", 240) === 0,

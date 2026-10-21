@@ -274,9 +274,7 @@ for asset in \
   assets/branding/mitsuro/mitsuro-app-icon-tinted.svg \
   assets/branding/mitsuro/mitsuro-adaptive-foreground.svg \
   apps/mobile/assets/animations/splash.json \
-  apps/mobile/assets/icons/mitsuro-notification.png \
-  apps/desktop/shell/src-tauri/icons/icon.icns \
-  apps/desktop/shell/src-tauri/icons/icon.ico; do
+  apps/mobile/assets/icons/mitsuro-notification.png; do
   require_file "$asset"
 done
 
@@ -309,8 +307,10 @@ require_text "Expo display name is Mitsuro" '"name"[[:space:]]*:[[:space:]]*"Mit
 require_text "Expo registers multiple deep-link schemes" '"scheme"[[:space:]]*:[[:space:]]*\[' apps/mobile/app.json
 require_text "Mitsuro is a registered deep-link scheme" '"mitsuro"' apps/mobile/app.json
 require_text "Expo notification icon is Mitsuro" 'mitsuro-notification\.png' apps/mobile/app.json
-require_text "desktop product name is Mitsuro" '"productName"[[:space:]]*:[[:space:]]*"Mitsuro"' apps/desktop/shell/src-tauri/tauri.conf.json
-require_text "desktop publisher is Honeycomb Technologies" '"publisher"[[:space:]]*:[[:space:]]*"Honeycomb Technologies"' apps/desktop/shell/src-tauri/tauri.conf.json
+require_text "desktop product name is Mitsuro Canvas" '^Name=Mitsuro Canvas Alpha$' apps/desktop/canvas/packaging/io.mitsuro.canvas.desktop
+require_text "desktop launcher uses Canvas" '^Exec=mitsuro-canvas$' apps/desktop/canvas/packaging/io.mitsuro.canvas.desktop
+require_text "desktop identity is canonical" '<id>io\.mitsuro\.canvas</id>' apps/desktop/canvas/packaging/io.mitsuro.canvas.metainfo.xml
+require_text "desktop publisher is Honeycomb Technologies" '<name>Honeycomb Technologies</name>' apps/desktop/canvas/packaging/io.mitsuro.canvas.metainfo.xml
 require_text "canonical GitHub repository is Mitsuro" 'github\.com/honeycomb-Technologies/Mitsuro' README.md
 require_text "preferred autonomous CLI is Hive" 'name[[:space:]]*=[[:space:]]*"hive"' crates/mitsuro-cli/src/main.rs
 require_text "legacy autonomous CLI alias is retained" '(visible_)?alias[[:space:]]*=[[:space:]]*"mako"' crates/mitsuro-cli/src/main.rs

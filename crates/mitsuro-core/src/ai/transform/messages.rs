@@ -1,3 +1,4 @@
+use crate::ai::client::config::{apply_parallel_tool_call_policy, ParallelToolCallTransport};
 use crate::ai::format::openai::responses_input::transform_request_input_for_api_format;
 use crate::ai::models::ApiFormat;
 use crate::ai::providers::ProviderId;
@@ -55,7 +56,7 @@ pub fn apply_request_body_transform(
             .is_some()
         && body.get("parallel_tool_calls").is_none()
     {
-        body["parallel_tool_calls"] = Value::Bool(true);
+        apply_parallel_tool_call_policy(&mut body, None, ParallelToolCallTransport::Responses);
     }
 
     transform_request_input_for_api_format(&mut body, api_format, "input");

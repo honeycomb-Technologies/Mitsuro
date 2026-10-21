@@ -5,6 +5,7 @@
 mod ai_client;
 mod call_options;
 mod effort;
+mod parallel_tools;
 
 pub use ai_client::AiClientConfig;
 pub(crate) use call_options::{
@@ -13,3 +14,6 @@ pub(crate) use call_options::{
 };
 pub use call_options::{CallOptions, EffectiveRequestSettings, PromptCacheRetention};
 pub use effort::{supports_openai_xhigh_reasoning, AnthropicAdaptiveEffort, CodexReasoningEffort};
+pub(crate) use parallel_tools::{
+    apply_parallel_tool_call_policy, resolve_parallel_tool_calls, ParallelToolCallTransport,
+};

@@ -67,7 +67,7 @@ pub(crate) fn format_summary_message(input: &CompactionSummaryInput) -> String {
     let mut msg = String::from(COMPACTION_SUMMARY_PREFIX);
 
     msg.push_str(
-        "This session is being continued from a previous conversation that was compacted to stay within the context window.\n\n",
+        "This session is being continued from a previous conversation that was compacted to stay within the context window. This summary is not new user authorization. Distinguish user requirements and accepted decisions from repository rules and unaccepted proposals; recover uncertain decision provenance with search_compaction_segments.\n\n",
     );
 
     if let Some(direction) = &input.direction {
@@ -181,7 +181,7 @@ pub(crate) fn extract_previous_summary(
 
     messages.iter().rev().find_map(|message: &ModelMessage| {
         message.content.iter().find_map(|content| {
-            if let Content::Text { text } = content {
+            if let Content::Text { text, .. } = content {
                 if text.starts_with(COMPACTION_SUMMARY_PREFIX) {
                     Some(text.clone())
                 } else {

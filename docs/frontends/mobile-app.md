@@ -24,11 +24,11 @@ One of the more unusual things about this codebase is that the same React Native
 1. **Native mobile app** -- compiled and distributed through EAS Build as an iOS/Android binary
 2. **Web frontend** -- exported as a static single-page application and embedded into the Mitsuro server's HTTP interface
 
-This works because Expo supports a web target through Metro bundler and `react-native-web`. The `app.json` configuration sets `"web": { "bundler": "metro", "output": "single" }`, which tells Expo to produce a single-file web build. The `web:build` script in `package.json` runs `expo export --platform web` to generate this output.
+This works because Expo supports a web target through Metro bundler and `react-native-web`. The `app.json` configuration sets `"web": { "bundler": "metro", "output": "single" }`, which tells Expo to produce a single-page web application. The `web:build` script in `package.json` runs `expo export --platform web` to generate this output.
 
-On the desktop, the same web build is also loaded inside a Tauri webview. The `useConnection` hook checks for `window.__MITSURO_SERVER_URL` and `window.__MITSURO_SERVER_TOKEN` globals that the Tauri shell injects, allowing automatic connection without the onboarding flow.
+The web build runs in a browser and can be served by the Mitsuro server. Native Canvas is a separate desktop application. The `useConnection` hook retains support for `window.__MITSURO_SERVER_URL` and `window.__MITSURO_SERVER_TOKEN` as compatibility inputs from older hosts.
 
-The result is three deployment targets from one codebase: native iOS, native Android, and web (both standalone and inside Tauri).
+The Expo codebase has three deployment targets: native iOS, native Android, and browser web.
 
 ## Platform Abstraction
 
@@ -86,7 +86,6 @@ Components are organized into six directories under `components/`:
 **`desktop/`** -- Desktop-specific panels:
 
 - `Terminal` -- A Ghostty-powered terminal: native libghostty on iOS/Android and Ghostty WASM on web.
-- `WorkspacePreview` -- Shows a preview of the current project workspace.
 
 **`settings/`** -- The settings UI:
 
@@ -100,7 +99,6 @@ Components are organized into six directories under `components/`:
 
 - `GlassCard` -- A translucent card with blur effects, used throughout the app for list items and panels.
 - `MitsuroLogo` and `MitsuroWordmark` -- The canonical rounded-cell mark and lowercase product wordmark used in branded app states.
-- `SegmentControl` -- A segmented control widget.
 
 There are also two top-level components: `ReportsViewer` for browsing Hive reports and `SettingsModal` for the desktop settings overlay.
 
@@ -108,7 +106,7 @@ There are also two top-level components: `ReportsViewer` for browsing Hive repor
 
 The `hooks/` directory contains ten hooks that manage the app's reactive behavior:
 
-**`useConnection`** -- Provides the `MitsuroClient` instance and connection lifecycle. Stores the server URL and authentication token in secure storage. Exposes `connect`, `disconnect`, and `reconnect` methods. On mount, it attempts to restore a saved connection or detect Tauri-injected globals.
+**`useConnection`** -- Provides the `MitsuroClient` instance and connection lifecycle. Stores the server URL and authentication token in secure storage. Exposes `connect`, `disconnect`, and `reconnect` methods. On mount, it honors stored logout state, then reads compatibility connection globals or restores saved credentials.
 
 **`useStores`** -- Creates and provides Zustand stores scoped to the active `MitsuroClient`. Initializes five stores: `sessions` (session list), `session` (active session state including messages, streaming, model), `workspace` (current working directory and mode), `git` (repository state), and `plan` (task plan tracking). Stores are recreated when the client changes.
 
@@ -130,7 +128,7 @@ The `hooks/` directory contains ten hooks that manage the app's reactive behavio
 
 ## State Management
 
-Application state is managed with **Zustand**, with store factory functions defined in the shared `packages/state` package. The mobile app imports these factories and instantiates them inside the `StoresProvider`. This architecture means the same state logic is shared with any other frontend (such as the Tauri desktop app) that uses the same packages.
+Application state is managed with **Zustand**, with store factory functions defined in the shared `packages/state` package. The mobile app imports these factories and instantiates them inside the `StoresProvider`. This architecture shares client state between the Expo mobile and web targets. Native Canvas uses Rust client/server contracts.
 
 The five stores are:
 
@@ -185,9 +183,9 @@ The `assets/` directory contains:
 
 ## Onboarding
 
-First-time users see the onboarding screen, which asks for two pieces of information: the Mitsuro server URL and a remote access token. The server URL is typically a Tailscale address (e.g., `https://device.tail123.ts.net:8443`), and the token is generated by the server. The screen validates the connection with a health check and authentication bootstrap before navigating to the main chat.
+First-time users see the onboarding screen, which asks for two pieces of information: the Mitsuro server URL and a remote access token. The server URL is typically a Tailscale address (e.g., `https://device.tail123.ts.net:8443`), and the token is generated by the server. A successful health check proves server reachability before navigation, while `bootstrapAuth()` is a no-op; authentication is established only when a protected API request succeeds.
 
-Alternatively, users can skip manual entry entirely by using a deep link. The server provides a one-tap connection URL in the format `mitsuro://connect?url=...&token=...` that the `useDeepLink` hook handles automatically.
+Alternatively, users can skip manual entry entirely by using a deep link. The client accepts a privately supplied `mitsuro://connect?url=...&token=...` link through `useDeepLink`; the server's `remote_launch_url` contains only the bare Tailscale URL.
 
 ## Session Types and Tabs
 

@@ -1,8 +1,13 @@
 # Shared TypeScript Packages
 
-Mitsuro's frontend lives in a monorepo managed by Bun. The mobile app and the desktop app are separate applications, but they share a significant amount of code through three internal packages: `@mitsuro/api`, `@mitsuro/state`, and `@mitsuro/ui`. These packages live under `packages/` in the repository and are linked as workspace dependencies, meaning Bun resolves them locally without publishing anything to a registry.
+The Expo mobile and web surfaces share `@mitsuro/api`, `@mitsuro/state`, and
+`@mitsuro/ui` through the Bun workspace. These packages live under `packages/`
+and resolve locally without a package registry publication.
 
-The goal is straightforward: write business logic once, use it everywhere. Both the mobile client (Expo/React Native) and the desktop client (React/Tauri) talk to the same Mitsuro server API, manage the same state, and render with the same visual language. Shared packages eliminate the duplication.
+Native Canvas is a Rust desktop client using `mitsuro-client` and shared server
+contracts. It does not consume the abandoned React/Tauri desktop application.
+Shared business logic remains in core/server; TypeScript packages implement
+mobile/web client state and presentation.
 
 ## The API Package
 

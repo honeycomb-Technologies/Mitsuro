@@ -84,7 +84,7 @@ fn retain_artifact(artifact: &mut ArtifactModel, level: RetentionLevel) {
             *content = bound_text(&content.text, limit);
             content.omitted_bytes = content.omitted_bytes.saturating_add(previous_omitted);
         }
-        ArtifactContent::Empty | ArtifactContent::DurableReference { .. } => {}
+        ArtifactContent::Empty => {}
     }
 
     artifact.warning.get_or_insert_with(|| ArtifactWarning {

@@ -1,4 +1,5 @@
 export * from './types';
+export * from './citations';
 export {
 	MitsuroApiError,
 	MitsuroClient,

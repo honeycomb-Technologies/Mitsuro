@@ -99,7 +99,7 @@ Each tool has a specialized summarizer: grep reports match/file counts, write re
 
 The summarizer (`summarizer.rs`) still produces structured fields (work summary, key decisions, pending tasks, important files). Those fields are woven into the compaction summary message that replaces dropped history, not into a new session's opening prompt.
 
-Legacy session-forking helpers (`PinchContext`, linked child sessions) remain in the codebase for compatibility but are not the default overflow path.
+`PinchContext`, linked-session storage helpers, and historical parent-session readers remain for compatibility. The unused `create_pinched_session` orchestration helper has been retired; all current entry points use in-place compaction. Existing sessions, database migrations, API routes, and client events are unchanged.
 
 ## Skills Injection
 

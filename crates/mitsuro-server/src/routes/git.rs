@@ -42,6 +42,7 @@ async fn list_changes(
             in_repo: false,
             repo_root: None,
             files: Vec::new(),
+            truncated: false,
         }));
     };
 
@@ -58,6 +59,7 @@ async fn list_changes(
                 deletions: file.deletions,
             })
             .collect(),
+        truncated: changes.truncated,
     }))
 }
 
@@ -224,6 +226,7 @@ fn to_status_response(status: mitsuro_core::git::GitStatusSummary) -> GitStatusR
 
 #[cfg(test)]
 mod tests {
+    use crate::routes::test_support::current_user;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -240,7 +243,6 @@ mod tests {
     use mitsuro_core::tools::registry::ToolRegistry;
 
     use super::resolve_git_path;
-    use crate::auth::{AuthenticatedUser, CurrentUser};
     use crate::error::AppError;
     use crate::AppState;
 
@@ -270,6 +272,12 @@ mod tests {
                 session_locks: Arc::new(RwLock::new(HashMap::new())),
                 session_inputs: Arc::new(RwLock::new(HashMap::new())),
                 session_presence: Arc::new(RwLock::new(HashMap::new())),
+                session_control_leases: Arc::new(RwLock::new(
+                    crate::control_leases::SessionControlLeaseRegistry::default(),
+                )),
+                agent_streams: Arc::new(RwLock::new(
+                    crate::agent_streams::AgentStreamHub::default(),
+                )),
                 delegated_state: Arc::new(RwLock::new(HashMap::new())),
                 remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                     enabled: true,
@@ -285,13 +293,6 @@ mod tests {
             },
             temp_dir,
         )
-    }
-
-    fn current_user(user_id: &str, home_dir: &std::path::Path) -> CurrentUser {
-        CurrentUser(AuthenticatedUser {
-            user_id: Some(user_id.to_string()),
-            home_dir: Some(home_dir.to_path_buf()),
-        })
     }
 
     #[tokio::test]

@@ -649,10 +649,6 @@ impl LayoutEngine {
             invalidation,
         }
     }
-
-    pub fn previous(&self) -> Option<&LayoutSnapshot> {
-        self.previous.as_ref()
-    }
 }
 
 fn append_link_interactions(

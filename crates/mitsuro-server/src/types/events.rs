@@ -359,22 +359,6 @@ pub enum AgenticEvent {
         reason: String,
         stage: u8,
     },
-    /// A teammate was spawned
-    TeammateSpawned { name: String, role: String },
-    /// A teammate completed a task
-    TeammateTaskCompleted {
-        name: String,
-        task_id: String,
-        result: String,
-    },
-    /// A teammate failed a task
-    TeammateTaskFailed {
-        name: String,
-        task_id: String,
-        error: String,
-    },
-    /// A teammate was cancelled
-    TeammateCancelled { name: String },
 }
 
 impl AgenticEvent {
@@ -729,26 +713,6 @@ impl From<mitsuro_core::agent::LoopEvent> for AgenticEvent {
                 reason,
                 stage,
             },
-            LoopEvent::TeammateSpawned { name, role } => Self::TeammateSpawned { name, role },
-            LoopEvent::TeammateTaskCompleted {
-                name,
-                task_id,
-                result,
-            } => Self::TeammateTaskCompleted {
-                name,
-                task_id,
-                result,
-            },
-            LoopEvent::TeammateTaskFailed {
-                name,
-                task_id,
-                error,
-            } => Self::TeammateTaskFailed {
-                name,
-                task_id,
-                error,
-            },
-            LoopEvent::TeammateCancelled { name } => Self::TeammateCancelled { name },
         }
     }
 }
@@ -775,15 +739,11 @@ mod tests {
         let messages = vec![
             ModelMessage {
                 role: Role::System,
-                content: vec![Content::Text {
-                    text: SYSTEM_SECRET.to_string(),
-                }],
+                content: vec![Content::text(SYSTEM_SECRET.to_string())],
             },
             ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: USER_SECRET.to_string(),
-                }],
+                content: vec![Content::text(USER_SECRET.to_string())],
             },
         ];
         let diagnostics = client.request_diagnostics(

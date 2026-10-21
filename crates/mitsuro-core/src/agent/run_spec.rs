@@ -170,8 +170,7 @@ impl WorkerGoalExecutionContext {
             .unwrap_or("the exact claimed step");
         ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: format!(
+            content: vec![Content::text(format!(
                     "[WORKER GOAL TRIGGER v1]\nBegin the exact claimed durable Worker Goal attempt now. Goal id: {}. Attempt id: {}. Plan revision id: {}. Step id: {}. Objective: {}. Exact step: {}. Use only the frozen context and advertised capabilities; report concrete outcome and evidence for this attempt.",
                     self.binding.goal_id,
                     self.binding.attempt_id,
@@ -179,8 +178,7 @@ impl WorkerGoalExecutionContext {
                     self.binding.step_id,
                     truncate_worker_goal_trigger_field(&self.workflow_snapshot.goal.objective),
                     truncate_worker_goal_trigger_field(step_description),
-                ),
-            }],
+                ))],
         }
     }
 
@@ -834,6 +832,7 @@ impl RunSpecBuilder {
             self.call_options.tools = None;
             self.call_options.web_search = None;
             self.call_options.web_fetch = None;
+            self.call_options.parallel_tool_calls = Some(false);
             self.call_options.codex_parallel_tool_calls = false;
         }
         if let Some(goal) = self.config.context_mode.worker_goal_context() {
@@ -867,6 +866,7 @@ impl RunSpecBuilder {
             self.config.generate_title = false;
             self.call_options.web_search = None;
             self.call_options.web_fetch = None;
+            self.call_options.parallel_tool_calls = Some(false);
             self.call_options.codex_parallel_tool_calls = false;
         }
 
@@ -885,6 +885,7 @@ impl RunSpecBuilder {
             self.call_options.tools = None;
             self.call_options.web_search = None;
             self.call_options.web_fetch = None;
+            self.call_options.parallel_tool_calls = Some(false);
             self.call_options.codex_parallel_tool_calls = false;
         }
         if self.config.context_mode.is_worker_goal() {
@@ -896,6 +897,7 @@ impl RunSpecBuilder {
             );
             self.call_options.web_search = None;
             self.call_options.web_fetch = None;
+            self.call_options.parallel_tool_calls = Some(false);
             self.call_options.codex_parallel_tool_calls = false;
             if self
                 .call_options
@@ -1394,6 +1396,7 @@ pub(crate) fn apply_execution_tool_allowlist(
         options.web_fetch = None;
     }
     if options.tools.as_ref().is_none_or(|tools| tools.len() <= 1) {
+        options.parallel_tool_calls = Some(false);
         options.codex_parallel_tool_calls = false;
     }
 }
@@ -1907,6 +1910,7 @@ mod tests {
         );
         assert!(spec.call_options().web_search.is_none());
         assert!(!spec.call_options().codex_parallel_tool_calls);
+        assert_eq!(spec.call_options().parallel_tool_calls, Some(false));
         assert!(
             spec.call_options().max_tokens.unwrap()
                 <= client.resolved_model().capabilities.max_output
@@ -2101,6 +2105,7 @@ mod tests {
         assert!(spec.call_options().web_search.is_none());
         assert!(spec.call_options().web_fetch.is_none());
         assert!(!spec.call_options().codex_parallel_tool_calls);
+        assert_eq!(spec.call_options().parallel_tool_calls, Some(false));
         assert_eq!(spec.config().run_budget, Some(RunBudget::with_max_turns(1)));
         assert!(matches!(
             spec.into_parts_for(RunProvenance::Hive),
@@ -2334,6 +2339,7 @@ mod tests {
         assert!(spec.call_options().web_search.is_none());
         assert!(spec.call_options().web_fetch.is_none());
         assert!(!spec.call_options().codex_parallel_tool_calls);
+        assert_eq!(spec.call_options().parallel_tool_calls, Some(false));
         assert_eq!(spec.config().run_budget, Some(RunBudget::with_max_turns(4)));
         let goal_context = spec
             .config()
@@ -2349,14 +2355,12 @@ mod tests {
         );
         let isolated_start = spec.starting_conversation(vec![ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "ORDINARY-CHAT-HISTORY-LEAK-CANARY".into(),
-            }],
+            content: vec![Content::text("ORDINARY-CHAT-HISTORY-LEAK-CANARY".into())],
         }]);
         assert_eq!(isolated_start.len(), 1);
         assert!(matches!(
             isolated_start[0].content.as_slice(),
-            [Content::Text { text }]
+            [Content::Text { text, .. }]
                 if text.contains("[WORKER GOAL TRIGGER v1]")
                     && text.contains("goal-1")
                     && !text.contains("ORDINARY-CHAT-HISTORY-LEAK-CANARY")

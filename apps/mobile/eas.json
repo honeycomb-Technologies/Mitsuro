@@ -13,7 +13,10 @@
       }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "android": {
+        "autoIncrement": true
+      }
     },
     "production": {
       "buildArtifactPaths": [

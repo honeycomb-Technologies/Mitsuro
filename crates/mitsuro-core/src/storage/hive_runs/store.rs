@@ -489,7 +489,7 @@ impl HiveRunStore {
                 .context("decoding materialized Hive objective message")?;
             let objective_matches = matches!(
                 materialized.as_deref(),
-                Some([Content::Text { text }]) if text == &expected
+                Some([Content::Text { text, .. }]) if text == &expected
             );
             if message_session.as_deref() != Some(session_id)
                 || message_role.as_deref() != Some("user")
@@ -507,7 +507,7 @@ impl HiveRunStore {
                 .context("decoding Worker conversation objective message")?;
             let objective_matches = matches!(
                 materialized.as_deref(),
-                Some([Content::Text { text }]) if text == &objective
+                Some([Content::Text { text, .. }]) if text == &objective
             );
             if message_session.as_deref() != Some(session_id)
                 || message_role.as_deref() != Some("user")
@@ -2515,7 +2515,7 @@ fn committed_worker_introduction_opening(
     let contents = serde_json::from_str::<Vec<Content>>(&content_json).ok();
     let canonical = matches!(
         contents.as_deref(),
-        Some([Content::Text { text }]) if !text.trim().is_empty()
+        Some([Content::Text { text, .. }]) if !text.trim().is_empty()
     );
     Ok(canonical.then_some(message_id))
 }
@@ -2846,9 +2846,7 @@ fn materialize_objective_message(tx: &Transaction<'_>, run_id: &str, now: &str) 
         return Ok(());
     }
     let rendered = format!("Hive {kind} objective:\n{objective}");
-    let content = serde_json::to_string(&vec![Content::Text {
-        text: rendered.clone(),
-    }])?;
+    let content = serde_json::to_string(&vec![Content::text(rendered.clone())])?;
     tx.execute(
         "INSERT INTO messages (session_id, role, content, created_at)
          VALUES (?1, 'user', ?2, ?3)",

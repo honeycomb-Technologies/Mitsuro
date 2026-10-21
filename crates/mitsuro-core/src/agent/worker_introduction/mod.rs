@@ -2243,7 +2243,7 @@ fn canonical_text(content_json: &str) -> Result<Option<String>> {
     let text = content
         .into_iter()
         .filter_map(|block| match block {
-            Content::Text { text } => Some(text),
+            Content::Text { text, .. } => Some(text),
             Content::Image { .. }
             | Content::Document { .. }
             | Content::ToolUse { .. }

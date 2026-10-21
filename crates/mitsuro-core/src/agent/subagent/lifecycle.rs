@@ -153,7 +153,7 @@ fn child_completion_content(
         "[CHILD AGENT COMPLETE]\nname: {name}\ndelegated_run_id: {delegated_run_id}\nterminal_stage: {}\noutcome: {outcome}\nusable_agents: {usable_agents}\nsuccess: {success}\nsummary:\n{summary}\n{report_evidence}\nSynthesize from the supplied evidence now. Integrate usable evidence from degraded outcomes and report a total failure accurately. Do not repeat covered inspection or validation unless a report identifies a concrete gap or conflict. Use agent status for durable metadata; followup/resume starts new delegated work.\n",
         child_terminal_stage_label(terminal_stage),
     );
-    vec![Content::Text { text: body }]
+    vec![Content::text(body)]
 }
 
 fn compact_completion_report_evidence(artifact: &serde_json::Value) -> Option<String> {
@@ -840,7 +840,7 @@ mod tests {
             "Two reports completed.",
             Some(&evidence),
         );
-        let Content::Text { text } = &content[0] else {
+        let Content::Text { text, .. } = &content[0] else {
             panic!("completion wake should be text")
         };
         assert!(text.contains("[CHILD REPORT EVIDENCE]"));

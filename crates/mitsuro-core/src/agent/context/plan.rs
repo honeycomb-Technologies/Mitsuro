@@ -6,7 +6,7 @@ use crate::plan::PlanManager;
 use crate::storage::WorkMode;
 use crate::workflow::{GoalStatus, WorkflowManager, WorkflowSnapshot, WorkflowStepStatus};
 
-use super::truncate_utf8;
+use super::{truncate_utf8, truncate_utf8_bytes};
 
 const MAX_VISIBLE_READY_TASKS: usize = 12;
 const MAX_VISIBLE_BLOCKED_TASKS: usize = 6;
@@ -133,80 +133,15 @@ pub fn build_plan_context(db_path: &Path, session_id: &str, work_mode: WorkMode)
     }
 }
 
-fn build_workflow_context(snapshot: &WorkflowSnapshot, work_mode: WorkMode) -> String {
+/// One independently bounded section keeps canonical execution obligations
+/// intact before the aggregate allocator considers project/retrieval material.
+// Goal creation permits 4,000 Unicode characters (up to 16 KiB). Reserve
+// enough for that exact objective plus current-step and verification context.
+const MAX_WORKFLOW_CONTEXT_BYTES: usize = 28 * 1024;
+const WORKFLOW_READ_GUIDANCE: &str = "This is a bounded view of the canonical Goal. Excerpts and omitted items do not narrow its scope. Use `workflow_read` (discover through `tool_search` if needed) to read full objective, constraints, criteria, or steps before acting on omitted requirements or claiming completion.";
+
+pub(super) fn build_workflow_context(snapshot: &WorkflowSnapshot, work_mode: WorkMode) -> String {
     let goal = &snapshot.goal;
-    let constraints = if goal.constraints.is_empty() {
-        "  (none)".to_string()
-    } else {
-        goal.constraints
-            .iter()
-            .map(|constraint| format!("  - {constraint}"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let criteria = if snapshot.criteria.is_empty() {
-        "  (none defined)".to_string()
-    } else {
-        snapshot
-            .criteria
-            .iter()
-            .map(|criterion| {
-                format!(
-                    "  - [{}] {} (criterion_id: {})",
-                    criterion.status, criterion.description, criterion.id
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let plan = snapshot
-        .plan_revision
-        .as_ref()
-        .map(|plan| {
-            format!(
-                "{} (revision {}, {})",
-                plan.title, plan.revision_number, plan.status
-            )
-        })
-        .unwrap_or_else(|| "(no plan revision proposed)".to_string());
-    let steps = if snapshot.steps.is_empty() {
-        "  (none)".to_string()
-    } else {
-        snapshot
-            .steps
-            .iter()
-            .map(|step| {
-                format!(
-                    "  - [{}] {}: {}",
-                    step.status, step.display_key, step.description
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    if work_mode == WorkMode::Plan {
-        return format!(
-            "[PLAN MODE ACTIVE - CANONICAL WORKFLOW]\n\n\
-             Goal ID: {goal_id}\n\
-             Goal revision: {revision}\n\
-             Goal status: {status}\n\
-             Outcome: {objective}\n\n\
-             Constraints:\n{constraints}\n\n\
-             Verification:\n{criteria}\n\n\
-             Current plan: {plan}\n\
-             Steps:\n{steps}\n\n\
-             Plan mode is read-only for project state. Investigate, ask questions, and call \
-             `workflow_propose` with typed Goal/plan data to create or revise a draft. Assistant \
-             prose is never authoritative. Only the user can approve a plan revision and activate \
-             or resume the Goal; permission mode does not change that boundary.",
-            goal_id = goal.id,
-            revision = snapshot.aggregate_revision,
-            status = goal.status,
-            objective = goal.objective,
-        );
-    }
-
     let current_step = snapshot
         .steps
         .iter()
@@ -251,7 +186,8 @@ fn build_workflow_context(snapshot: &WorkflowSnapshot, work_mode: WorkMode) -> S
                          evidence. Do not start another canonical step. You may delegate bounded, \
                          independent work inside this step as one structured Agent graph, then \
                          integrate and verify it before completion.",
-                        step.display_key, step.description
+                        bounded_field(&step.display_key, 128),
+                        bounded_field(&step.description, 2_048)
                     )
                 } else {
                     format!(
@@ -259,7 +195,8 @@ fn build_workflow_context(snapshot: &WorkflowSnapshot, work_mode: WorkMode) -> S
                          complete it with concrete evidence. If the step contains substantial \
                          separable work, use one structured Agent graph with explicit write intent \
                          and dependency-order any shared files.",
-                        step.display_key, step.description
+                        bounded_field(&step.display_key, 128),
+                        bounded_field(&step.description, 2_048)
                     )
                 }
             },
@@ -283,26 +220,131 @@ fn build_workflow_context(snapshot: &WorkflowSnapshot, work_mode: WorkMode) -> S
         }
     };
 
-    format!(
-        "[DURABLE GOAL - {title}]\n\n\
-         Goal ID: {goal_id}\n\
-         Revision: {revision}\n\
-         Status: {status}\n\
-         Outcome: {objective}\n\n\
-         Constraints:\n{constraints}\n\n\
-         Verification:\n{criteria}\n\n\
-         Current plan: {plan}\n\
-         Progress:\n{steps}\n\n\
-         {execution_instruction}\n\n\
+    let title = bounded_field(&goal.title.replace(['`', '\n', '\r'], " "), 256);
+    let objective = bounded_field(&goal.objective, 16 * 1024);
+    let heading = if work_mode == WorkMode::Plan {
+        "[PLAN MODE ACTIVE - CANONICAL WORKFLOW]".to_string()
+    } else {
+        format!("[DURABLE GOAL - {title}]")
+    };
+    let obligation = if work_mode == WorkMode::Plan {
+        "Plan mode is read-only for project state. Investigate, ask questions, and call \
+         `workflow_propose` with typed Goal/plan data to create or revise a draft. Assistant \
+         prose is never authoritative. Only the user can approve a plan revision and activate \
+         or resume the Goal; permission mode does not change that boundary."
+    } else {
+        &execution_instruction
+    };
+    let mut context = format!(
+        "{heading}\n\nGoal ID: {goal_id}\nRevision: {revision}\nStatus: {status}\n\n\
+         {obligation}\n\n\
          Follow-up messages steer this Goal; they do not replace its outcome. Finishing an \
          assistant response or all plan steps does not complete the Goal. Goal completion requires \
-         verification criteria to pass.",
-        title = goal.title,
-        goal_id = goal.id,
+         verification criteria to pass.\n\n\
+         {WORKFLOW_READ_GUIDANCE}\n\nOutcome: {objective}",
+        goal_id = bounded_field(&goal.id, 128),
         revision = snapshot.aggregate_revision,
         status = goal.status,
-        objective = goal.objective,
+    );
+    if let Some(reason) = goal.status_reason.as_deref() {
+        context.push_str(&format!("\nStatus reason: {}", bounded_field(reason, 512)));
+    }
+    if let Some(step) = current_step {
+        context.push_str(&format!(
+            "\nCurrent step ID: {}\nCurrent step acceptance:\n{}",
+            bounded_field(&step.id, 128),
+            bounded_list(
+                step.acceptance_criteria
+                    .iter()
+                    .map(|value| format!("  - {}", bounded_field(value, 384))),
+                1_024
+            )
+        ));
+    }
+    let constraints = bounded_list(
+        goal.constraints
+            .iter()
+            .map(|value| format!("  - {}", bounded_field(value, 512))),
+        1_536,
+    );
+    // Surface unmet verification before passed history so a large Goal can
+    // advance without repeatedly receiving the same completed criteria.
+    let mut criteria = snapshot.criteria.iter().collect::<Vec<_>>();
+    criteria.sort_by_key(|criterion| criterion.status == crate::workflow::CriterionStatus::Passed);
+    let criteria = bounded_list(
+        criteria.into_iter().map(|criterion| {
+            format!(
+                "  - [{}] {} (criterion_id: {}, required: {})",
+                criterion.status,
+                bounded_field(&criterion.description, 640),
+                bounded_field(&criterion.id, 128),
+                criterion.required
+            )
+        }),
+        2_048,
+    );
+    let plan = snapshot
+        .plan_revision
+        .as_ref()
+        .map(|plan| {
+            format!(
+                "{} (revision {}, {})",
+                bounded_field(&plan.title, 256),
+                plan.revision_number,
+                plan.status
+            )
+        })
+        .unwrap_or_else(|| "(no plan revision proposed)".to_string());
+    let mut steps = snapshot.steps.iter().collect::<Vec<_>>();
+    steps.sort_by_key(|step| step.status.is_terminal());
+    let steps = bounded_list(
+        steps.into_iter().map(|step| {
+            format!(
+                "  - [{}] {}: {} (step_id: {})",
+                step.status,
+                bounded_field(&step.display_key, 64),
+                bounded_field(&step.description, 512),
+                bounded_field(&step.id, 128)
+            )
+        }),
+        2_048,
+    );
+    context.push_str(&format!("\n\nConstraints:\n{constraints}\n\nVerification:\n{criteria}\n\nCurrent plan: {plan}\nProgress:\n{steps}"));
+    // The local field limits above normally keep the complete section below
+    // this ceiling. Preserve an explicit marker if a future field grows it.
+    bounded_field(&context, MAX_WORKFLOW_CONTEXT_BYTES)
+}
+
+fn bounded_field(text: &str, bytes: usize) -> String {
+    const MARKER: &str = " [EXCERPT; read full value with workflow_read]";
+    if text.len() <= bytes {
+        return text.to_string();
+    }
+    format!(
+        "{}{}",
+        truncate_utf8_bytes(text, bytes.saturating_sub(MARKER.len())),
+        MARKER
     )
+}
+
+fn bounded_list(items: impl Iterator<Item = String>, max_bytes: usize) -> String {
+    const MARKER: &str = "\n  [ADDITIONAL ITEMS OMITTED; read with workflow_read]";
+    let mut output = String::new();
+    for item in items {
+        if output.len() + item.len() + 1 + MARKER.len() > max_bytes {
+            output.push_str(MARKER);
+            break;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(&item);
+    }
+    if output.is_empty() {
+        "  (none)".to_string()
+    } else {
+        output
+    }
 }
 
 fn plan_mode_default_context() -> String {

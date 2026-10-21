@@ -6,7 +6,7 @@ use std::time::Duration;
 use axum::{
     extract::State,
     http::HeaderMap,
-    response::sse::{Event, KeepAlive, Sse},
+    response::sse::{Event, Sse},
     Json,
 };
 use serde_json::json;
@@ -138,6 +138,14 @@ pub(super) async fn steer(
         })));
     }
 
+    crate::control_leases::authorize_code_agent_mutation(
+        &state,
+        &req.session_id,
+        session.session_type,
+        &headers,
+    )
+    .await?;
+
     let sender = state
         .session_inputs
         .read()
@@ -227,6 +235,14 @@ pub(super) async fn tool_result(
             .map_err(hive_control_error)?;
         return Ok(hive_response_sse(receiver));
     }
+
+    crate::control_leases::authorize_code_agent_mutation(
+        &state,
+        &req.session_id,
+        session.session_type,
+        &headers,
+    )
+    .await?;
 
     let mut ctx = setup_chat_session(
         &state,
@@ -350,15 +366,13 @@ fn persist_user_text_once(
 ) -> Result<(), AppError> {
     let already_persisted = ctx.conversation.last().is_some_and(|message| {
         message.role == Role::User
-            && matches!(message.content.as_slice(), [Content::Text { text: existing }] if existing == text)
+            && matches!(message.content.as_slice(), [Content::Text { text: existing, .. }] if existing == text)
     });
     if already_persisted {
         return Ok(());
     }
 
-    let content = vec![Content::Text {
-        text: text.to_string(),
-    }];
+    let content = vec![Content::text(text.to_string())];
     let content_json = serde_json::to_string(&content)?;
     ctx.conversation.push(ModelMessage {
         role: Role::User,
@@ -433,7 +447,14 @@ pub(super) async fn tool_approval(
     Json(req): Json<ToolApprovalRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let idempotency_key = super::super::hive::idempotency_key_from_headers(&headers)?;
-    submit_tool_approval(&state, user.as_ref(), req, idempotency_key.as_deref()).await
+    submit_tool_approval(
+        &state,
+        user.as_ref(),
+        req,
+        idempotency_key.as_deref(),
+        &headers,
+    )
+    .await
 }
 
 pub(crate) async fn submit_tool_approval(
@@ -441,6 +462,7 @@ pub(crate) async fn submit_tool_approval(
     user: Option<&CurrentUser>,
     req: ToolApprovalRequest,
     idempotency_key: Option<&str>,
+    headers: &HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let session_manager = SessionManager::new(Database::new(&state.db_path)?);
     let session = load_owned_session(&session_manager, &req.session_id, user)?;
@@ -468,6 +490,14 @@ pub(crate) async fn submit_tool_approval(
             .map_err(hive_control_error)?;
         return Ok(Json(json!({"status": "ok"})));
     }
+
+    crate::control_leases::authorize_code_agent_mutation(
+        state,
+        &req.session_id,
+        session.session_type,
+        headers,
+    )
+    .await?;
 
     let request_hash = idempotency_key.map(|_| {
         hash_request_bytes(
@@ -632,40 +662,11 @@ pub(super) fn resolve_pending_hive_run(
 }
 
 pub(super) fn hive_response_sse(
-    mut receiver: tokio::sync::broadcast::Receiver<AgenticEvent>,
+    receiver: tokio::sync::broadcast::Receiver<AgenticEvent>,
 ) -> Sse<ReceiverStream<Result<Event, Infallible>>> {
     let (tx, rx) = mpsc::channel(32);
-    tokio::spawn(async move {
-        loop {
-            match receiver.recv().await {
-                Ok(event) => {
-                    let terminal = matches!(
-                        event,
-                        AgenticEvent::Finish { .. } | AgenticEvent::Error { .. }
-                    );
-                    let Ok(event) = Event::default().json_data(event) else {
-                        continue;
-                    };
-                    if tx.send(Ok(event)).await.is_err() || terminal {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                    let event = AgenticEvent::Lagged {
-                        skipped: usize::try_from(skipped).unwrap_or(usize::MAX),
-                    };
-                    let Ok(event) = Event::default().json_data(event) else {
-                        continue;
-                    };
-                    if tx.send(Ok(event)).await.is_err() {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-    Sse::new(ReceiverStream::new(rx)).keep_alive(KeepAlive::default())
+    crate::routes::sse::spawn_broadcast_sse_pump(receiver, tx, Vec::new(), true);
+    crate::routes::sse::sse_response(rx)
 }
 
 pub(super) fn hive_control_error(error: anyhow::Error) -> AppError {

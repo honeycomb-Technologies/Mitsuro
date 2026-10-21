@@ -25,16 +25,9 @@ mod tools;
 mod types;
 
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
-use tokio::time::sleep;
 use tracing::{info, warn};
-
-/// Materialize the whole batch immediately. The shared adaptive scheduler owns
-/// provider admission/cooldown; delaying task creation here made genuinely
-/// parallel work appear serial in every client.
-const DEFAULT_STAGGER_MS: u64 = 0;
 
 use crate::agent::AgentCancellation;
 use crate::agent::{DelegationCoordinator, DelegationTaskOutcome};
@@ -68,8 +61,7 @@ pub use types::{
 };
 
 // Re-export single agent entry points
-pub(crate) use execution::{execute_single_agent, AgentConfig};
-pub use execution::{execute_single_child, execute_single_explorer};
+pub use execution::execute_single_child;
 
 // Internal execution functions
 use execution::execute_builder_with_progress;
@@ -81,8 +73,6 @@ pub struct SubAgentPool {
     /// Optional user ceiling. The default scheduler limit is derived from host
     /// capacity and adapts to observed provider health.
     concurrency_ceiling: Option<usize>,
-    /// Delay between spawning agents (prevents rate limit storms)
-    stagger_delay: Duration,
     /// Durable orchestration authority for normalized group/task execution.
     /// None keeps non-session and migration-era callers on the legacy path.
     delegation_coordinator: Option<DelegationCoordinator>,
@@ -94,7 +84,6 @@ impl SubAgentPool {
             client,
             cancellation,
             concurrency_ceiling: None,
-            stagger_delay: Duration::from_millis(DEFAULT_STAGGER_MS),
             delegation_coordinator: None,
         }
     }
@@ -118,12 +107,6 @@ impl SubAgentPool {
                 "Ignoring delegated model override without an exact resolved client"
             );
         }
-        self
-    }
-
-    /// Set custom stagger delay between agent spawns
-    pub fn with_stagger_delay(mut self, delay: Duration) -> Self {
-        self.stagger_delay = delay;
         self
     }
 
@@ -163,194 +146,8 @@ impl SubAgentPool {
             .await
     }
 
-    /// Execute exploration tasks concurrently using the single-agent model
-    ///
-    /// Each task runs as an independent single explorer agent with read-only tools.
-    pub async fn execute_with_progress(
-        &self,
-        tasks: Vec<SubAgentTask>,
-        progress_tx: mpsc::UnboundedSender<AgentProgress>,
-    ) -> Vec<SubAgentResult> {
-        use crate::tools::registry::{DelegationPolicy, PermissionMode, ToolRegistry};
-
-        let registry = Arc::new(ToolRegistry::new());
-        let policy = DelegationPolicy::for_subagent_explore(PermissionMode::Autonomous, Some(20));
-        let task_count = tasks.len();
-        let stagger = self.stagger_delay;
-        let pool_admission = Arc::new(Semaphore::new(
-            self.concurrency_ceiling.unwrap_or(task_count.max(1)).max(1),
-        ));
-
-        let scheduler = self.scheduler();
-        info!(
-            count = task_count,
-            concurrency_ceiling = ?self.concurrency_ceiling,
-            stagger_ms = stagger.as_millis() as u64,
-            "SubAgentPool: Spawning explorer agents with stagger"
-        );
-
-        // JoinSet aborts every still-running child when this foreground pool
-        // future is dropped (for example by LoopInput::Cancel). Plain detached
-        // JoinHandles would allow delegated work to keep mutating afterward.
-        let mut task_set = JoinSet::new();
-
-        for (idx, mut task) in tasks.into_iter().enumerate() {
-            if idx > 0 && !stagger.is_zero() {
-                sleep(stagger).await;
-            }
-
-            task.ensure_identity("/root", "explorer", idx);
-            let scheduler = scheduler.clone();
-            let pool_admission = pool_admission.clone();
-            let client = self.client.clone();
-            let cancel = self.cancellation.child_token();
-            let resolved_model = self.resolve_model();
-            let registry = registry.clone();
-            let policy = policy.clone();
-            let task_id = task.id.clone();
-            let progress_tx = progress_tx.clone();
-            let coordinator = self.delegation_coordinator.clone();
-
-            task_set.spawn(async move {
-                emit_task_lifecycle(&progress_tx, &task, AgentProgressStatus::Queued);
-                let pool_permit = tokio::select! {
-                    permit = pool_admission.acquire_owned() => permit.ok(),
-                    _ = cancel.cancelled() => None,
-                };
-                let Some(_pool_permit) = pool_permit else {
-                    emit_task_lifecycle(&progress_tx, &task, AgentProgressStatus::Cancelled);
-                    return (idx, cancelled_result(&task));
-                };
-                if let (Some(coordinator), Some(delegation_task_id)) =
-                    (coordinator, task.delegation_task_id.clone())
-                {
-                    if let Err(error) = coordinator.validate_task_runtime(
-                        &delegation_task_id,
-                        task.delegation_policy.as_ref(),
-                        task.reasoning_effort,
-                        &task.working_dir,
-                    ) {
-                        emit_task_lifecycle(&progress_tx, &task, AgentProgressStatus::Failed);
-                        return (idx, coordinator_error_result(&task, error));
-                    }
-                    let lifecycle_tx = progress_tx.clone();
-                    let lifecycle_task = task.clone();
-                    let coordinated = coordinator
-                        .acquire_task_with_lifecycle(
-                            &delegation_task_id,
-                            &resolved_model,
-                            &cancel,
-                            move |state| {
-                                emit_task_lifecycle(&lifecycle_tx, &lifecycle_task, state.into());
-                            },
-                        )
-                        .await;
-                    let permit = match coordinated {
-                        Ok(Some(permit)) => permit,
-                        Ok(None) => {
-                            if cancel.is_cancelled() {
-                                emit_task_lifecycle(
-                                    &progress_tx,
-                                    &task,
-                                    AgentProgressStatus::Cancelled,
-                                );
-                            }
-                            return (idx, cancelled_result(&task));
-                        }
-                        Err(error) => {
-                            emit_task_lifecycle(&progress_tx, &task, AgentProgressStatus::Failed);
-                            return (idx, coordinator_error_result(&task, error));
-                        }
-                    };
-                    let execution_cancellation = permit.cancellation();
-                    let result = execute_single_explorer(
-                        client,
-                        task,
-                        registry,
-                        policy,
-                        String::new(),
-                        resolved_model,
-                        execution_cancellation,
-                        Some(progress_tx.clone()),
-                    )
-                    .await;
-                    return (idx, finish_coordinated_task(result, permit, &progress_tx));
-                }
-                let request = ScheduleRequest::new(
-                    task.parent_session_id
-                        .clone()
-                        .or_else(|| task.delegated_run_id.clone())
-                        .unwrap_or_else(|| task_id.clone()),
-                    resolved_model.clone(),
-                    SchedulingClass::ReadOnly,
-                )
-                .in_capacity_domain(resolved_model.clone());
-                let Some(permit) = scheduler.acquire(request, &cancel).await else {
-                    emit_task_lifecycle(&progress_tx, &task, AgentProgressStatus::Cancelled);
-                    return (idx, cancelled_result(&task));
-                };
-
-                if cancel.is_cancelled() {
-                    emit_task_lifecycle(&progress_tx, &task, AgentProgressStatus::Cancelled);
-                    return (idx, cancelled_result(&task));
-                }
-
-                let result = execute_single_explorer(
-                    client,
-                    task,
-                    registry,
-                    policy,
-                    String::new(),
-                    resolved_model,
-                    cancel,
-                    Some(progress_tx),
-                )
-                .await;
-                permit.complete(BackpressureSignal::from_error(result.error.as_deref()));
-                (idx, result)
-            });
-        }
-
-        let mut indexed_results = Vec::with_capacity(task_count);
-        let mut join_failures = Vec::new();
-        while let Some(joined) = task_set.join_next().await {
-            match joined {
-                Ok(result) => indexed_results.push(result),
-                Err(e) => {
-                    warn!("Explorer task panicked: {}", e);
-                    join_failures.push(SubAgentResult {
-                        task_id: "unknown".to_string(),
-                        agent_name: "unknown".to_string(),
-                        delegated_run_id: None,
-                        success: false,
-                        output: String::new(),
-                        files_examined: vec![],
-                        duration_ms: 0,
-                        turns_used: 0,
-                        error: Some(format!("Task panicked: {}", e)),
-                        termination: SubAgentTermination::Failed,
-                        policy_violations: vec![],
-                        evidence: Default::default(),
-                        background_processes: vec![],
-                    });
-                }
-            }
-        }
-        indexed_results.sort_by_key(|(index, _)| *index);
-        let mut results = indexed_results
-            .into_iter()
-            .map(|(_, result)| result)
-            .collect::<Vec<_>>();
-        results.extend(join_failures);
-
-        info!(
-            "SubAgentPool: All explorers complete, {} results",
-            results.len()
-        );
-        results
-    }
-
-    /// Execute builder tasks with write access, shared context, and staggered spawning
+    /// Execute builder tasks with write access and shared context.
+    /// The adaptive scheduler controls admission without delaying task creation.
     pub async fn execute_builders(
         &self,
         tasks: Vec<SubAgentTask>,
@@ -361,7 +158,6 @@ impl SubAgentPool {
         let client = self.client.clone();
         let cancellation = self.cancellation.clone();
         let task_count = tasks.len();
-        let stagger = self.stagger_delay;
         let pool_admission = Arc::new(Semaphore::new(
             self.concurrency_ceiling.unwrap_or(task_count.max(1)).max(1),
         ));
@@ -369,8 +165,7 @@ impl SubAgentPool {
         info!(
             count = task_count,
             concurrency_ceiling = ?self.concurrency_ceiling,
-            stagger_ms = stagger.as_millis() as u64,
-            "SubAgentPool: Spawning builder agents with stagger"
+            "SubAgentPool: Spawning builder agents"
         );
 
         // Per-invocation ownership is the cancellation boundary: dropping this
@@ -380,10 +175,6 @@ impl SubAgentPool {
 
         for (idx, mut task) in tasks.into_iter().enumerate() {
             // Stagger delay between spawns (skip first)
-            if idx > 0 && !stagger.is_zero() {
-                sleep(stagger).await;
-            }
-
             task.ensure_identity("/root", "builder", idx);
             let scheduler = scheduler.clone();
             let pool_admission = pool_admission.clone();

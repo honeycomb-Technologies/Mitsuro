@@ -25,5 +25,4 @@ pub enum AnchorMode {
     FollowLive,
     Fixed(TranscriptAnchor),
     ScrollTop(u32),
-    Top,
 }

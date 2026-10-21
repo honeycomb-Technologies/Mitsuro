@@ -111,6 +111,7 @@ struct CacheEntry {
     last_used: u64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MeasurementCacheStats {
     pub entries: usize,
@@ -194,14 +195,17 @@ impl MeasurementCache {
         measured
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[cfg(test)]
     pub fn weight(&self) -> usize {
         self.weight
     }
 
+    #[cfg(test)]
     pub fn stats(&self) -> MeasurementCacheStats {
         MeasurementCacheStats {
             entries: self.entries.len(),

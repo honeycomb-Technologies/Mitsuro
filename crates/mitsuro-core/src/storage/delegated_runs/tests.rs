@@ -1224,3 +1224,60 @@ fn expired_owner_cannot_publish_completion_or_drop_overwrite_recovery() {
         "background_host_lease_expired"
     );
 }
+
+#[test]
+fn active_parent_wake_is_scoped_and_survives_long_terminal_history() {
+    let (store, temp) = create_store();
+    let start = DelegatedRunStartInput {
+        delegated_run_id: "old-live-child".into(),
+        parent_session_id: "session-1".into(),
+        parent_tool_call_id: None,
+        role: DelegatedRunRole::Explore,
+        stage: DelegatedRunStage::Running,
+        provider: None,
+        model: None,
+        resumable: false,
+        resumed_from_run_id: None,
+        target_scope: vec![],
+    };
+    store.create_background_run(&start).unwrap();
+    let db = Database::new(&temp.path().join("delegated-runs.db")).unwrap();
+    db.conn()
+        .execute_batch(
+            "UPDATE delegated_runs SET updated_at = '2000-01-01T00:00:00Z';
+         WITH RECURSIVE history(n) AS (
+             SELECT 1 UNION ALL SELECT n + 1 FROM history WHERE n < 1001
+         )
+         INSERT INTO delegated_runs (
+             delegated_run_id, parent_session_id, role, stage, target_scope_key,
+             target_scope_json, created_at, updated_at, completed_at, wake_parent
+         ) SELECT 'terminal-' || n, 'session-1', 'explore', 'complete', '', '[]',
+             '2001-01-01T00:00:00Z', '2001-01-01T00:00:00Z',
+             '2001-01-01T00:00:00Z', 1 FROM history;",
+        )
+        .unwrap();
+    assert!(store
+        .list_runs_for_session("session-1", 1000)
+        .unwrap()
+        .iter()
+        .all(|run| run.delegated_run_id != start.delegated_run_id));
+    assert!(store.has_active_parent_wake("session-1").unwrap());
+    assert!(!store.has_active_parent_wake("another-session").unwrap());
+    store
+        .finalize_run(
+            &start.delegated_run_id,
+            DelegatedRunStage::Complete,
+            &serde_json::json!({"summary":"finished"}),
+            None,
+            false,
+        )
+        .unwrap();
+    assert!(!store.has_active_parent_wake("session-1").unwrap());
+    store
+        .create_run(&DelegatedRunStartInput {
+            delegated_run_id: "foreground-child".into(),
+            ..start
+        })
+        .unwrap();
+    assert!(!store.has_active_parent_wake("session-1").unwrap());
+}

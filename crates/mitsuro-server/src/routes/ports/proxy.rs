@@ -14,7 +14,7 @@ use futures::{SinkExt, StreamExt};
 use reqwest::redirect::Policy;
 use tokio_tungstenite::{connect_async, tungstenite::Message as UpstreamMessage};
 
-use crate::auth::CurrentUser;
+use crate::auth::{percent_decode_query_component, CurrentUser};
 use crate::error::AppError;
 use crate::AppState;
 
@@ -325,8 +325,21 @@ fn build_upstream_path(path: Option<&str>, query: Option<&str>) -> String {
         _ => full.push('/'),
     }
     if let Some(query) = query {
-        full.push('?');
-        full.push_str(query);
+        let mut first = true;
+        for part in query.split('&') {
+            let key = part.split_once('=').map_or(part, |(key, _)| key);
+            // Account and Browser control credentials belong to Mitsuro, not
+            // the preview process. This path is shared by HTTP and WebSockets.
+            if percent_decode_query_component(key).is_some_and(|key| {
+                key.eq_ignore_ascii_case("token") || key.eq_ignore_ascii_case("lease_token")
+            }) {
+                continue;
+            }
+            // Preserve the preview's encoding, duplicate keys and flag values.
+            full.push(if first { '?' } else { '&' });
+            full.push_str(part);
+            first = false;
+        }
     }
     full
 }
@@ -360,7 +373,13 @@ fn apply_preview_proxy_security_headers(
 }
 
 fn should_forward_request_header(name: &HeaderName) -> bool {
-    !is_hop_by_hop_header(name) && *name != header::HOST
+    // Authentication has already happened at the API boundary. Local preview
+    // processes must not inherit account, tenant or resource-control authority.
+    !is_hop_by_hop_header(name)
+        && *name != header::HOST
+        && *name != header::AUTHORIZATION
+        && !matches!(name.as_str(), "x-user-id" | "x-workspace-dir")
+        && !name.as_str().starts_with("x-mitsuro-")
 }
 
 fn should_forward_response_header(name: &HeaderName) -> bool {
@@ -395,6 +414,102 @@ mod tests {
             build_upstream_path(Some("foo"), Some("a=1&b=2")),
             "/foo?a=1&b=2"
         );
+        assert_eq!(
+            build_upstream_path(
+                Some("socket"),
+                Some("token=account&x=a%2Fb+c&token=duplicate&lease_token=control&x=2&flag&empty=")
+            ),
+            "/socket?x=a%2Fb+c&x=2&flag&empty="
+        );
+        assert_eq!(
+            build_upstream_path(None, Some("%74oken=account&LEASE%5Ftoken=control&token")),
+            "/"
+        );
+        assert_eq!(
+            build_upstream_path(
+                None,
+                Some("api_key=preview-owned&redirect=token%3Dvalue&%zz=unchanged")
+            ),
+            "/?api_key=preview-owned&redirect=token%3Dvalue&%zz=unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_proxy_strips_mitsuro_authority_and_preserves_preview_request() {
+        async fn echo(
+            method: Method,
+            uri: Uri,
+            headers: HeaderMap,
+            body: String,
+        ) -> impl IntoResponse {
+            let headers = headers
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.to_str().expect("test header")))
+                .collect::<std::collections::HashMap<_, _>>();
+            axum::Json(serde_json::json!({
+                "method": method.as_str(), "uri": uri.to_string(), "headers": headers, "body": body,
+            }))
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind preview server");
+        let address = listener.local_addr().unwrap();
+        let upstream = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().fallback(echo))
+                .await
+                .unwrap();
+        });
+        let request = Request::builder()
+            .method(Method::POST)
+            .header(header::AUTHORIZATION, "Bearer test-account-token")
+            .header("X-User-Id", "test-user")
+            .header("X-Workspace-Dir", "/test-workspace")
+            .header("X-Mitsuro-Control-Lease", "test-control-token")
+            .header("X-Mitsuro-Presence-Token", "test-presence-token")
+            .header("X-Mitsuro-Future-Authority", "test-future-token")
+            .header(header::PROXY_AUTHORIZATION, "Basic test-proxy-credential")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .header(header::COOKIE, "preview-session=demo")
+            .header("x-preview-header", "keep")
+            .body(body::Body::from("preview body"))
+            .unwrap();
+        let upstream_path = build_upstream_path(
+            Some("preview"),
+            Some("token=test-account-token&x=a%2Fb+c&lease_token=test-control-token&x=2"),
+        );
+        let response = proxy_http_request(
+            Method::POST,
+            format!("http://{address}{upstream_path}"),
+            request.headers().clone(),
+            request,
+        )
+        .await
+        .expect("preview request succeeds");
+        let bytes = body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let echoed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        upstream.abort();
+
+        assert_eq!(echoed["method"], "POST");
+        assert_eq!(echoed["uri"], "/preview?x=a%2Fb+c&x=2");
+        assert_eq!(echoed["body"], "preview body");
+        let headers = echoed["headers"].as_object().unwrap();
+        for forbidden in [
+            "authorization",
+            "proxy-authorization",
+            "x-user-id",
+            "x-workspace-dir",
+            "x-mitsuro-control-lease",
+            "x-mitsuro-presence-token",
+            "x-mitsuro-future-authority",
+        ] {
+            assert!(!headers.contains_key(forbidden), "forwarded {forbidden}");
+        }
+        assert_eq!(headers["content-type"], "text/plain");
+        assert_eq!(headers["cookie"], "preview-session=demo");
+        assert_eq!(headers["x-preview-header"], "keep");
     }
 
     #[test]

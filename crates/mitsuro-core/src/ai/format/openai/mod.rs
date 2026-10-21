@@ -76,9 +76,7 @@ mod tests {
         let messages = vec![ModelMessage {
             role: Role::User,
             content: vec![
-                Content::Text {
-                    text: "Describe this".to_string(),
-                },
+                Content::text("Describe this".to_string()),
                 Content::Image {
                     image: ImageContent {
                         url: None,
@@ -142,9 +140,7 @@ mod tests {
                         thinking: "private ordinary reasoning".to_string(),
                         signature: "opaque-signature".to_string(),
                     },
-                    Content::Text {
-                        text: "Visible answer".to_string(),
-                    },
+                    Content::text("Visible answer".to_string()),
                 ],
             }];
 
@@ -172,9 +168,7 @@ mod tests {
                             thinking: "private tool reasoning".to_string(),
                             signature: "opaque-signature".to_string(),
                         },
-                        Content::Text {
-                            text: "I will inspect that file.".to_string(),
-                        },
+                        Content::text("I will inspect that file.".to_string()),
                         Content::ToolUse {
                             id: "call_read".to_string(),
                             name: "read".to_string(),

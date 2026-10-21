@@ -36,15 +36,9 @@ jobs:
       - name: Test API streaming and error contracts
         run: bun test packages/api/test
       - name: Test mobile navigation and workspace contracts
-        run: |
-          bun test ./tests/mobile-first-send-workspace.test.ts
-          bun test ./tests/mobile-target-branch-continuation.test.ts
-          bun test ./tests/mobile-navigation-shell.test.ts
-      - name: Test mobile identity migration and brand guardrails
-        run: >-
-          deno test --unstable-sloppy-imports --allow-read --allow-env
-          apps/mobile/test/identityMigration.test.ts
-          apps/mobile/test/mitsuroBrandGuardrails.test.ts
+        run: bun test ./tests
+      - name: Test mobile behavior and compatibility contracts
+        run: deno task test:mobile
       - name: Type-check shared client state
         run: deno task check:state
       - name: Test shared client state contracts

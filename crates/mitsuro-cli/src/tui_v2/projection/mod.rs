@@ -16,6 +16,7 @@ use crate::tui_v2::model::{
     },
 };
 
+#[cfg(test)]
 pub use persisted::PersistedMessage;
 
 #[cfg(test)]
@@ -58,6 +59,7 @@ impl ConversationProjection {
         persisted::project_model_messages(session_id.into(), messages)
     }
 
+    #[cfg(test)]
     pub fn from_persisted(session_id: impl Into<String>, messages: &[PersistedMessage]) -> Self {
         persisted::project_persisted_messages(session_id.into(), messages)
     }
@@ -104,10 +106,6 @@ impl ConversationProjection {
             });
     }
 
-    pub fn into_presentation(self) -> ConversationPresentation {
-        self.presentation
-    }
-
     pub fn push_user_prompt(
         &mut self,
         message_id: &str,
@@ -146,23 +144,6 @@ impl ConversationProjection {
         self.active_text = None;
         self.active_thinking = None;
         turn_id
-    }
-
-    pub fn resume_turn(&mut self, turn_id: &TurnId) -> bool {
-        let Some(index) = self
-            .presentation
-            .turns
-            .iter()
-            .position(|turn| &turn.id == turn_id)
-        else {
-            return false;
-        };
-        self.current_turn = Some(index);
-        self.presentation.live_turn_id = Some(turn_id.clone());
-        self.presentation.turns[index].state = TurnState::Live;
-        self.active_text = None;
-        self.active_thinking = None;
-        true
     }
 
     fn ensure_turn(&mut self) -> usize {
@@ -440,7 +421,7 @@ impl ConversationProjection {
 
 fn merge_citations(existing: &mut Vec<CitationModel>, incoming: Vec<CitationModel>) {
     for citation in incoming {
-        if !existing.iter().any(|item| item.url == citation.url) {
+        if !existing.contains(&citation) {
             existing.push(citation);
         }
     }

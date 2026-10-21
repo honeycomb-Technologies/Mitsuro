@@ -57,6 +57,7 @@ mod recovery;
 pub mod reports;
 mod runtime_traces;
 mod sessions;
+mod spatial_canvases;
 
 pub use agent_state::AgentState;
 pub use apns_devices::{ApnsDevice, ApnsDeviceRegistration, ApnsDeviceStore};
@@ -283,6 +284,14 @@ pub use runtime_traces::{
     RuntimeTraceSummary, TraceEventCount, TraceFailureCategory,
 };
 pub use sessions::{SessionInfo, SessionManager, SessionType, WorkMode, WorkspaceMode};
+pub use spatial_canvases::{
+    CanvasEvent, CanvasEventPage, CanvasNode, CanvasNodeBinding, CanvasOperation, CanvasPatchInput,
+    CanvasResourceCleanupClaim, CanvasResourceCreateClaim, CanvasResourceCreateIntent,
+    CanvasResourceCreateStatus, CanvasResourceKind, CanvasState, CreateCanvasInput,
+    CreateCanvasOutcome, PatchCanvasOutcome, ProjectCandidate, ReserveCanvasResourceCreateInput,
+    ReserveCanvasResourceCreateOutcome, SpatialCanvas, SpatialCanvasStore, SpatialCanvasSurface,
+    WorldRect, SPATIAL_CANVAS_SCHEMA_VERSION,
+};
 
 /// Get current Unix timestamp in seconds
 #[inline]

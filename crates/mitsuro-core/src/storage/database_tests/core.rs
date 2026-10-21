@@ -7,63 +7,240 @@ use crate::storage::database::{Database, SCHEMA_VERSION};
 use super::{create_test_db, seed_legacy_delegated_runs_schema};
 
 #[test]
-fn test_database_creation() {
+fn fresh_database_has_current_schema_and_runtime_contracts() {
     let (db, _temp) = create_test_db();
-    let version = db.get_schema_version();
-    assert_eq!(
-        version, SCHEMA_VERSION,
-        "Expected current schema version to be {SCHEMA_VERSION}"
-    );
-}
-
-#[test]
-fn test_foreign_keys_enabled() {
-    let (db, _temp) = create_test_db();
-
     let conn = db.conn();
-    let mut stmt = conn
-        .prepare("PRAGMA foreign_keys")
-        .expect("Failed to prepare PRAGMA");
+    assert_eq!(db.get_schema_version(), SCHEMA_VERSION);
+    let foreign_keys: i32 = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .expect("foreign key setting");
+    assert_eq!(foreign_keys, 1, "foreign keys should be enabled");
+    let journal_mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("journal mode");
+    assert_eq!(journal_mode.to_lowercase(), "wal");
 
-    let fk_enabled: i32 = stmt
-        .query_row([], |row| row.get(0))
-        .expect("Failed to get foreign_keys setting");
+    for table in [
+        "sessions",
+        "messages",
+        "runtime_traces",
+        "delegated_runs",
+        "delegated_run_continuations",
+        "hive_runtime_state",
+        "hive_attention_state",
+        "workflow_goals",
+        "workflow_goal_criteria",
+        "workflow_plan_revisions",
+        "workflow_plan_steps",
+        "workflow_step_dependencies",
+        "workflow_execution_attempts",
+        "workflow_events",
+        "workflow_idempotency",
+        "pinch_metadata",
+        "block_ui_state",
+        "file_activity",
+        "push_delivery_attempts",
+        "delegation_attempts",
+        "delegation_capacity_hosts",
+        "delegation_capacity_domains",
+        "delegation_capacity_waiters",
+        "delegation_capacity_leases",
+    ] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .expect("query schema table");
+        assert_eq!(exists, 1, "missing table {table}");
+    }
 
-    assert_eq!(fk_enabled, 1, "Foreign keys should be enabled");
-}
+    let required_columns: &[(&str, &[&str])] = &[
+        (
+            "sessions",
+            &[
+                "id",
+                "title",
+                "created_at",
+                "updated_at",
+                "user_id",
+                "working_dir",
+                "session_type",
+                "work_mode",
+                "target_branch",
+                "context_ledger_json",
+                "continuation_json",
+                "recovery_json",
+                "agent_state",
+                "agent_started_at",
+                "agent_last_event_at",
+                "pinned_at",
+                "archived_at",
+                "token_count",
+                "model",
+                "model_key_json",
+                "model_catalog_revision",
+            ],
+        ),
+        (
+            "runtime_traces",
+            &[
+                "session_id",
+                "run_id",
+                "sequence",
+                "turn",
+                "event_type",
+                "payload_json",
+                "failure_category",
+                "stop_reason",
+            ],
+        ),
+        (
+            "delegated_runs",
+            &[
+                "delegated_run_id",
+                "parent_session_id",
+                "role",
+                "stage",
+                "target_scope_json",
+                "snapshot_json",
+                "artifact_json",
+                "delegation_group_id",
+                "delegation_task_id",
+                "attempt_number",
+            ],
+        ),
+        (
+            "hive_runtime_state",
+            &[
+                "session_id",
+                "status",
+                "next_wake_at",
+                "sleep_reason",
+                "last_error",
+                "current_run_id",
+                "last_wake_reason",
+                "crew_slug",
+                "priority",
+                "updated_at",
+                "worker_id",
+            ],
+        ),
+        (
+            "hive_attention_state",
+            &["user_scope", "item_id", "read", "cleared", "updated_at"],
+        ),
+        (
+            "pinch_metadata",
+            &["source_session_id", "target_session_id", "summary"],
+        ),
+        (
+            "file_activity",
+            &["read_count", "write_count", "edit_count", "last_accessed"],
+        ),
+        (
+            "hive_schedules",
+            &[
+                "model",
+                "model_key_json",
+                "model_catalog_revision",
+                "worker_id",
+            ],
+        ),
+        (
+            "hive_workers",
+            &[
+                "id",
+                "user_id",
+                "slug",
+                "display_name",
+                "avatar_color",
+                "model",
+                "model_key_json",
+                "model_catalog_revision",
+                "permission_mode",
+                "autonomy",
+                "heartbeat_interval_secs",
+                "status",
+                "dm_session_id",
+                "memory_namespace_id",
+            ],
+        ),
+        ("hive_worker_documents", &["kind"]),
+        ("hive_run_attempts", &["executor_id"]),
+        ("hive_controllers", &["worker_id"]),
+        ("hive_runs", &["worker_id"]),
+        (
+            "push_subscriptions",
+            &[
+                "last_success_at",
+                "last_failure_at",
+                "last_failure_reason",
+                "failure_count",
+            ],
+        ),
+        (
+            "delegation_tasks",
+            &["executor_envelope_version", "executor_envelope_json"],
+        ),
+        (
+            "delegation_groups",
+            &[
+                "replay_owner_id",
+                "replay_lease_expires_at_ms",
+                "replay_attempt_count",
+            ],
+        ),
+    ];
+    for (table, required) in required_columns {
+        let columns = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .expect("prepare table columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query table columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect table columns");
+        for column in *required {
+            assert!(
+                columns.iter().any(|actual| actual == column),
+                "{table} missing {column}"
+            );
+        }
+    }
 
-#[test]
-fn test_wal_mode_enabled() {
-    let (db, _temp) = create_test_db();
+    let legacy_attempt_columns: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('hive_run_attempts') WHERE name = 'worker_id'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query legacy attempt column");
+    assert_eq!(legacy_attempt_columns, 0, "attempts use executor_id");
 
-    let conn = db.conn();
-    let mut stmt = conn
-        .prepare("PRAGMA journal_mode")
-        .expect("Failed to prepare PRAGMA");
-
-    let journal_mode: String = stmt
-        .query_row([], |row| row.get(0))
-        .expect("Failed to get journal_mode");
-
-    assert_eq!(
-        journal_mode.to_lowercase(),
-        "wal",
-        "WAL mode should be enabled"
-    );
-}
-
-#[test]
-fn test_schema_version_increments() {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    let db_path = temp_dir.path().join("test.db");
-
-    let db = Database::new(&db_path).expect("Failed to create database");
-    let version = db.get_schema_version();
-
-    assert_eq!(
-        version, SCHEMA_VERSION,
-        "Expected final schema version {SCHEMA_VERSION}"
-    );
+    let messages_ddl: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("messages table DDL");
+    assert!(messages_ddl.contains("FOREIGN KEY"));
+    assert!(messages_ddl.contains("ON DELETE CASCADE"));
+    for index in [
+        "idx_workflow_goals_one_unfinished",
+        "idx_workflow_one_serial_step",
+        "idx_workflow_one_running_attempt",
+    ] {
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [index],
+                |row| row.get(0),
+            )
+            .expect("query workflow index");
+        assert_eq!(exists, 1, "missing index {index}");
+    }
 }
 
 #[test]
@@ -114,15 +291,15 @@ fn privacy_migration_releases_exclusive_lock_while_first_handle_stays_open() {
     drop(seed);
 
     let first = Database::new(&db_path).expect("complete privacy migration");
-    assert_eq!(first.get_schema_version(), 78);
+    assert_eq!(first.get_schema_version(), 80);
 
     // Keep the migration-winning handle alive. A locking-mode restore without
     // a subsequent database access retains SQLite's exclusive lock and makes
     // this second independently supervised process time out.
     let second = Database::new(&db_path)
         .expect("second process should open while migration winner remains alive");
-    assert_eq!(second.get_schema_version(), 78);
-    assert_eq!(first.get_schema_version(), 78);
+    assert_eq!(second.get_schema_version(), 80);
+    assert_eq!(first.get_schema_version(), 80);
 }
 
 #[test]
@@ -182,7 +359,7 @@ fn privacy_migration_never_publishes_completion_while_a_peer_pins_wal() {
         .expect("release peer snapshot");
     drop(reader);
     let recovered = Database::new(&db_path).expect("retry privacy migration after peer release");
-    assert_eq!(recovered.get_schema_version(), 78);
+    assert_eq!(recovered.get_schema_version(), 80);
 }
 
 #[test]
@@ -231,7 +408,7 @@ fn migration_33_removes_legacy_compaction_memory_and_duplicate_history() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 
     let flush_count: i64 = db
         .conn()
@@ -301,7 +478,7 @@ fn migration_34_backfills_provider_call_classification() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate db");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let (call_kind, operation): (Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -380,7 +557,7 @@ fn migration_39_upgrades_legacy_memories_and_separates_generated_snapshot() {
     drop(conn);
 
     let db = Database::new(&db_path).expect("migrate legacy memories");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 
     let fact_metadata: (String, String, f64) = db
         .conn()
@@ -577,7 +754,7 @@ fn migration_43_redacts_legacy_mako_payloads_and_physically_erases_secrets() {
     );
 
     let migrated = Database::new(&db_path).expect("apply privacy migration");
-    assert_eq!(migrated.get_schema_version(), 78);
+    assert_eq!(migrated.get_schema_version(), 80);
     let event_payloads: String = migrated
         .conn()
         .query_row(
@@ -674,7 +851,7 @@ fn migration_44_resumes_physical_privacy_cleanup_after_a_crash_checkpoint() {
     );
 
     let recovered = Database::new(&db_path).expect("resume physical privacy cleanup");
-    assert_eq!(recovered.get_schema_version(), 78);
+    assert_eq!(recovered.get_schema_version(), 80);
     drop(recovered);
 
     for path in [

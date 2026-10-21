@@ -105,7 +105,8 @@ impl OpenAIFormat {
 
                 for content in &msg.content {
                     match content {
-                        Content::Text { text } => text_content.push_str(text),
+                        Content::Text { text, citations } => text_content
+                            .push_str(&crate::ai::format::provider_text(text, citations)),
                         Content::ToolUse { id, name, input } => {
                             if orphaned_ids.contains(&id) {
                                 orphaned_tool_ids.push(id.clone());
@@ -157,10 +158,13 @@ impl OpenAIFormat {
 
             for content in &msg.content {
                 match content {
-                    Content::Text { text } if !text.is_empty() => {
-                        text_parts.push(text.clone());
+                    Content::Text { text, citations }
+                        if !text.is_empty() || !citations.is_empty() =>
+                    {
+                        let text = crate::ai::format::provider_text(text, citations);
+                        text_parts.push(text.to_string());
                         if role == "user" {
-                            user_parts.push(parts::user_text_part(self, text));
+                            user_parts.push(parts::user_text_part(self, &text));
                         }
                     }
                     // OpenAI-compatible APIs do not accept our durable thinking blocks. In

@@ -17,7 +17,6 @@ pub enum ScrollDirection {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScrollAmount {
-    Line,
     Page,
     Edge,
 }

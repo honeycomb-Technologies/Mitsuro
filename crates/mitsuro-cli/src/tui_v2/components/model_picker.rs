@@ -19,7 +19,6 @@ use crate::tui_v2::{
 #[derive(Clone, Copy)]
 pub struct ModelChoice<'a> {
     pub provider_index: usize,
-    pub model_index: usize,
     pub provider: &'a SetupProvider,
     pub model: &'a SetupModel,
 }
@@ -45,15 +44,13 @@ pub fn filtered<'a>(setup: &'a SetupSnapshot, query: &str) -> Vec<ModelChoice<'a
             provider
                 .models
                 .iter()
-                .enumerate()
-                .filter(move |(_, model)| {
+                .filter(move |model| {
                     query.is_empty()
                         || model.label.to_lowercase().contains(&query)
                         || provider.label.to_lowercase().contains(&query)
                 })
-                .map(move |(model_index, model)| ModelChoice {
+                .map(move |model| ModelChoice {
                     provider_index,
-                    model_index,
                     provider,
                     model,
                 })
@@ -264,13 +261,7 @@ mod tests {
         let choices = filtered(&setup, "");
         let rows = display_rows(&choices);
         assert!(matches!(rows[0], DisplayRow::Provider("xAI")));
-        assert!(matches!(
-            rows[1],
-            DisplayRow::Model {
-                index: 0,
-                choice: ModelChoice { model_index: 0, .. }
-            }
-        ));
+        assert!(matches!(rows[1], DisplayRow::Model { index: 0, .. }));
         assert!(matches!(rows[3], DisplayRow::Provider("OpenAI")));
         assert_eq!(choices.len(), 3);
     }

@@ -9,10 +9,6 @@ impl ControlId {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

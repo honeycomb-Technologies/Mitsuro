@@ -410,9 +410,7 @@ mod tests {
         ];
         messages.extend((0..KEEP_RECENT_MESSAGES).map(|index| ModelMessage {
             role: Role::Assistant,
-            content: vec![Content::Text {
-                text: format!("later message {index}"),
-            }],
+            content: vec![Content::text(format!("later message {index}"))],
         }));
 
         let compacted = microcompact_messages(&messages);
@@ -460,9 +458,7 @@ mod tests {
         }];
         messages.extend((0..KEEP_RECENT_MESSAGES).map(|index| ModelMessage {
             role: Role::Assistant,
-            content: vec![Content::Text {
-                text: format!("later {index}"),
-            }],
+            content: vec![Content::text(format!("later {index}"))],
         }));
 
         let deferred = microcompact_messages_cache_aware(&messages, false);

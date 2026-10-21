@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { Image, View, Text, Pressable, StyleSheet } from "react-native";
 import {
   Brain,
@@ -28,9 +28,10 @@ import {
   shouldExpandToolByPolicy,
 } from "./toolPresentation";
 import type { ChatMessage, ChatMessageAttachment, ToolCall } from "@mitsuro/api";
-import { beginMitsuroPerformanceSpan } from "@mitsuro/state";
+import { beginMitsuroPerformanceSpan, formatCitationSources, getMessageCopyText } from "@mitsuro/state";
 import * as Clipboard from "../../platform/clipboard";
 import * as Haptics from "../../platform/haptics";
+import { createMessageCopyAction, type MessageCopyFeedback } from "./messageCopyAction";
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -66,7 +67,15 @@ export const MessageBubble = memo(function MessageBubble({
   const { theme } = useThemeContext();
   const t = theme.colors;
   const isUser = message.role === "user";
-  const [copied, setCopied] = useState(false);
+  const [copyFeedback, setCopyFeedback] = useState<MessageCopyFeedback>(null);
+  const copyAction = useMemo(
+    () => createMessageCopyAction(Clipboard.setStringAsync, setCopyFeedback),
+    [sessionId, message.id],
+  );
+  useEffect(() => {
+    setCopyFeedback(null);
+    return copyAction.cancel;
+  }, [copyAction]);
 
   const assistantSegments = useMemo(
     () => {
@@ -82,16 +91,15 @@ export const MessageBubble = memo(function MessageBubble({
     },
     [isLast, isThinking, isUser, message],
   );
-  const handleCopy = () => {
-    const value = message.content.trim();
+  const handleCopy = async () => {
+    const value = getMessageCopyText(message).trim();
     if (!value) {
       return;
     }
 
-    Clipboard.setStringAsync(value);
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1200);
+    if (await copyAction.copy(value)) {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    }
   };
 
   const renderToolSegment = (toolCall: ToolCall) => {
@@ -193,6 +201,9 @@ export const MessageBubble = memo(function MessageBubble({
               content={segment.content}
               isStreaming={isLast && isStreaming}
             />
+            {segment.citations?.length ? (
+              <MarkdownContent content={formatCitationSources(segment.citations)} />
+            ) : null}
           </Pressable>
         );
     }
@@ -240,9 +251,9 @@ export const MessageBubble = memo(function MessageBubble({
                 <MarkdownContent content={message.content} isUser />
               </Pressable>
             ) : null}
-            {copied ? (
+            {copyFeedback ? (
               <Text style={[styles.copyStatus, { color: t.mutedForeground }]}>
-                Copied
+                {copyFeedback}
               </Text>
             ) : null}
           </View>
@@ -252,9 +263,9 @@ export const MessageBubble = memo(function MessageBubble({
         <View style={styles.assistantWrap}>
           {assistantSegments.map(renderAssistantSegment)}
 
-          {copied ? (
+          {copyFeedback ? (
             <Text style={[styles.copyStatus, { color: t.mutedForeground }]}>
-              Copied
+              {copyFeedback}
             </Text>
           ) : null}
         </View>
@@ -262,6 +273,7 @@ export const MessageBubble = memo(function MessageBubble({
     </View>
   );
 }, (prev, next) => (
+  prev.sessionId === next.sessionId &&
   prev.isLast === next.isLast &&
   prev.isStreaming === next.isStreaming &&
   prev.isThinking === next.isThinking &&

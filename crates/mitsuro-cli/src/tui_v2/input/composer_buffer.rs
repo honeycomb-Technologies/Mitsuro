@@ -31,10 +31,6 @@ pub struct WrappedLine {
 }
 
 impl ComposerBuffer {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn content(&self) -> &str {
         &self.content
     }
@@ -104,14 +100,6 @@ impl ComposerBuffer {
         self.sync_preferred_column(self.wrap_width_hint());
     }
 
-    pub fn insert_char(&mut self, ch: char) {
-        self.delete_selection_if_any();
-        let at = self.cursor();
-        self.content.insert(at, ch);
-        self.cursor = at.saturating_add(ch.len_utf8());
-        self.sync_preferred_column(self.wrap_width_hint());
-    }
-
     pub fn backspace(&mut self) {
         if self.delete_selection_if_any() {
             return;
@@ -126,23 +114,6 @@ impl ComposerBuffer {
             .map_or(0, |(i, _)| i);
         self.content.drain(prev..cursor);
         self.cursor = prev;
-        self.sync_preferred_column(self.wrap_width_hint());
-    }
-
-    pub fn delete_forward(&mut self) {
-        if self.delete_selection_if_any() {
-            return;
-        }
-        let cursor = self.cursor();
-        if cursor >= self.content.len() {
-            return;
-        }
-        let next = self.content[cursor..]
-            .chars()
-            .next()
-            .map(|c| cursor + c.len_utf8())
-            .unwrap_or(cursor);
-        self.content.drain(cursor..next);
         self.sync_preferred_column(self.wrap_width_hint());
     }
 
@@ -179,20 +150,6 @@ impl ComposerBuffer {
         if start < cursor {
             self.content.drain(start..cursor);
             self.cursor = start;
-            self.sync_preferred_column(width);
-        }
-    }
-
-    pub fn delete_to_line_end(&mut self, width: usize) {
-        let lines = self.wrapped_lines(width);
-        let (line, _) = self.visual_cursor(&lines);
-        let end = lines
-            .get(line)
-            .map(|l| l.src_end)
-            .unwrap_or(self.content.len());
-        let cursor = self.cursor();
-        if cursor < end {
-            self.content.drain(cursor..end);
             self.sync_preferred_column(width);
         }
     }
@@ -281,21 +238,6 @@ impl ComposerBuffer {
             self.sync_preferred_column(width);
             self.ensure_cursor_visible(width, 4);
         }
-    }
-
-    pub fn move_document_start(&mut self, width: usize, visible_rows: usize) {
-        self.clear_selection();
-        self.cursor = 0;
-        self.preferred_column = 0;
-        self.viewport_offset = 0;
-        self.ensure_cursor_visible(width, visible_rows);
-    }
-
-    pub fn move_document_end(&mut self, width: usize, visible_rows: usize) {
-        self.clear_selection();
-        self.cursor = self.content.len();
-        self.sync_preferred_column(width);
-        self.ensure_cursor_visible(width, visible_rows);
     }
 
     /// Soft-wrapped layout for the given content width.
@@ -508,7 +450,7 @@ mod tests {
 
     #[test]
     fn up_down_keeps_sticky_column_like_word() {
-        let mut buf = ComposerBuffer::new();
+        let mut buf = ComposerBuffer::default();
         buf.insert_str("hello world\nxy");
         buf.set_cursor(buf.content().len()); // end of "xy"
                                              // preferred col ~ 2
@@ -521,18 +463,17 @@ mod tests {
 
     #[test]
     fn soft_wrap_up_down_crosses_wrapped_rows() {
-        let mut buf = ComposerBuffer::new();
+        let mut buf = ComposerBuffer::default();
         buf.insert_str("abcdefghijklmnopqrst");
         let width = 5;
         assert!(buf.visual_row_count(width) > 1);
-        buf.move_document_end(width, 3);
         buf.move_up(width, 3);
         assert!(buf.cursor() < buf.content().len());
     }
 
     #[test]
     fn click_maps_into_content_bytes() {
-        let mut buf = ComposerBuffer::new();
+        let mut buf = ComposerBuffer::default();
         buf.insert_str("abc\ndef");
         let byte = buf.byte_from_click(1, 1, 80, 4);
         assert_eq!(&buf.content()[byte..byte + 1], "e");
@@ -540,7 +481,7 @@ mod tests {
 
     #[test]
     fn ensure_cursor_visible_pans_when_caret_pushes_past_the_window() {
-        let mut buf = ComposerBuffer::new();
+        let mut buf = ComposerBuffer::default();
         let width = 20;
         let visible = 3;
         // Many hard lines so the caret leaves a 3-row window.
@@ -560,7 +501,7 @@ mod tests {
 
     #[test]
     fn manual_scroll_can_leave_caret_offscreen_until_reframe() {
-        let mut buf = ComposerBuffer::new();
+        let mut buf = ComposerBuffer::default();
         for i in 0..10 {
             buf.insert_str(&format!("row {i}\n"));
         }

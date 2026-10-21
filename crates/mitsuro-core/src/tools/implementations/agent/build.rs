@@ -5,7 +5,7 @@ use serde_json::json;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::agent::context::build_subagent_project_context;
+use crate::agent::context::build_subagent_project_instructions;
 use crate::agent::subagent::{
     attach_direct_dependency_evidence, build_context::SharedBuildContext, AgentCapability,
     AgentIdentity, AgentProgress, BackpressureSignal, BuildIsolationMaterializationGuard,
@@ -908,7 +908,7 @@ impl AgentTool {
         let mut target_scope = vec![workspace_scope.clone()];
         let parent_name = params.name.as_deref().unwrap_or("child");
         let project_context =
-            build_subagent_project_context(&ctx.working_dir, ctx.project_dir.as_deref());
+            build_subagent_project_instructions(&ctx.working_dir, ctx.project_dir.as_deref());
 
         if let Some(ref structured_tasks) = params.tasks {
             let total = structured_tasks.len();
@@ -961,13 +961,16 @@ impl AgentTool {
                         return ToolResult::error_with_code("invalid_agent_task_scope", error);
                     }
                 };
+                let task_project_context = build_subagent_project_instructions(
+                    &task_working_dir,
+                    ctx.project_dir.as_deref(),
+                );
                 let task_prompt = format!(
                     "You are task {} of {} in one coordinated Agent task graph.\n\n\
                      TASK ID: {}\nTASK NAME: {}\n\nTASK INSTRUCTIONS:\n{}\n{}\n\
                      GROUP OBJECTIVE:\n{}\n\nDEPENDENCIES:\n{}\n\nPRIMARY SCOPE:\n{}\n\n\
                      DECLARED WRITE INTENT:\n{}\n\n{}\n\nTASK GRAPH:\n{}\n\n\
-                     Execute only this bounded task. Respect its exact capability policy. Return concrete evidence and validation for parent synthesis.\n\n\
-                     PROJECT CONTEXT:\n{}",
+                     Execute only this bounded task. Respect its exact capability policy. Return concrete evidence and validation for parent synthesis.",
                     index + 1,
                     total,
                     structured.id,
@@ -980,7 +983,6 @@ impl AgentTool {
                     write_intent,
                     acceptance_contract,
                     graph_summary,
-                    project_context,
                 );
                 let mut task = SubAgentTask::new(structured.id.clone(), task_prompt)
                     .with_name(name.clone())
@@ -995,6 +997,7 @@ impl AgentTool {
                         index,
                     ))
                     .with_working_dir(task_working_dir)
+                    .with_project_context(task_project_context)
                     .with_dependencies(structured.depends_on.clone())
                     .with_delegated_run_id(delegated_run_id.clone())
                     .with_delegation_policy(task_policy.clone())
@@ -1050,7 +1053,7 @@ impl AgentTool {
                      - Check [SHARED TYPES] for interfaces other builders registered\n\
                      - Register YOUR public functions/classes so others can import them\n\
                      - File locks are automatic - but you shouldn't need them if using separate files\n\n\
-                     {}\n\nPROJECT CONTEXT:\n{}\n\n\
+                     {}\n\n\
                      BUILD YOUR COMPONENT NOW. Create your file(s) and implement fully.",
                     i, total,
                     component,
@@ -1058,12 +1061,12 @@ impl AgentTool {
                     if others.is_empty() { "  (none - you're solo)".to_string() } else { others.join("\n") },
                     component_name.to_lowercase().replace(' ', "_"),
                     acceptance_contract_block(&params.acceptance_checks),
-                    project_context,
                 );
 
                 let mut task = SubAgentTask::new(format!("builder-{}", i), task_prompt)
                     .with_name(name.clone())
                     .with_working_dir(ctx.working_dir.clone())
+                    .with_project_context(project_context.clone())
                     .with_delegated_run_id(delegated_run_id.clone())
                     .with_delegation_policy(delegation_policy.clone())
                     .with_reasoning_effort(ctx.delegated_reasoning_effort)
@@ -1107,6 +1110,7 @@ impl AgentTool {
             let mut task = SubAgentTask::new("builder-main", task_prompt)
                 .with_name("main")
                 .with_working_dir(ctx.working_dir.clone())
+                .with_project_context(project_context.clone())
                 .with_delegated_run_id(delegated_run_id.clone())
                 .with_delegation_policy(delegation_policy.clone())
                 .with_reasoning_effort(ctx.delegated_reasoning_effort)

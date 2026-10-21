@@ -9,12 +9,7 @@ use crate::tui_v2::presentation::theme::SemanticTheme;
 pub enum TextRole {
     Body,
     Muted,
-    Title,
     Label,
-    Code,
-    Link,
-    Success,
-    Warning,
     Error,
     Selection,
 }
@@ -24,18 +19,9 @@ impl TextRole {
         match self {
             Self::Body => Style::default().fg(theme.foreground),
             Self::Muted => Style::default().fg(theme.foreground_muted),
-            Self::Title => Style::default()
-                .fg(theme.foreground)
-                .add_modifier(Modifier::BOLD),
             Self::Label => Style::default()
                 .fg(theme.foreground_muted)
                 .add_modifier(Modifier::BOLD),
-            Self::Code => Style::default().fg(theme.foreground).bg(theme.code_surface),
-            Self::Link => Style::default()
-                .fg(theme.link)
-                .add_modifier(Modifier::UNDERLINED),
-            Self::Success => Style::default().fg(theme.success),
-            Self::Warning => Style::default().fg(theme.warning),
             Self::Error => Style::default().fg(theme.error),
             Self::Selection => Style::default()
                 .fg(theme.foreground)

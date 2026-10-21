@@ -136,14 +136,8 @@ pub const TRANSCRIPT_DOCK_VERTICAL_INSET: u16 = 1;
 /// Full-bleed transcript stream inside the primary pane.
 ///
 /// Content uses the primary width with equal side gutters. When a workspace
-/// dock is present the right gutter is omitted so the dock channel (and the
-/// centered scrollbar inside it) owns the separation to the panels.
-pub fn transcript_column(primary: Rect) -> Rect {
-    transcript_column_with_dock(primary, false)
-}
-
-/// Like [`transcript_column`], but drops the right gutter when `dock_open` so
-/// stream → channel → dock spacing is controlled by [`INSPECTOR_GAP`].
+/// dock is present the right gutter is omitted so [`INSPECTOR_GAP`] and the
+/// centered scrollbar own the separation to the panels.
 ///
 /// With the dock open, also insets top/bottom by [`TRANSCRIPT_DOCK_VERTICAL_INSET`]
 /// so the message stream aligns with the plan/plugin panel chrome (inline ends).

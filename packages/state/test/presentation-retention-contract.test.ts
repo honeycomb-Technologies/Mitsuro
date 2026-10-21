@@ -3,6 +3,9 @@ import {
   isTurnInRichWindow,
   RICH_RECENT_TURN_COUNT,
 } from "../../../apps/mobile/components/chat/presentationRetention.ts";
+import { assistantVisualSegments } from "../../../apps/mobile/components/chat/assistantRenderPlan.ts";
+import { getMessageText } from "../src/session/messageText.ts";
+import type { ChatMessage } from "../src/session/types.ts";
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
@@ -57,4 +60,31 @@ Deno.test("historical assistant messages collapse heavy tool detail", () => {
   assert((compact.toolCalls?.[0]?.output?.length ?? 0) < 2_000, "tool output collapsed");
   assert(!compact.attachments?.[0]?.base64, "historical base64 stripped");
   assertEquals(compact.attachments?.[0]?.uri, "file://x.png", "uri retained");
+});
+
+Deno.test("historical rendered thinking is compact while copy and canonical history stay complete", () => {
+  const thinking = "reasoning ".repeat(1_000);
+  const finalAnswer = "complete answer ".repeat(10_000) + "FINAL_TAIL";
+  const source: ChatMessage = {
+    id: "history-answer",
+    role: "assistant",
+    content: finalAnswer.slice(0, 120_000),
+    thinking,
+    renderParts: [
+      { type: "thinking", id: "thought-1", content: thinking },
+      { type: "tool", id: "tool-part-1", toolCallId: "read-1" },
+      { type: "text", id: "answer-1", content: finalAnswer },
+    ],
+    toolCalls: [{ id: "read-1", name: "Read", status: "success", output: "file ".repeat(1_000) }],
+  };
+  const before = JSON.stringify(source);
+  const compact = compactHistoricalMessage(source);
+  const segments = assistantVisualSegments(compact, false);
+  const renderedThinking = segments.filter((segment) => segment.type === "thinking");
+  assertEquals(renderedThinking.length, 1, "historical thinking remains expandable in its original slot");
+  assert(renderedThinking[0].content.endsWith("…[older thinking collapsed]"), "expansion must clearly identify the retained preview");
+  assert(renderedThinking[0].content.length < 1_000, "the actual rendered payload must be bounded");
+  assertEquals(getMessageText(compact), finalAnswer, "copy must keep the complete answer in a historical turn");
+  assertEquals(compact.renderParts?.[2], source.renderParts?.[2], "full answer parts retain stable identity");
+  assertEquals(JSON.stringify(source), before, "historical projection must never mutate canonical history");
 });

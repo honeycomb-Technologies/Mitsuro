@@ -5,9 +5,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
 
-use super::links::HoveredLink;
 use super::links::LinkSpan;
 
 /// OSC 8 hyperlink start sequence
@@ -101,73 +99,6 @@ pub fn apply_hyperlinks(
             }
 
             i += 2;
-        }
-    }
-}
-
-/// Apply hover styling to a hovered hyperlink
-///
-/// This function should be called AFTER the Paragraph widget has rendered
-/// to the buffer. It modifies the style of cells within the hovered link
-/// to show a visual highlight effect.
-///
-/// # Arguments
-/// * `buf` - The buffer to modify
-/// * `area` - The area where markdown content was rendered
-/// * `links` - Link spans with their positions
-/// * `hovered` - The currently hovered link (if any)
-/// * `scroll_offset` - How many lines have been scrolled
-/// * `base_line` - The starting line offset for this content block
-/// * `link_color` - The link color to use for hover background
-pub fn apply_link_hover_style(
-    buf: &mut Buffer,
-    area: Rect,
-    links: &[LinkSpan],
-    hovered: Option<&HoveredLink>,
-    scroll_offset: usize,
-    base_line: usize,
-    link_color: Color,
-) {
-    let Some(hovered) = hovered else {
-        return;
-    };
-
-    // Find the link that matches the hovered position
-    for link in links {
-        if link.line != hovered.line
-            || link.start_col != hovered.start_col
-            || link.end_col != hovered.end_col
-        {
-            continue;
-        }
-
-        // Calculate the absolute line position
-        let absolute_line = base_line + link.line;
-
-        // Skip links that are scrolled past
-        let visible_line = match absolute_line.checked_sub(scroll_offset) {
-            Some(l) if l < area.height as usize => l,
-            _ => continue,
-        };
-
-        let y = area.y + visible_line as u16;
-
-        // Hover style: inverted colors for visibility
-        let hover_style = Style::default()
-            .fg(Color::Black)
-            .bg(link_color)
-            .add_modifier(Modifier::BOLD);
-
-        // Apply hover style to each cell in the link range
-        for col in link.start_col..link.end_col {
-            if col >= area.width as usize {
-                break;
-            }
-
-            let x = area.x + col as u16;
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_style(hover_style);
-            }
         }
     }
 }

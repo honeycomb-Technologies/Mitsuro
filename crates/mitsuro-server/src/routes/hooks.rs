@@ -13,6 +13,7 @@ use mitsuro_core::storage::Database;
 
 use crate::auth::CurrentUser;
 use crate::error::AppError;
+use crate::routes::session_access::current_user_id;
 use crate::AppState;
 
 /// Build the hooks router
@@ -177,8 +178,4 @@ fn hook_mutation_error(action: &str, error: anyhow::Error) -> AppError {
     } else {
         AppError::Internal(format!("Failed to {action} hook: {error}"))
     }
-}
-
-fn current_user_id(user: Option<&CurrentUser>) -> Option<&str> {
-    user.and_then(|user| user.0.user_id.as_deref())
 }

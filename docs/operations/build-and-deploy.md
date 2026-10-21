@@ -1,6 +1,6 @@
 # Building, CI/CD & Packaging
 
-This document explains how Mitsuro is built, tested, and distributed across all of its targets: the Rust CLI, the self-hosted server, the Expo mobile app, and the Tauri desktop shell. It covers the workspace layout, the quality gates enforced in CI, how releases are cut, and the various channels through which users can install Mitsuro.
+This document explains how Mitsuro is built, tested, and distributed across all of its targets: the Rust CLI, the self-hosted server, the Expo mobile app, and the Native Canvas desktop GUI. It covers the workspace layout, the quality gates enforced in CI, how releases are cut, and the various channels through which users can install Mitsuro.
 
 ## Rust workspace
 
@@ -11,7 +11,13 @@ The Rust side of Mitsuro is organized as a Cargo workspace with seven Mitsuro cr
 - **mitsuro-server** (`crates/mitsuro-server`) -- The self-hosted API server built on Axum. It serves the REST/WebSocket APIs used by the mobile and desktop clients, and optionally embeds the web frontend (more on that below).
 - **mitsuro-hive** (`crates/mitsuro-hive`) -- The independently supervised autonomous execution owner, durable scheduler, recovery loop, and event-log service.
 - **mitsuro-hive-protocol** (`crates/mitsuro-hive-protocol`) -- The typed, authenticated local protocol shared by the server, daemon, and control clients.
-- **mitsuro-client** and **mitsuro-client-state** -- Typed transport and shared client-state boundaries.
+- **mitsuro-client** (`crates/mitsuro-client`) -- Typed Rust HTTP/SSE/WebSocket client used by Canvas.
+- **mitsuro-canvas** (`apps/desktop/canvas`) -- Native desktop workspace using the shared server contracts.
+- **grok-auth** (`crates/grok-auth`) -- Provider authentication support library used by core.
+
+Expo client state lives in `packages/state`. The unused Rust client-state
+experiment has been retired with its former GPUI mobile consumers; it is not
+part of the active workspace.
 
 The workspace root `Cargo.toml` sets a few important release profile options: link-time optimization (`lto = true`), a single codegen unit (`codegen-units = 1`), and symbol stripping (`strip = true`). These produce smaller, faster release binaries at the cost of longer compile times. The workspace also defines shared lint rules so all workspace crates enforce the same code quality standards through Clippy.
 
@@ -46,12 +52,38 @@ The CI workflow (`.github/workflows/ci.yml`) runs on every push to `main` and on
 | **Rust Test** | `cargo test --workspace` -- runs the full test suite |
 | **Rust Clippy** | `cargo clippy --workspace -- -D warnings` -- lint pass with zero tolerance for warnings |
 | **Rust Format** | `cargo fmt --all -- --check` -- verifies formatting without modifying files |
+| **Windows Check** | `cargo check --locked --target x86_64-pc-windows-msvc -p mitsuro` -- checks the CLI and server with Windows dependency selection |
 | **Client Quality Gates** | Calls the reusable client workflow: Bun API contract tests, Deno shared-state type-check/tests, mobile TypeScript, and Expo web export |
-| **Desktop Linux Bundle** | Full Tauri build on Ubuntu with system dependencies (WebKit, GTK, patchelf) |
+| **Desktop Linux Bundle** | Builds the Expo companion web surface and release Canvas/server binaries, then packages and validates their exact-source Linux archive; also checks metadata and deterministic staging |
 
-The Linux jobs install `libudev-dev` because the CLI uses `gilrs` for gamepad support, which requires the udev headers. The desktop bundle job additionally installs `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, and `patchelf` for the Tauri build.
+Linux Rust jobs install the native headers required by the workspace. The
+required `Desktop Linux Bundle` status builds Canvas using the release packaging
+path and native dependencies, including desktop-file and AppStream validation.
+It keeps the existing required status name without building the retired Tauri
+application. The archive stays under `target/` in CI; this gate does not publish
+or install it. Workspace tests remain in the separate Rust Test job.
 
-All Rust jobs use `dtolnay/rust-toolchain@master` pinned to the stable channel. A PR cannot merge until every job is green.
+All Rust jobs use `dtolnay/rust-toolchain@master` on the rolling stable channel.
+Use the same stable Rust version for local validation; an older local Clippy
+passing does not establish that the current CI toolchain passes. Keep shared
+server dependencies outside target-specific tables so Windows checks include
+the HTTP, WebSocket, and push notification clients. A PR cannot merge until
+every required job is green.
+
+### Mixed-version Code control
+
+Client and server upgrades can arrive independently. Clients probe the Code
+control route before mutations; an absent route or the preceding server's SPA
+fallback allows the original mutation without a lease. Authentication, network, and malformed
+JSON failures still stop the mutation. The next mutation probes again so a
+server upgrade enables leases without restarting the client.
+
+Previously shipped clients do not carry a stable device identity or lease token.
+The server groups their mutations under one compatibility controller with a
+15-second stale window. A live modern controller rejects legacy mutations;
+modern clients must wait for the compatibility controller to expire or take
+control explicitly. Invalid or stale supplied tokens never become legacy
+requests. Existing session ownership checks apply to both paths.
 
 ### Default-branch and governance preflight
 
@@ -121,12 +153,13 @@ release contract change, not routine naming cleanup.
 
 Each job first builds the Expo web frontend from `apps/mobile` (so it can be embedded into the server and desktop bundles), then compiles Mitsuro in release mode for the target architecture. Unix builds are packaged as `.tar.gz` archives; the Windows build is packaged as a `.zip`.
 
-**2. Desktop Linux bundles.** A separate job tests and builds the native GPUI desktop
-on Ubuntu, then produces one `.deb` and one `.rpm` with
-`scripts/package-gpui-desktop.sh`. The release artifact is the GPUI client, not the
-legacy Tauri/Expo shell.
+**2. Desktop Linux archive.** A separate job tests and builds Native Canvas and
+its Mitsuro server companion, then packages them with
+`apps/desktop/canvas/packaging/package-linux-alpha.sh`. The output is a portable
+Linux alpha archive plus checksum. Old GPUI Debian/RPM packages and the Tauri
+shell are abandoned release targets.
 
-**3. Create release.** Once both build stages complete, all artifacts are downloaded. CI requires the protected tag version to equal the `mitsuro` Cargo package version, verifies all five canonical platform archive checksum manifests and the Windows compatibility pair against their archives, renders `.github/homebrew/mitsuro.rb` with that version and the four Unix hashes, rejects remaining template tokens, and checks the generated formula with `ruby -c`. The publisher allowlists those six exact archive/manifest pairs, one `.deb`, one `.rpm`, and the formula. A GitHub Release is then created with auto-generated release notes. An existing protected-tag release is accepted only when every asset is byte-identical; CI never clobbers an asset at an immutable release URL.
+**3. Create release.** Once both build stages complete, all artifacts are downloaded. CI requires the protected tag version to equal the `mitsuro` Cargo package version, verifies all five canonical platform archive checksum manifests and the Windows compatibility pair against their archives, renders `.github/homebrew/mitsuro.rb` with that version and the four Unix hashes, rejects remaining template tokens, and checks the generated formula with `ruby -c`. The publisher allowlists those six exact archive/manifest pairs, the exact version/commit-bound Canvas archive and checksum, and the formula. A GitHub Release is then created with auto-generated release notes. An existing protected-tag release is accepted only when every asset is byte-identical; CI never clobbers an asset at an immutable release URL.
 
 The workflow fails before builds unless a tag push is protected, or a manual retry is dispatched from protected `main`, and the exact tag commit is contained in `main`. Every checkout and reusable quality gate is pinned to that authorized commit SHA, and the publish job rechecks the tag identity before creating assets. The repository also maintains an active `Protect release tags` ruleset. Do not push a `v*` tag merely to test the workflow; create one only for an approved, fully verified release.
 
@@ -362,24 +395,22 @@ For safe no-TestFlight validation of docs/tooling changes, inspect the workflow 
 
 ## Desktop builds
 
-The canonical desktop app is the native GPUI crate at `apps/desktop/gpui`. It connects
-to an existing Mitsuro HTTP/SSE service or owns a managed Codex app-server child; the
-desktop package does not silently embed or invent either backend.
-
-Build and package it with:
+Native Canvas (`apps/desktop/canvas`) is the sole desktop target. It uses the shared
+Mitsuro server and ships with a companion binary in its Linux alpha archive.
 
 ```bash
-cargo test -p mitsuro-desktop-backend --lib
-cargo test -p mitsuro-gpui-desktop --bin mitsuro-gpui-desktop
-cargo build --release --locked -p mitsuro-gpui-desktop
-scripts/package-gpui-desktop.sh \
-  target/release/mitsuro-gpui-desktop artifacts/gpui-desktop
+cargo test --locked -p mitsuro-canvas
+cargo build --release --locked -p mitsuro-canvas -p mitsuro
+apps/desktop/canvas/packaging/package-linux-alpha.sh \
+  --canvas-bin "$PWD/target/release/mitsuro-canvas" \
+  --server-bin "$PWD/target/release/mitsuro" \
+  --output-dir "$PWD/artifacts/canvas"
 ```
 
-The Debian and RPM payloads install `mitsuro-desktop`, the
-`io.mitsuro.desktop` launcher/AppStream record, icon, license, and GPUI SVG assets.
-Runtime dependencies include GTK 3, WebKitGTK 4.1, xkbcommon, and `xdg-utils`.
-`apps/desktop/shell` remains only as the legacy Tauri/Expo migration boundary.
+Packaging requires a clean source commit and verifies exact artifact provenance.
+The archive does not install or replace an application. Full native GUI acceptance
+is still a separate release requirement. See [Canvas packaging](../../apps/desktop/canvas/packaging/README.md)
+and the [desktop transition contract](../frontends/desktop-transition.md).
 
 ## The embedded web frontend
 
@@ -434,13 +465,14 @@ The frontend dev server handles hot module replacement. The Rust server serves t
 
 ### Desktop development
 
-Tauri provides an integrated dev experience. The `beforeDevCommand` in `tauri.conf.json` starts the Expo web dev server on port 5173, and `devUrl` points Tauri's webview at it:
-
 ```bash
-cd apps/desktop/shell && bun run dev
+cargo run -p mitsuro-canvas
 ```
 
-This launches the Tauri window with the live-reloading frontend and the embedded Rust server. Changes to the React code reflect instantly; changes to the Rust code trigger a recompile.
+Native Canvas owns desktop interaction and presentation. Expo in `apps/mobile`
+owns mobile and web. Use the [isolated Canvas smoke](../../apps/desktop/canvas/acceptance/README.md)
+when validation must not attach to the shared server. The earlier desktop GPUI,
+Tauri, and desktop Expo applications are abandoned.
 
 ### Mobile development
 

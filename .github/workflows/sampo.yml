@@ -50,9 +50,9 @@ jobs:
           sh scripts/sync-product-version.sh
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if ! git diff --quiet -- Cargo.lock apps/mobile/app.json apps/mobile/package.json; then
-            git add Cargo.lock apps/mobile/app.json apps/mobile/package.json
-            git commit -m "chore(release): keep Cargo.lock pins and sync Expo version"
+          if ! git diff --quiet -- Cargo.lock apps/mobile/app.json apps/mobile/package.json apps/desktop/canvas/packaging/io.mitsuro.canvas.metainfo.xml; then
+            git add Cargo.lock apps/mobile/app.json apps/mobile/package.json apps/desktop/canvas/packaging/io.mitsuro.canvas.metainfo.xml
+            git commit -m "chore(release): keep Cargo.lock pins and sync interface versions"
             git push origin release/sampo
           fi
           if ! gh pr list --repo "$GITHUB_REPOSITORY" --head release/sampo --base main --state open --json number --jq 'length | tostring' | grep -qx 0; then

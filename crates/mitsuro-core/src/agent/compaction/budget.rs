@@ -440,7 +440,7 @@ pub fn estimate_with_usage(
 
 fn content_char_len(content: &Content) -> usize {
     match content {
-        Content::Text { text } => text.len(),
+        Content::Text { text, citations } => crate::ai::format::provider_text_len(text, citations),
         Content::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
         Content::ToolResult { output, .. } => output.to_string().len(),
         Content::Image { .. } => 1_000,
@@ -459,13 +459,41 @@ mod tests {
     use crate::ai::types::{AiTool, Content, DocumentSource, ModelMessage, Role};
 
     #[test]
+    fn citation_context_counts_toward_the_actual_rendered_history_budget() {
+        let citations = vec![crate::ai::types::Citation {
+            url: "https://example.com/docs".into(),
+            title: "Docs".into(),
+            cited_text: "Reference detail ".repeat(300),
+        }];
+        let expected_bytes = crate::ai::format::provider_text("Answer", &citations).len();
+        let messages = vec![ModelMessage {
+            role: Role::Assistant,
+            content: vec![Content::Text {
+                text: "Answer".into(),
+                citations,
+            }],
+        }];
+        assert_eq!(estimate_tokens(&messages), expected_bytes / 4);
+        assert!(estimate_tokens(&messages) > "Answer".len() / 4);
+        let client = AiClient::new(
+            AiClientConfig {
+                model: "gpt-5.5".into(),
+                provider_id: ProviderId::OpenAI,
+                api_format: ApiFormat::OpenAIResponses,
+                ..Default::default()
+            },
+            "test-key".into(),
+        );
+        let request = estimate_rendered_request_tokens(&client, &messages, &CallOptions::default());
+        assert_eq!(request.message_tokens, expected_bytes / 4 + 4);
+    }
+
+    #[test]
     fn estimate_tokens_counts_mixed_content() {
         let messages = vec![
             ModelMessage {
                 role: Role::User,
-                content: vec![Content::Text {
-                    text: "abcdabcd".to_string(),
-                }],
+                content: vec![Content::text("abcdabcd".to_string())],
             },
             ModelMessage {
                 role: Role::Assistant,
@@ -516,9 +544,7 @@ mod tests {
         );
         let messages = vec![ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "hello".to_string(),
-            }],
+            content: vec![Content::text("hello".to_string())],
         }];
         let without_tools =
             estimate_rendered_request_tokens(&client, &messages, &CallOptions::default());
@@ -579,9 +605,7 @@ mod tests {
         );
         let user_message = ModelMessage {
             role: Role::User,
-            content: vec![Content::Text {
-                text: "hello".to_string(),
-            }],
+            content: vec![Content::text("hello".to_string())],
         };
         let without_identity = estimate_rendered_request_tokens(
             &client,
@@ -593,9 +617,7 @@ mod tests {
             &[
                 ModelMessage {
                     role: Role::System,
-                    content: vec![Content::Text {
-                        text: hive_identity.clone(),
-                    }],
+                    content: vec![Content::text(hive_identity.clone())],
                 },
                 user_message,
             ],

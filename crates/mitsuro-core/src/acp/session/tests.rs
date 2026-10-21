@@ -87,6 +87,7 @@ async fn test_session_load_from_storage() {
                     None,
                     Some("stream stopped".to_string()),
                     PartialAssistantState {
+                        citations: Vec::new(),
                         text: "Partial answer".to_string(),
                         thinking: String::new(),
                         tool_calls: Vec::new(),
@@ -118,7 +119,7 @@ async fn test_session_load_from_storage() {
     assert_eq!(recovery_notice.role, Role::System);
     assert!(recovery_notice.content.iter().any(|content| matches!(
         content,
-        crate::ai::types::Content::Text { text }
+        crate::ai::types::Content::Text { text, .. }
             if text.contains("Finish the answer")
     )));
 }

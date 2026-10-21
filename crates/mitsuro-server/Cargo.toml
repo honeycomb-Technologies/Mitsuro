@@ -35,6 +35,8 @@ uuid = { version = "1.11", features = ["v4"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 portable-pty = "0.8"
+cap-std = "3.4.5"
+cap-fs-ext = "3.4.5"
 
 # Web Push notifications (pure Rust, no OpenSSL — matches rustls stack)
 web-push-native = "0.4"
@@ -44,6 +46,9 @@ reqwest = { version = "0.12", default-features = false, features = ["http2", "js
 # APNs (Apple Push Notification service) — JWT auth via ES256
 jsonwebtoken = "9"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

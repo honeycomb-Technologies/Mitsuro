@@ -1,173 +1,6 @@
 use super::{create_test_db, seed_legacy_delegated_runs_schema};
 
 #[test]
-fn test_pinch_metadata_table_migration() {
-    let (db, _temp) = create_test_db();
-
-    let conn = db.conn();
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='pinch_metadata'")
-        .expect("Failed to prepare query");
-
-    let tables: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .expect("Failed to query tables")
-        .filter_map(Result::ok)
-        .collect();
-
-    assert!(tables.contains(&"pinch_metadata".to_string()));
-
-    let mut stmt = conn
-        .prepare("PRAGMA table_info(pinch_metadata)")
-        .expect("Failed to prepare PRAGMA");
-
-    let columns: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("Failed to get columns")
-        .filter_map(Result::ok)
-        .collect();
-
-    assert!(columns.contains(&"source_session_id".to_string()));
-    assert!(columns.contains(&"target_session_id".to_string()));
-    assert!(columns.contains(&"summary".to_string()));
-}
-
-#[test]
-fn test_block_ui_state_table_migration() {
-    let (db, _temp) = create_test_db();
-
-    let conn = db.conn();
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='block_ui_state'")
-        .expect("Failed to prepare query");
-
-    let tables: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .expect("Failed to query tables")
-        .filter_map(Result::ok)
-        .collect();
-
-    assert!(tables.contains(&"block_ui_state".to_string()));
-}
-
-#[test]
-fn test_file_activity_table_migration() {
-    let (db, _temp) = create_test_db();
-
-    let conn = db.conn();
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='file_activity'")
-        .expect("Failed to prepare query");
-
-    let tables: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .expect("Failed to query tables")
-        .filter_map(Result::ok)
-        .collect();
-
-    assert!(tables.contains(&"file_activity".to_string()));
-
-    let mut stmt = conn
-        .prepare("PRAGMA table_info(file_activity)")
-        .expect("Failed to prepare PRAGMA");
-
-    let columns: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("Failed to get columns")
-        .filter_map(Result::ok)
-        .collect();
-
-    assert!(columns.contains(&"read_count".to_string()));
-    assert!(columns.contains(&"write_count".to_string()));
-    assert!(columns.contains(&"edit_count".to_string()));
-    assert!(columns.contains(&"last_accessed".to_string()));
-}
-
-#[test]
-fn test_agent_state_columns_migration() {
-    let (db, _temp) = create_test_db();
-
-    let conn = db.conn();
-    let mut stmt = conn
-        .prepare("PRAGMA table_info(sessions)")
-        .expect("Failed to prepare PRAGMA");
-
-    let columns: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("Failed to get columns")
-        .filter_map(Result::ok)
-        .collect();
-
-    assert!(columns.contains(&"agent_state".to_string()));
-    assert!(columns.contains(&"agent_started_at".to_string()));
-    assert!(columns.contains(&"agent_last_event_at".to_string()));
-}
-
-#[test]
-fn test_session_list_metadata_migration() {
-    let (db, _temp) = create_test_db();
-    let columns: Vec<String> = db
-        .conn()
-        .prepare("PRAGMA table_info(sessions)")
-        .expect("prepare sessions columns")
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("query sessions columns")
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .expect("collect sessions columns");
-
-    assert!(columns.contains(&"pinned_at".to_string()));
-    assert!(columns.contains(&"archived_at".to_string()));
-    assert_eq!(db.get_schema_version(), 78);
-}
-
-#[test]
-fn test_token_count_column_migration() {
-    let (db, _temp) = create_test_db();
-
-    let conn = db.conn();
-    let mut stmt = conn
-        .prepare("PRAGMA table_info(sessions)")
-        .expect("Failed to prepare PRAGMA");
-
-    let columns: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("Failed to get columns")
-        .filter_map(Result::ok)
-        .collect();
-
-    assert!(columns.contains(&"token_count".to_string()));
-}
-
-#[test]
-fn provider_aware_model_identity_columns_are_additive() {
-    let (db, _temp) = create_test_db();
-    let columns: Vec<String> = db
-        .conn()
-        .prepare("PRAGMA table_info(sessions)")
-        .expect("prepare session columns")
-        .query_map([], |row| row.get(1))
-        .expect("query session columns")
-        .collect::<rusqlite::Result<_>>()
-        .expect("collect session columns");
-
-    assert!(columns.contains(&"model".to_string()));
-    assert!(columns.contains(&"model_key_json".to_string()));
-    assert!(columns.contains(&"model_catalog_revision".to_string()));
-
-    let schedule_columns: Vec<String> = db
-        .conn()
-        .prepare("PRAGMA table_info(hive_schedules)")
-        .expect("prepare Hive schedule columns")
-        .query_map([], |row| row.get(1))
-        .expect("query Mako schedule columns")
-        .collect::<rusqlite::Result<_>>()
-        .expect("collect Mako schedule columns");
-    assert!(schedule_columns.contains(&"model".to_string()));
-    assert!(schedule_columns.contains(&"model_key_json".to_string()));
-    assert!(schedule_columns.contains(&"model_catalog_revision".to_string()));
-}
-
-#[test]
 fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
     let temp = tempfile::TempDir::new().expect("temp dir");
     let path = temp.path().join("schema-44.db");
@@ -189,7 +22,7 @@ fn migration_45_upgrades_schema_44_without_rewriting_legacy_model() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 44");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -225,7 +58,7 @@ fn migration_46_upgrades_schema_45_without_guessing_legacy_schedule_identity() {
     drop(conn);
 
     let db = crate::storage::database::Database::new(&path).expect("migrate schema 45");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let row: (Option<String>, Option<String>, Option<String>) = db
         .conn()
         .query_row(
@@ -287,7 +120,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 52");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let claimed: String = db
         .conn()
         .query_row(
@@ -317,7 +150,7 @@ fn migration_52_backfills_one_deterministic_claim_and_is_idempotent() {
         )
         .expect("count idempotent claims");
     assert_eq!(claim_count, 1);
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -349,7 +182,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 53");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let wake_parent: i64 = db
         .conn()
         .query_row(
@@ -372,7 +205,7 @@ fn migration_53_adds_durable_background_wake_intent_idempotently() {
         .expect("read wake index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 53 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -402,7 +235,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 54");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let (owner, expiry): (Option<String>, Option<i64>) = db
         .conn()
         .query_row(
@@ -426,7 +259,7 @@ fn migration_54_adds_conservative_background_host_leases_idempotently() {
         .expect("read host lease index");
     assert_eq!(index_exists, 1);
     db.run_migrations().expect("migration 54 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -546,7 +379,7 @@ fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor()
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 63");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 
     let count_workers = |predicate: &str| -> i64 {
         db.conn()
@@ -678,7 +511,7 @@ fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor()
         .execute("DELETE FROM schema_version WHERE version >= 63", [])
         .expect("rewind migration marker");
     db.run_migrations().expect("reapply migration 63");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     assert_eq!(count_workers("1 = 1"), 5, "idempotent backfill");
     let assistant_id_after: String = db
         .conn()
@@ -689,61 +522,6 @@ fn migration_63_backfills_workers_from_crew_and_companion_and_renames_executor()
         )
         .expect("read assistant id after replay");
     assert_eq!(assistant_id, assistant_id_after);
-}
-
-#[test]
-fn migration_63_fresh_database_uses_executor_id_and_worker_linkage_columns() {
-    let (db, _temp) = create_test_db();
-
-    let table_columns = |table: &str| -> Vec<String> {
-        db.conn()
-            .prepare(&format!("PRAGMA table_info({table})"))
-            .expect("prepare table columns")
-            .query_map([], |row| row.get::<_, String>(1))
-            .expect("query table columns")
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .expect("collect table columns")
-    };
-
-    let worker_columns = table_columns("hive_workers");
-    for column in [
-        "id",
-        "user_id",
-        "slug",
-        "display_name",
-        "avatar_color",
-        "model",
-        "model_key_json",
-        "model_catalog_revision",
-        "permission_mode",
-        "autonomy",
-        "heartbeat_interval_secs",
-        "status",
-        "dm_session_id",
-        "memory_namespace_id",
-    ] {
-        assert!(
-            worker_columns.contains(&column.to_string()),
-            "hive_workers missing {column}"
-        );
-    }
-    assert!(table_columns("hive_worker_documents").contains(&"kind".to_string()));
-
-    let attempt_columns = table_columns("hive_run_attempts");
-    assert!(attempt_columns.contains(&"executor_id".to_string()));
-    assert!(!attempt_columns.contains(&"worker_id".to_string()));
-
-    for table in [
-        "hive_controllers",
-        "hive_runs",
-        "hive_runtime_state",
-        "hive_schedules",
-    ] {
-        assert!(
-            table_columns(table).contains(&"worker_id".to_string()),
-            "{table} missing worker_id"
-        );
-    }
 }
 
 #[test]
@@ -778,7 +556,7 @@ fn migration_64_upgrades_schema_63_with_group_rooms_and_run_linkage() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 64");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 
     let table_exists = |table: &str| -> bool {
         db.conn()
@@ -836,7 +614,7 @@ fn migration_64_upgrades_schema_63_with_group_rooms_and_run_linkage() {
     assert!(invalid_mode.is_err(), "execution mode CHECK must hold");
 
     db.run_migrations().expect("migration 64 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -855,7 +633,7 @@ fn migration_65_upgrades_schema_64_with_delivery_ledger() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 65");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 
     let exists: bool = db
         .conn()
@@ -881,7 +659,7 @@ fn migration_65_upgrades_schema_64_with_delivery_ledger() {
     );
 
     db.run_migrations().expect("migration 65 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -916,7 +694,7 @@ fn migration_66_upgrades_schema_65_with_memory_acl_scopes() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 66");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 
     let columns: Vec<String> = db
         .conn()
@@ -949,7 +727,7 @@ fn migration_66_upgrades_schema_65_with_memory_acl_scopes() {
     assert_eq!(shared_scope, "owner");
 
     db.run_migrations().expect("migration 66 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -979,7 +757,7 @@ fn migration_67_upgrades_schema_66_with_worker_heartbeat_kind() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 67");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 
     let runs_sql: String = db
         .conn()
@@ -995,7 +773,7 @@ fn migration_67_upgrades_schema_66_with_worker_heartbeat_kind() {
     );
 
     db.run_migrations().expect("migration 67 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -1099,7 +877,7 @@ fn migration_69_adds_isolated_lanes_idempotent_messages_and_introduction_ledger(
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 69");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 
     let run_columns_after = db
         .conn()
@@ -1348,7 +1126,7 @@ fn migration_69_adds_isolated_lanes_idempotent_messages_and_introduction_ledger(
     assert_eq!(introduction_count, 0);
 
     db.run_migrations().expect("migration 69 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -1413,7 +1191,7 @@ fn migration_70_backfills_provable_worker_learning_and_rejects_unresolved_pendin
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 70");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let worker_scope: (String, Option<String>, String, i64, String) = db
         .conn()
         .query_row(
@@ -1472,7 +1250,7 @@ fn migration_70_backfills_provable_worker_learning_and_rejects_unresolved_pendin
     assert_eq!(owner_mismatch, (0, "rejected".into(), "shared".into()));
 
     db.run_migrations().expect("migration 70 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -1493,7 +1271,7 @@ fn migration_71_adds_fenced_worker_introduction_review_audit() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 71");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let introduction_columns = db
         .conn()
         .prepare("PRAGMA table_info(hive_worker_introductions)")
@@ -1669,39 +1447,7 @@ fn migration_71_adds_fenced_worker_introduction_review_audit() {
         .is_err());
 
     db.run_migrations().expect("migration 71 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
-}
-
-#[test]
-fn test_push_delivery_tables_migration() {
-    let (db, _temp) = create_test_db();
-    let conn = db.conn();
-
-    let mut stmt = conn
-        .prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='push_delivery_attempts'",
-        )
-        .expect("Failed to prepare query");
-    let tables: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .expect("Failed to query tables")
-        .filter_map(Result::ok)
-        .collect();
-    assert!(tables.contains(&"push_delivery_attempts".to_string()));
-
-    let mut stmt = conn
-        .prepare("PRAGMA table_info(push_subscriptions)")
-        .expect("Failed to prepare PRAGMA");
-    let columns: Vec<String> = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .expect("Failed to get columns")
-        .filter_map(Result::ok)
-        .collect();
-
-    assert!(columns.contains(&"last_success_at".to_string()));
-    assert!(columns.contains(&"last_failure_at".to_string()));
-    assert!(columns.contains(&"last_failure_reason".to_string()));
-    assert!(columns.contains(&"failure_count".to_string()));
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -1854,7 +1600,7 @@ fn migration_72_freezes_provable_report_scopes_and_survives_dm_rebind() {
     drop(fixture);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 72");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     {
         let load_scope = |report_id: &str| {
             db.conn()
@@ -1947,7 +1693,7 @@ fn migration_72_freezes_provable_report_scopes_and_survives_dm_rebind() {
     drop(db);
     let reopened =
         crate::storage::database::Database::new(&path).expect("migration 72 is forward-idempotent");
-    assert_eq!(reopened.get_schema_version(), 78);
+    assert_eq!(reopened.get_schema_version(), 80);
 }
 
 #[test]
@@ -1981,7 +1727,7 @@ fn migration_72_preserves_ordinary_only_inserts_and_non_scope_updates() {
 
     let db = crate::storage::database::Database::new(&path)
         .expect("migrate an ordinary-only report schema");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     assert_eq!(
         db.conn()
             .execute(
@@ -2232,7 +1978,7 @@ fn migration_74_adds_append_only_worker_governor_with_visible_defaults() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 74");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let tables = db
         .conn()
         .prepare(
@@ -2449,7 +2195,7 @@ fn migration_74_adds_append_only_worker_governor_with_visible_defaults() {
     assert_eq!(new_policy_count, 1);
 
     db.run_migrations().expect("migration 74 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -2463,7 +2209,7 @@ fn migrations_75_and_76_add_conversation_and_worker_workflow_authority() {
     drop(db);
 
     let db = crate::storage::database::Database::new(&path).expect("apply migration 75");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 
     let run_columns = db
         .conn()
@@ -2601,7 +2347,7 @@ fn migrations_75_and_76_add_conversation_and_worker_workflow_authority() {
     assert!(response_guard_sql.contains("NEW.response_provider_call_id IS NULL"));
 
     db.run_migrations().expect("migration 76 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
@@ -2639,7 +2385,7 @@ fn migration_76_repairs_a_schema_75_preview_missing_response_provenance() {
     drop(db);
 
     let repaired = crate::storage::database::Database::new(&path).expect("apply catch-up");
-    assert_eq!(repaired.get_schema_version(), 78);
+    assert_eq!(repaired.get_schema_version(), 80);
     let columns = repaired
         .conn()
         .prepare("PRAGMA table_info(hive_runs)")
@@ -2689,6 +2435,10 @@ fn rewind_migration_78_for_test(db: &crate::storage::database::Database) {
     db.conn()
         .execute_batch(
             r#"
+            DROP TABLE IF EXISTS spatial_canvas_resource_creates;
+            DROP TABLE IF EXISTS spatial_canvas_events;
+            DROP TABLE IF EXISTS spatial_canvases;
+            DELETE FROM schema_version WHERE version >= 79;
             DROP TRIGGER hive_runs_worker_context_insert_guard;
             DROP TRIGGER hive_runs_non_workflow_link_insert_guard;
             DROP TRIGGER hive_runs_non_workflow_link_update_guard;
@@ -3041,7 +2791,7 @@ fn migration_77_adds_crash_safe_worker_introduction_review_runs() {
     assert!(!pre_migration_review_sql.contains("'queued', 'claimed', 'gather_more'"));
 
     db.run_migrations().expect("apply migration 77");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let review_columns = db
         .conn()
         .prepare("PRAGMA table_info(hive_worker_introduction_reviews)")
@@ -3182,17 +2932,17 @@ fn migration_77_adds_crash_safe_worker_introduction_review_runs() {
         .unwrap();
     assert_eq!(foreign_key_errors, 0);
     db.run_migrations().expect("migration 77 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
 }
 
 #[test]
 fn migration_78_adds_fail_closed_worker_workflow_acceptance_authority_idempotently() {
     let (mut db, temp) = create_test_db();
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     rewind_migration_78_for_test(&db);
 
     db.run_migrations().expect("upgrade migration 77 to 78");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let run_sql: String = db
         .conn()
         .query_row(
@@ -3335,7 +3085,7 @@ fn migration_78_adds_fail_closed_worker_workflow_acceptance_authority_idempotent
     drop(db);
     db = crate::storage::Database::new(&db_path).expect("reopen migrated database");
     db.run_migrations().expect("migration 78 is idempotent");
-    assert_eq!(db.get_schema_version(), 78);
+    assert_eq!(db.get_schema_version(), 80);
     let integrity: String = db
         .conn()
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))

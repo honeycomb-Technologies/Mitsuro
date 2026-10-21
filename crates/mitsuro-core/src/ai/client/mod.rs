@@ -13,7 +13,6 @@ mod remote_attempt_policy;
 pub mod request_builder;
 pub mod simple;
 pub mod streaming;
-pub mod thinking;
 pub mod tools;
 
 // Re-export main types

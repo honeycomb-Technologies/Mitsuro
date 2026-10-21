@@ -168,25 +168,6 @@ impl DeviceCodeFlow {
             }
         }
     }
-
-    /// Run the complete device code flow
-    ///
-    /// This is a convenience method that:
-    /// 1. Requests a device code
-    /// 2. Returns the code info for display
-    /// 3. Polls for completion
-    ///
-    /// The caller should display the user_code and verification_uri to the user
-    /// between steps 1 and 2.
-    pub async fn run_with_callback<F>(&self, on_code: F) -> Result<OAuthTokenData>
-    where
-        F: FnOnce(&DeviceCodeResponse),
-    {
-        let code_response = self.request_code().await?;
-        on_code(&code_response);
-        self.poll_for_token(&code_response.device_code, code_response.interval)
-            .await
-    }
 }
 
 /// Token response from the OAuth server

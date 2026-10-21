@@ -18,7 +18,7 @@ pub(super) fn maybe_generate_title(
         .find(|m| m.role == Role::User)
         .and_then(|m| {
             m.content.iter().find_map(|c| {
-                if let Content::Text { text } = c {
+                if let Content::Text { text, .. } = c {
                     Some(text.clone())
                 } else {
                     None

@@ -37,6 +37,7 @@ pub(super) async fn tool_approval_for_session(
             approved: req.approved,
         },
         idempotency_key.as_deref(),
+        &headers,
     )
     .await
 }

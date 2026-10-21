@@ -33,13 +33,3 @@ impl RenderedMarkdown {
         Self { lines, links }
     }
 }
-
-/// Information about a hovered hyperlink in rendered markdown.
-#[derive(Debug, Clone)]
-pub struct HoveredLink {
-    pub msg_idx: usize,
-    pub line: usize,
-    pub start_col: usize,
-    pub end_col: usize,
-    pub url: String,
-}

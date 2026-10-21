@@ -279,10 +279,8 @@ fn commit_response_in_transaction(
     let provider_call = validate_provider_call(tx, input, &binding)?;
 
     let response_text = input.response_text.trim();
-    let content_json = serde_json::to_string(&vec![Content::Text {
-        text: response_text.to_string(),
-    }])
-    .map_err(|error| conflict(format!("encoding canonical response: {error}")))?;
+    let content_json = serde_json::to_string(&vec![Content::text(response_text.to_string())])
+        .map_err(|error| conflict(format!("encoding canonical response: {error}")))?;
     let response_key = if provider_call.call_kind == "worker_introduction_onboarding" {
         canonical_onboarding_response_key(
             &input.worker_id,
@@ -1157,7 +1155,7 @@ fn load_committed_worker_response(
     let content: Vec<Content> =
         serde_json::from_str(&content_json).context("decoding committed Worker response")?;
     let response_text = match content.as_slice() {
-        [Content::Text { text }] if !text.trim().is_empty() => text.trim(),
+        [Content::Text { text, .. }] if !text.trim().is_empty() => text.trim(),
         _ => anyhow::bail!("committed Worker response is not one visible text block"),
     };
     anyhow::ensure!(
@@ -1568,7 +1566,7 @@ fn adopt_unlinked_onboarding_response(
     let content: Vec<Content> = serde_json::from_str(&content_json)
         .context("decoding specialized Introduction onboarding response")?;
     let response_text = match content.as_slice() {
-        [Content::Text { text }] if !text.trim().is_empty() => text.trim(),
+        [Content::Text { text, .. }] if !text.trim().is_empty() => text.trim(),
         _ => anyhow::bail!("Introduction onboarding response is not one visible text block"),
     };
     anyhow::ensure!(
@@ -3156,7 +3154,7 @@ fn materialize_oldest_staged_input_with_authority_internal(
     let content: Vec<Content> =
         serde_json::from_str(&content_json).context("decoding staged Worker input")?;
     let body = match content.as_slice() {
-        [Content::Text { text }] if !text.trim().is_empty() => text.clone(),
+        [Content::Text { text, .. }] if !text.trim().is_empty() => text.clone(),
         _ => anyhow::bail!("staged Worker input is not one canonical text block"),
     };
     let message_key = canonical_input_message_key(&request_id);

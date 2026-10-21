@@ -3,6 +3,71 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use super::truncate_utf8_bytes;
+use crate::storage::ProjectSettings;
+
+const MAX_PROJECT_SETTINGS_APPEND_BYTES: usize = 8 * 1024;
+
+/// Identical bounded repository instructions for parent and delegated runs.
+/// Workspace orientation is kept separate: isolated children have a different
+/// execution directory, but inherit the selected project's instruction bundle.
+pub(super) struct ProjectContext {
+    pub instructions: String,
+    pub settings: String,
+}
+
+impl ProjectContext {
+    pub fn load(
+        working_dir: &Path,
+        project_dir: Option<&Path>,
+        settings: &ProjectSettings,
+    ) -> Self {
+        let instructions = project_dir
+            .map(|root| build_project_context_for_workspace(working_dir, root))
+            .unwrap_or_default();
+        let settings = settings
+            .system_prompt_append
+            .as_deref()
+            .filter(|append| !append.is_empty())
+            .map(|append| {
+                let header = "[PROJECT SETTINGS]\n";
+                let marker = "\n[PROJECT SETTINGS TRUNCATED AT REQUEST BUDGET]";
+                if header.len() + append.len() <= MAX_PROJECT_SETTINGS_APPEND_BYTES {
+                    format!("{header}{append}")
+                } else {
+                    format!(
+                        "{header}{}{marker}",
+                        truncate_utf8_bytes(
+                            append,
+                            MAX_PROJECT_SETTINGS_APPEND_BYTES - header.len() - marker.len()
+                        )
+                    )
+                }
+            })
+            .unwrap_or_default();
+        Self {
+            instructions,
+            settings,
+        }
+    }
+
+    pub fn combined(self) -> String {
+        [self.instructions, self.settings]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+/// The instruction-only bundle can be frozen before child workspace isolation
+/// without freezing an obsolete execution directory into the system prompt.
+pub fn build_subagent_project_instructions(
+    working_dir: &Path,
+    project_dir: Option<&Path>,
+) -> String {
+    let settings = project_dir.map(ProjectSettings::load).unwrap_or_default();
+    ProjectContext::load(working_dir, project_dir, &settings).combined()
+}
 
 /// Match the documented Codex project-instruction ceiling. The cap applies to
 /// the complete root-to-working-directory instruction bundle, including
@@ -39,7 +104,26 @@ fn build_project_context_with_limit(working_dir: &Path, max_bytes: usize) -> Str
         return String::new();
     }
 
-    let instruction_files = discover_instruction_files(working_dir);
+    let start = canonical_path(working_dir);
+    let root = discover_project_root(&start);
+    render_project_context(&start, root, max_bytes)
+}
+
+fn build_project_context_for_workspace(working_dir: &Path, project_dir: &Path) -> String {
+    let root = canonical_path(project_dir);
+    let working_dir = canonical_path(working_dir);
+    // Selected project scope owns these instructions. If a caller temporarily
+    // executes elsewhere, do not accidentally inherit an unrelated repository.
+    let start = if working_dir.starts_with(&root) {
+        &working_dir
+    } else {
+        &root
+    };
+    render_project_context(start, &root, DEFAULT_PROJECT_CONTEXT_MAX_BYTES)
+}
+
+fn render_project_context(working_dir: &Path, project_dir: &Path, max_bytes: usize) -> String {
+    let instruction_files = discover_instruction_files(working_dir, project_dir);
     if instruction_files.is_empty() {
         return String::new();
     }
@@ -58,7 +142,7 @@ fn build_project_context_with_limit(working_dir: &Path, max_bytes: usize) -> Str
         }
 
         let label = path
-            .strip_prefix(working_dir)
+            .strip_prefix(project_dir)
             .ok()
             .map(|p| p.display().to_string())
             .filter(|p| !p.is_empty())
@@ -85,13 +169,14 @@ fn build_project_context_with_limit(working_dir: &Path, max_bytes: usize) -> Str
     truncated
 }
 
-fn discover_instruction_files(working_dir: &Path) -> Vec<PathBuf> {
-    let start = working_dir
-        .canonicalize()
-        .unwrap_or_else(|_| working_dir.to_path_buf());
-    let root = discover_project_root(&start);
+fn canonical_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn discover_instruction_files(working_dir: &Path, root: &Path) -> Vec<PathBuf> {
+    let start = working_dir;
     let mut dirs = Vec::new();
-    let mut current = start.as_path();
+    let mut current = start;
 
     loop {
         dirs.push(current.to_path_buf());

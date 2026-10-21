@@ -16,9 +16,6 @@ pub struct LoadedFile {
     pub display_name: String,
 }
 
-/// Backwards compatibility alias
-pub type LoadedImage = LoadedFile;
-
 /// Load file from a local path (image or PDF)
 pub fn load_from_path(path: &Path) -> Result<LoadedFile> {
     // Validate file exists
@@ -183,13 +180,5 @@ pub fn is_supported_file(path: &Path) -> bool {
             let ext = e.to_lowercase();
             image_media_type(&ext).is_some() || ext == "pdf"
         })
-        .unwrap_or(false)
-}
-
-/// Check if a file extension is an image (for backwards compat)
-pub fn is_image_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| image_media_type(&e.to_lowercase()).is_some())
         .unwrap_or(false)
 }

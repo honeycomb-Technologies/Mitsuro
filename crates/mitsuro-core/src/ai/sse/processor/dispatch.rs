@@ -42,6 +42,15 @@ impl SseStreamProcessor {
             );
 
             for event in parser.parse_events(&json).await? {
+                // Smoothing may retain a short text tail. Preserve its order
+                // before tool/thinking/citation events from the same frame or
+                // a later one, including deltas for already-started tools.
+                if !matches!(
+                    &event,
+                    SseEvent::TextDelta(_) | SseEvent::Usage(_) | SseEvent::Skip
+                ) {
+                    self.stream_buffer.flush().await;
+                }
                 match event {
                     SseEvent::TextDelta(text) => {
                         debug!("  -> TextDelta: {} chars", text.len());

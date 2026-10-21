@@ -164,7 +164,7 @@ impl ContextLedger {
 
 fn first_text(content: &[Content]) -> Option<&str> {
     content.iter().find_map(|c| {
-        if let Content::Text { text } = c {
+        if let Content::Text { text, .. } = c {
             Some(text.as_str())
         } else {
             None
@@ -173,13 +173,23 @@ fn first_text(content: &[Content]) -> Option<&str> {
 }
 
 fn extract_latest_user_objective(conversation: &[ModelMessage]) -> Option<String> {
-    conversation.iter().rev().find_map(|message| {
+    conversation.iter().enumerate().rev().find_map(|(index, message)| {
         if message.role != Role::User {
-            return None;
+            let follows_boundary = index > 0 && conversation[index - 1].role == Role::User
+                && conversation[index - 1].content.iter().any(|content| matches!(content,
+                    Content::Text { text, .. } if text.starts_with(super::compaction::COMPACTION_BOUNDARY_PREFIX)));
+            if message.role != Role::Assistant || !follows_boundary {
+                return None;
+            }
+            return message.content.iter().find_map(|content| match content {
+                Content::Text { text, .. } if text.starts_with(super::compaction::COMPACTION_SUMMARY_PREFIX) =>
+                    extract_objective_from_compaction_summary(text).and_then(|objective| normalize_objective(&objective)),
+                _ => None,
+            });
         }
 
         message.content.iter().find_map(|content| {
-            if let Content::Text { text } = content {
+            if let Content::Text { text, .. } = content {
                 let trimmed = text.trim();
                 if trimmed.is_empty()
                     || trimmed.starts_with(super::compaction::COMPACTION_BOUNDARY_PREFIX)
@@ -235,9 +245,7 @@ mod tests {
     fn text_message(role: Role, text: &str) -> ModelMessage {
         ModelMessage {
             role,
-            content: vec![Content::Text {
-                text: text.to_string(),
-            }],
+            content: vec![Content::text(text.to_string())],
         }
     }
 
@@ -277,6 +285,29 @@ mod tests {
         assert_eq!(
             ledger.latest_user_objective.as_deref(),
             Some("Finish the cache benchmark")
+        );
+    }
+
+    #[test]
+    fn assistant_compaction_context_restores_objective_only_after_boundary() {
+        let summary = text_message(Role::Assistant, "# Conversation Compacted\n\n## Latest User Objective\n\nFinish requested work\n\n## Work Summary\n\nAgent proposal.");
+        assert!(
+            ContextLedger::from_conversation(std::slice::from_ref(&summary))
+                .latest_user_objective
+                .is_none()
+        );
+        let messages = [
+            text_message(
+                Role::User,
+                "[COMPACTION_BOUNDARY]\n{\"type\":\"compact_boundary\"}",
+            ),
+            summary,
+        ];
+        assert_eq!(
+            ContextLedger::from_conversation(&messages)
+                .latest_user_objective
+                .as_deref(),
+            Some("Finish requested work")
         );
     }
 

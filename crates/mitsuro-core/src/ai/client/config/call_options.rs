@@ -12,6 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::effort::{AnthropicAdaptiveEffort, CodexReasoningEffort};
+use super::parallel_tools::{resolve_parallel_tool_calls, ParallelToolCallTransport};
 
 /// Provider prompt-cache lifetime preference.
 ///
@@ -211,7 +212,11 @@ pub struct CallOptions {
     pub prompt_cache_key: Option<String>,
     /// Codex-specific reasoning effort
     pub codex_reasoning_effort: Option<CodexReasoningEffort>,
-    /// Codex tool parallelism toggle (disabled by default until parser hardening)
+    /// Explicit Responses/Codex tool parallelism override. `None` preserves
+    /// regular Responses' enabled default and Codex's legacy toggle below.
+    /// This is request policy, not a guarantee about local tool scheduling.
+    pub parallel_tool_calls: Option<bool>,
+    /// Compatibility input for Codex only, used when the shared override is absent.
     pub codex_parallel_tool_calls: bool,
     /// Anthropic Opus 4.6 adaptive thinking effort
     pub anthropic_adaptive_effort: Option<AnthropicAdaptiveEffort>,
@@ -242,6 +247,7 @@ impl Default for CallOptions {
             session_id: None,
             prompt_cache_key: None,
             codex_reasoning_effort: None,
+            parallel_tool_calls: None,
             codex_parallel_tool_calls: false,
             anthropic_adaptive_effort: None,
             fast_mode: false,
@@ -284,7 +290,10 @@ impl CallOptions {
         if self.codex_reasoning_effort.is_some() && canonical.codex_reasoning_effort.is_none() {
             warnings.push("reasoning effort was removed by model capability policy".to_string());
         }
-        if self.codex_parallel_tool_calls && !canonical.codex_parallel_tool_calls {
+        if (self.parallel_tool_calls == Some(true)
+            || (self.parallel_tool_calls.is_none() && self.codex_parallel_tool_calls))
+            && !matches!(api_format, ApiFormat::OpenAIResponses)
+        {
             warnings.push("parallel tool calls are unsupported by the selected API".to_string());
         }
         if self.context_management.is_some() && canonical.context_management.is_none() {
@@ -310,7 +319,22 @@ impl CallOptions {
                 .reasoning_control
                 .map(|value| format!("{value:?}")),
             reasoning_effort: canonical.reasoning_effort.map(|value| format!("{value:?}")),
-            parallel_tool_calls: canonical.codex_parallel_tool_calls,
+            // Without client transport configuration this API describes regular
+            // Responses. AiClient diagnostics resolves the exact OAuth/API path.
+            parallel_tool_calls: resolve_parallel_tool_calls(
+                Some(canonical),
+                if matches!(api_format, ApiFormat::OpenAIResponses) {
+                    ParallelToolCallTransport::Responses
+                } else {
+                    ParallelToolCallTransport::Uncontrolled
+                },
+                canonical
+                    .tools
+                    .as_ref()
+                    .is_some_and(|tools| !tools.is_empty())
+                    || canonical.web_search.is_some(),
+            )
+            .unwrap_or(false),
             caching_enabled: canonical.enable_caching,
             fast_mode: canonical.fast_mode,
             service_tier: canonical

@@ -54,22 +54,8 @@ impl OverlayKind {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum OverlayPhase {
     Opening,
-    Loading,
     #[default]
     Ready,
-    Filtering,
-    Empty,
-    Detail,
-    ActionInProgress,
-    RecoverableError,
-    DestructiveConfirmation,
-    Closing,
-}
-
-impl OverlayPhase {
-    pub const fn is_nested(self) -> bool {
-        matches!(self, Self::Detail | Self::DestructiveConfirmation)
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -23,6 +23,7 @@ use super::content::convert_acp_content;
 use super::PromptProcessor;
 use crate::acp::error::AcpError;
 use crate::acp::session::SessionState;
+use crate::acp::source_references::{cited_text_content, SourceReferences};
 use crate::acp::tools::{
     create_tool_call_complete, create_tool_call_failed, create_tool_call_start,
     text_to_tool_content, tool_name_to_kind,
@@ -210,6 +211,7 @@ impl PromptProcessor {
         let mut tool_output = HashMap::<String, String>::new();
         let mut delegated_tools = AcpDelegatedToolProjection::default();
         let mut last_error = None::<String>;
+        let mut source_references = SourceReferences::default();
 
         self.replay_delegation_state(session, connection).await?;
         // ACP has no delegation push extension. A 400ms storage cadence keeps
@@ -223,17 +225,42 @@ impl PromptProcessor {
             let event = tokio::select! {
                 event = event_rx.recv() => event,
                 _ = delegation_tick.tick() => {
-                    self.replay_delegation_state(session, connection).await?;
+                    if let Err(error) = self.replay_delegation_state(session, connection).await {
+                        flush_source_references(session, connection, &mut source_references).await?;
+                        return Err(error);
+                    }
                     continue;
                 }
             };
             let Some(event) = event else {
                 break;
             };
+            if !matches!(
+                &event,
+                LoopEvent::TextDelta { .. }
+                    | LoopEvent::TextDeltaWithCitations { .. }
+                    | LoopEvent::Usage { .. }
+            ) {
+                flush_source_references(session, connection, &mut source_references).await?;
+            }
+            if matches!(&event, LoopEvent::TurnComplete { .. }) {
+                source_references.end_response();
+            }
             match event {
-                LoopEvent::TextDelta { delta }
-                | LoopEvent::TextDeltaWithCitations { delta, .. } => {
+                LoopEvent::TextDelta { delta } => {
                     send_text_update(session, connection, false, delta).await?;
+                }
+                LoopEvent::TextDeltaWithCitations { delta, citations } => {
+                    source_references.extend(&citations);
+                    let content = cited_text_content(delta, &citations);
+                    send_update(
+                        session,
+                        connection,
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(AcpContent::Text(
+                            content,
+                        ))),
+                    )
+                    .await?;
                 }
                 LoopEvent::ThinkingDelta { thinking } => {
                     send_text_update(session, connection, true, thinking).await?;
@@ -442,18 +469,26 @@ impl PromptProcessor {
                 | LoopEvent::TitleGenerated { .. }
                 | LoopEvent::WebSearchResults { .. }
                 | LoopEvent::WebFetchResult { .. }
-                | LoopEvent::ClassifierDecision { .. }
-                | LoopEvent::TeammateSpawned { .. }
-                | LoopEvent::TeammateTaskCompleted { .. }
-                | LoopEvent::TeammateTaskFailed { .. }
-                | LoopEvent::TeammateCancelled { .. } => {}
+                | LoopEvent::ClassifierDecision { .. } => {}
             }
         }
 
+        flush_source_references(session, connection, &mut source_references).await?;
         Err(AcpError::InternalError(
             "canonical agent loop ended without a terminal event".to_string(),
         ))
     }
+}
+
+async fn flush_source_references<C: AcpClient>(
+    session: &SessionState,
+    connection: &C,
+    references: &mut SourceReferences,
+) -> Result<(), AcpError> {
+    if let Some(text) = references.take_text() {
+        send_text_update(session, connection, false, text).await?;
+    }
+    Ok(())
 }
 
 fn canonical_delegation_group_projected(session: &SessionState, group_id: &str) -> bool {
@@ -698,6 +733,116 @@ pub(super) fn convert_loop_stop_reason(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cited_sources_survive_tool_finish_cancel_error_and_closed_stream_boundaries() {
+        use crate::acp::{create_notification_channel, AcpOutbound};
+        use crate::ai::types::Citation;
+
+        for terminal in [
+            Some(LoopStopReason::Completed),
+            Some(LoopStopReason::UserAbort),
+            Some(LoopStopReason::ProviderError),
+            None,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let db_path = directory.path().join("acp.db");
+            Database::new(&db_path).unwrap();
+            let processor =
+                PromptProcessor::with_db_path(Arc::new(crate::tools::ToolRegistry::new()), db_path);
+            let session = SessionState::new(
+                agent_client_protocol::SessionId::from("citation-test"),
+                Some(directory.path().to_path_buf()),
+                None,
+            );
+            let (connection, mut notifications) = create_notification_channel();
+            let (events, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (inputs, _input_rx) = tokio::sync::mpsc::unbounded_channel();
+            let source = Citation {
+                url: "https://example.com/first".into(),
+                title: "First source".into(),
+                cited_text: "Answer".into(),
+            };
+            events
+                .send(LoopEvent::TextDeltaWithCitations {
+                    delta: "Answer".into(),
+                    citations: vec![source.clone()],
+                })
+                .unwrap();
+            events
+                .send(LoopEvent::TextDeltaWithCitations {
+                    delta: String::new(),
+                    citations: vec![source],
+                })
+                .unwrap();
+            events
+                .send(LoopEvent::ToolCallStart {
+                    id: "read-1".into(),
+                    name: "read".into(),
+                })
+                .unwrap();
+            events
+                .send(LoopEvent::TextDeltaWithCitations {
+                    delta: "More evidence".into(),
+                    citations: vec![Citation {
+                        url: "https://example.com/second".into(),
+                        title: "Second source".into(),
+                        cited_text: "More evidence".into(),
+                    }],
+                })
+                .unwrap();
+            if let Some(stop_reason) = terminal.clone() {
+                events
+                    .send(LoopEvent::Finished {
+                        session_id: "citation-test".into(),
+                        stop_reason,
+                    })
+                    .unwrap();
+            }
+            drop(events);
+
+            let result = processor
+                .bridge_loop_events(&session, &connection, &mut event_rx, &inputs)
+                .await;
+            assert_eq!(
+                result.is_ok(),
+                matches!(
+                    terminal,
+                    Some(LoopStopReason::Completed | LoopStopReason::UserAbort)
+                )
+            );
+            let mut text = String::new();
+            let mut order = Vec::new();
+            let mut annotated_chunks = 0;
+            while let Ok(AcpOutbound::Notification(notification)) = notifications.try_recv() {
+                match notification.update {
+                    SessionUpdate::AgentMessageChunk(ContentChunk {
+                        content: AcpContent::Text(content),
+                        ..
+                    }) => {
+                        if content.meta.is_some() {
+                            annotated_chunks += 1;
+                        }
+                        order.push(if content.text.contains("Sources:") {
+                            "sources"
+                        } else {
+                            "text"
+                        });
+                        text.push_str(&content.text);
+                    }
+                    SessionUpdate::ToolCall(_) => order.push("tool"),
+                    _ => {}
+                }
+            }
+            assert_eq!(annotated_chunks, 3);
+            assert_eq!(text.matches("https://example.com/first").count(), 1);
+            assert_eq!(text.matches("https://example.com/second").count(), 1);
+            assert_eq!(
+                order,
+                ["text", "text", "sources", "tool", "text", "sources"]
+            );
+        }
+    }
 
     fn expect_tool_call(update: SessionUpdate) -> ToolCall {
         match update {

@@ -10,14 +10,44 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
+use crate::ai::retry::is_retryable_error_message;
 use crate::ai::streaming::StreamPart;
-use crate::ai::types::{AiToolCall, FinishReason, Usage};
+use crate::ai::types::{AiToolCall, Citation, FinishReason, Usage};
 use serde_json::Value;
 
+use super::compaction::is_context_overflow_error;
 use super::loop_events::{LoopEvent, LoopStopReason};
 
 const RECOVERY_CHECKPOINT_CHAR_INTERVAL: usize = 256;
 const TOOL_ARGUMENT_PROGRESS_INTERVAL_BYTES: usize = 4 * 1024;
+
+/// Typed classification of the stream failure that terminated a turn.
+///
+/// Classification happens once, at the point of receipt, so the orchestrator
+/// never re-parses provider error prose downstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StreamFailure {
+    /// Provider reported the request exceeded the model context window; the
+    /// sanctioned recovery is one in-place compaction and retry.
+    ContextOverflow(String),
+    /// Transport-level failure that a fresh attempt may survive.
+    RetryableTransport(String),
+    /// Terminal failure; the same request is not retried automatically.
+    Terminal(String),
+    /// No data arrived within the configured idle timeout.
+    IdleTimeout(String),
+}
+
+impl StreamFailure {
+    pub(crate) fn message(&self) -> &str {
+        match self {
+            Self::ContextOverflow(message)
+            | Self::RetryableTransport(message)
+            | Self::Terminal(message)
+            | Self::IdleTimeout(message) => message,
+        }
+    }
+}
 
 /// Accumulated thinking block from the AI response.
 pub(crate) struct ThinkingBlock {
@@ -35,6 +65,7 @@ pub(crate) struct StreamToolCallSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StreamCheckpoint {
     pub text: String,
+    pub citations: Vec<Citation>,
     pub thinking: String,
     pub tool_calls: Vec<StreamToolCallSummary>,
 }
@@ -42,10 +73,12 @@ pub(crate) struct StreamCheckpoint {
 /// Result of processing a complete AI stream.
 pub(crate) struct StreamResult {
     pub text: String,
+    pub citations: Vec<Citation>,
     pub thinking_blocks: Vec<ThinkingBlock>,
     pub tool_calls: Vec<AiToolCall>,
     pub recovery_checkpoint: StreamCheckpoint,
-    pub last_error: Option<String>,
+    /// Typed failure classification; `None` when the stream completed cleanly.
+    pub last_error: Option<StreamFailure>,
     /// Logical input plus output for durable session accounting.
     pub total_tokens: usize,
     /// Logical input including uncached, cache-write, and cache-read buckets.
@@ -75,6 +108,7 @@ pub(crate) async fn process_stream(
     mut on_checkpoint: impl FnMut(&StreamCheckpoint),
 ) -> StreamResult {
     let mut text_buffer = String::new();
+    let mut text_citations = Vec::new();
     let mut thinking_buffer = String::new();
     let mut current_thinking_buffer = String::new();
     let mut thinking_blocks = Vec::new();
@@ -103,17 +137,20 @@ pub(crate) async fn process_stream(
             Ok(Some(part)) => part,
             Ok(None) if received_finish => break,
             Ok(None) => {
-                let error = "AI stream ended without a finish signal".to_string();
-                last_error = Some(error);
+                // This exact wording is a recognized retryable transport
+                // marker; a fresh attempt may receive a well-formed stream.
+                last_error = Some(StreamFailure::RetryableTransport(
+                    "AI stream ended without a finish signal".to_string(),
+                ));
                 stop_reason = Some(LoopStopReason::ProviderError);
                 break;
             }
             Err(_) if received_finish => break,
             Err(_) => {
-                last_error = Some(format!(
+                last_error = Some(StreamFailure::IdleTimeout(format!(
                     "AI stream timeout: no data received for {} seconds",
                     idle_timeout.as_secs()
-                ));
+                )));
                 stop_reason = Some(LoopStopReason::StreamIdleTimeout);
                 break;
             }
@@ -139,6 +176,7 @@ pub(crate) async fn process_stream(
                 });
                 maybe_checkpoint(
                     &text_buffer,
+                    &text_citations,
                     &thinking_buffer,
                     &recovery_tool_calls,
                     &mut last_checkpoint_text_len,
@@ -155,6 +193,7 @@ pub(crate) async fn process_stream(
                 });
                 maybe_checkpoint(
                     &text_buffer,
+                    &text_citations,
                     &thinking_buffer,
                     &recovery_tool_calls,
                     &mut last_checkpoint_text_len,
@@ -208,6 +247,7 @@ pub(crate) async fn process_stream(
                 );
                 maybe_checkpoint(
                     &text_buffer,
+                    &text_citations,
                     &thinking_buffer,
                     &recovery_tool_calls,
                     &mut last_checkpoint_text_len,
@@ -239,6 +279,7 @@ pub(crate) async fn process_stream(
                 tool_argument_progress.remove(&tool_call.id);
                 maybe_checkpoint(
                     &text_buffer,
+                    &text_citations,
                     &thinking_buffer,
                     &recovery_tool_calls,
                     &mut last_checkpoint_text_len,
@@ -253,32 +294,34 @@ pub(crate) async fn process_stream(
                     .count();
                 match reason {
                     FinishReason::Stop | FinishReason::ToolCalls if incomplete_tool_calls > 0 => {
-                        let error = format!(
+                        last_error = Some(StreamFailure::Terminal(format!(
                             "AI response ended with {incomplete_tool_calls} incomplete tool call(s); none were executed"
-                        );
-                        last_error = Some(error);
+                        )));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::ToolCalls if tool_calls.is_empty() => {
-                        let error = "AI provider reported tool calls but supplied no complete calls; none were executed".to_string();
-                        last_error = Some(error);
+                        last_error = Some(StreamFailure::Terminal(
+                            "AI provider reported tool calls but supplied no complete calls; none were executed".to_string(),
+                        ));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::Stop | FinishReason::ToolCalls => {}
                     FinishReason::Length => {
-                        let error = "AI response reached its output-token limit; incomplete tool calls were not executed".to_string();
-                        last_error = Some(error);
+                        last_error = Some(StreamFailure::Terminal(
+                            "AI response reached its output-token limit; incomplete tool calls were not executed".to_string(),
+                        ));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::ContentFilter => {
-                        let error =
-                            "AI response was blocked by the provider content filter".to_string();
-                        last_error = Some(error);
+                        last_error = Some(StreamFailure::Terminal(
+                            "AI response was blocked by the provider content filter".to_string(),
+                        ));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                     FinishReason::Other(reason) => {
-                        let error = format!("AI response ended unexpectedly: {reason}");
-                        last_error = Some(error);
+                        last_error = Some(StreamFailure::Terminal(format!(
+                            "AI response ended unexpectedly: {reason}"
+                        )));
                         stop_reason = Some(LoopStopReason::ProviderError);
                     }
                 }
@@ -306,17 +349,24 @@ pub(crate) async fn process_stream(
             StreamPart::TextDeltaWithCitations { delta, citations } => {
                 produced_output = true;
                 text_buffer.push_str(delta);
+                let previous_citation_count = text_citations.len();
+                for citation in citations {
+                    if !text_citations.contains(citation) {
+                        text_citations.push(citation.clone());
+                    }
+                }
                 let _ = event_tx.send(LoopEvent::TextDeltaWithCitations {
                     delta: delta.clone(),
                     citations: citations.clone(),
                 });
                 maybe_checkpoint(
                     &text_buffer,
+                    &text_citations,
                     &thinking_buffer,
                     &recovery_tool_calls,
                     &mut last_checkpoint_text_len,
                     &mut on_checkpoint,
-                    false,
+                    text_citations.len() != previous_citation_count,
                 );
             }
             StreamPart::ServerToolStart { id, name } => {
@@ -369,7 +419,13 @@ pub(crate) async fn process_stream(
                 });
             }
             StreamPart::Error { error } => {
-                last_error = Some(error.clone());
+                last_error = Some(if is_context_overflow_error(error) {
+                    StreamFailure::ContextOverflow(error.clone())
+                } else if is_retryable_error_message(error) {
+                    StreamFailure::RetryableTransport(error.clone())
+                } else {
+                    StreamFailure::Terminal(error.clone())
+                });
                 stop_reason = Some(LoopStopReason::ProviderError);
                 break;
             }
@@ -407,6 +463,7 @@ pub(crate) async fn process_stream(
 
     let recovery_checkpoint = StreamCheckpoint {
         text: text_buffer.clone(),
+        citations: text_citations.clone(),
         thinking: thinking_buffer,
         tool_calls: recovery_tool_calls,
     };
@@ -414,6 +471,7 @@ pub(crate) async fn process_stream(
 
     StreamResult {
         text: text_buffer,
+        citations: text_citations,
         thinking_blocks,
         tool_calls,
         recovery_checkpoint,
@@ -430,6 +488,7 @@ pub(crate) async fn process_stream(
 
 fn maybe_checkpoint(
     text: &str,
+    citations: &[Citation],
     thinking: &str,
     tool_calls: &[StreamToolCallSummary],
     last_checkpoint_text_len: &mut usize,
@@ -445,6 +504,7 @@ fn maybe_checkpoint(
     *last_checkpoint_text_len = text.len();
     on_checkpoint(&StreamCheckpoint {
         text: text.to_string(),
+        citations: citations.to_vec(),
         thinking: thinking.to_string(),
         tool_calls: tool_calls.to_vec(),
     });
@@ -457,9 +517,76 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::process_stream;
+    use super::StreamFailure;
     use crate::agent::loop_events::{LoopEvent, LoopStopReason};
     use crate::ai::streaming::StreamPart;
     use crate::ai::types::{AiToolCall, Usage};
+
+    #[tokio::test]
+    async fn annotation_only_delta_survives_stream_checkpoint_and_durable_message() {
+        use crate::ai::types::{Citation, Content};
+        let citation = Citation {
+            url: "https://example.org/source".into(),
+            title: "Source".into(),
+            cited_text: "Supported fact".into(),
+        };
+        let (api_tx, api_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        api_tx
+            .send(StreamPart::TextDelta {
+                delta: "Supported fact.".into(),
+            })
+            .unwrap();
+        for _ in 0..2 {
+            api_tx
+                .send(StreamPart::TextDeltaWithCitations {
+                    delta: String::new(),
+                    citations: vec![citation.clone()],
+                })
+                .unwrap();
+        }
+        api_tx
+            .send(StreamPart::Finish {
+                reason: crate::ai::types::FinishReason::Stop,
+            })
+            .unwrap();
+        drop(api_tx);
+        let mut checkpoints = Vec::new();
+        let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |checkpoint| {
+            checkpoints.push(checkpoint.clone())
+        })
+        .await;
+        assert_eq!(result.text, "Supported fact.");
+        assert_eq!(result.citations, vec![citation.clone()]);
+        assert_eq!(result.recovery_checkpoint.citations, result.citations);
+        assert!(checkpoints
+            .iter()
+            .any(|checkpoint| checkpoint.citations == result.citations));
+        assert_eq!(
+            checkpoints.len(),
+            2,
+            "duplicate annotations must not trigger another checkpoint write"
+        );
+        let mut streamed = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            streamed.push(event);
+        }
+        assert!(
+            matches!(&streamed[0], LoopEvent::TextDelta { delta } if delta == "Supported fact.")
+        );
+        assert!(
+            matches!(&streamed[1], LoopEvent::TextDeltaWithCitations { delta, citations } if delta.is_empty() && citations == &result.citations)
+        );
+        let content = Content::Text {
+            text: result.text,
+            citations: result.citations,
+        };
+        let reloaded: Content =
+            serde_json::from_str(&serde_json::to_string(&content).unwrap()).unwrap();
+        assert!(
+            matches!(reloaded, Content::Text { text, citations } if text == "Supported fact." && citations == vec![citation])
+        );
+    }
 
     #[tokio::test]
     async fn usage_event_preserves_prompt_completion_split() {
@@ -786,8 +913,8 @@ mod tests {
         assert_eq!(result.stop_reason, Some(LoopStopReason::ProviderError));
         assert!(result
             .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("output-token limit")));
+            .as_ref()
+            .is_some_and(|failure| failure.message().contains("output-token limit")));
     }
 
     #[tokio::test]
@@ -872,8 +999,8 @@ mod tests {
         assert_eq!(result.stop_reason, Some(LoopStopReason::ProviderError));
         assert!(result
             .last_error
-            .as_deref()
-            .is_some_and(|error| error.contains("incomplete tool call")));
+            .as_ref()
+            .is_some_and(|failure| failure.message().contains("incomplete tool call")));
     }
 
     #[tokio::test]
@@ -891,7 +1018,7 @@ mod tests {
         let result = process_stream(api_rx, &event_tx, Duration::from_secs(1), |_| {}).await;
         assert_eq!(result.stop_reason, Some(LoopStopReason::ProviderError));
         assert_eq!(
-            result.last_error.as_deref(),
+            result.last_error.as_ref().map(StreamFailure::message),
             Some("AI stream ended without a finish signal")
         );
         assert!(result.produced_output);

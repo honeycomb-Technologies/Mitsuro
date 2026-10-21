@@ -43,10 +43,6 @@ impl RenderHarness {
         }
     }
 
-    pub fn render(self, capability: CapabilityProfile) -> BufferSnapshot {
-        self.render_with_layout(capability).buffer
-    }
-
     pub fn resize(&mut self, width: u16, height: u16) {
         self.terminal.backend_mut().resize(width, height);
     }
@@ -119,7 +115,11 @@ impl RenderHarness {
             ConversationDisplayList::build(conversation, &state.artifacts, viewport.height);
         let transcript_width = crate::tui_v2::layout::responsive::compose_route(viewport, false, 1)
             .map(|geometry| {
-                crate::tui_v2::layout::responsive::transcript_column(geometry.primary).width
+                crate::tui_v2::layout::responsive::transcript_column_with_dock(
+                    geometry.primary,
+                    false,
+                )
+                .width
             })
             .unwrap_or(viewport.width.max(1));
         let measured = display.measure(

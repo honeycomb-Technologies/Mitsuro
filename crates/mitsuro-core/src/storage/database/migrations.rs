@@ -4203,8 +4203,11 @@ impl Database {
         // as a user room message.
         if current_version < 68 {
             info!("Running migration 68: Hive schedule group targeting");
-            let schedules_exist: bool = self
-                .conn
+            // Keep the column check and ALTER atomic across concurrent first opens.
+            let schedule_group_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring Hive schedule group migration lock")?;
+            let schedules_exist: bool = schedule_group_tx
                 .query_row(
                     "SELECT EXISTS(
                          SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hive_schedules'
@@ -4214,8 +4217,7 @@ impl Database {
                 )
                 .context("Migration 68: checking for hive_schedules")?;
             if schedules_exist {
-                let has_group_id: bool = self
-                    .conn
+                let has_group_id: bool = schedule_group_tx
                     .query_row(
                         "SELECT EXISTS(
                              SELECT 1 FROM pragma_table_info('hive_schedules')
@@ -4226,7 +4228,7 @@ impl Database {
                     )
                     .context("Migration 68: checking hive_schedules.group_id")?;
                 if !has_group_id {
-                    self.conn
+                    schedule_group_tx
                         .execute_batch(
                             "ALTER TABLE hive_schedules ADD COLUMN group_id TEXT
                                  REFERENCES hive_groups(id) ON DELETE SET NULL;
@@ -4236,10 +4238,11 @@ impl Database {
                         .context("Migration 68: adding hive_schedules.group_id")?;
                 }
             }
-            self.conn.execute(
+            schedule_group_tx.execute(
                 "INSERT OR IGNORE INTO schema_version (version) VALUES (68)",
                 [],
             )?;
+            schedule_group_tx.commit()?;
         }
 
         // Migration 69: isolated group Worker lanes and crash-safe Worker
@@ -8883,6 +8886,161 @@ impl Database {
             acceptance_tx.commit()?;
         }
 
+        // Migration 79: exact-owner, project-bound spatial canvases.
+        //
+        // The materialized snapshot makes startup bounded, while the compact
+        // append-only event ledger supplies reconnect replay and idempotency.
+        // NULL is the exact local owner, never a wildcard across tenant rows.
+        if current_version < 79 {
+            info!("Running migration 79: spatial canvas snapshots and replay ledger");
+            let canvas_tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                .context("acquiring spatial canvas migration lock")?;
+            canvas_tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS spatial_canvases (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id TEXT,
+                    project_dir TEXT NOT NULL CHECK(
+                        length(project_dir) BETWEEN 1 AND 16384
+                        AND project_dir GLOB '/*'
+                    ),
+                    surface TEXT NOT NULL CHECK(surface IN ('code', 'hive')),
+                    name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 512),
+                    schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+                    revision INTEGER NOT NULL DEFAULT 0 CHECK(revision >= 0),
+                    shared_theme_id TEXT NOT NULL DEFAULT 'graphite'
+                        CHECK(length(shared_theme_id) BETWEEN 1 AND 128),
+                    state_json TEXT NOT NULL CHECK(
+                        json_valid(state_json)
+                        AND json_type(state_json) = 'object'
+                        AND json_extract(state_json, '$.schema_version') = 1
+                        AND json_type(state_json, '$.nodes') = 'array'
+                        AND json_array_length(state_json, '$.nodes') <= 256
+                        AND length(state_json) <= 2097152
+                    ),
+                    create_op_id TEXT NOT NULL
+                        CHECK(length(create_op_id) BETWEEN 1 AND 256),
+                    create_request_json TEXT NOT NULL CHECK(
+                        json_valid(create_request_json)
+                        AND json_type(create_request_json) = 'object'
+                        AND length(create_request_json) <= 32768
+                    ),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    archived_at TEXT
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_spatial_canvases_local_name
+                    ON spatial_canvases(project_dir, surface, name)
+                    WHERE owner_user_id IS NULL AND archived_at IS NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_spatial_canvases_tenant_name
+                    ON spatial_canvases(owner_user_id, project_dir, surface, name)
+                    WHERE owner_user_id IS NOT NULL AND archived_at IS NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_spatial_canvases_local_create_op
+                    ON spatial_canvases(create_op_id)
+                    WHERE owner_user_id IS NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_spatial_canvases_tenant_create_op
+                    ON spatial_canvases(owner_user_id, create_op_id)
+                    WHERE owner_user_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_spatial_canvases_owner_recent
+                    ON spatial_canvases(owner_user_id, surface, updated_at DESC)
+                    WHERE archived_at IS NULL;
+
+                CREATE TABLE IF NOT EXISTS spatial_canvas_events (
+                    canvas_id TEXT NOT NULL
+                        REFERENCES spatial_canvases(id) ON DELETE CASCADE,
+                    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+                    op_id TEXT NOT NULL CHECK(length(op_id) BETWEEN 1 AND 256),
+                    client_id TEXT NOT NULL CHECK(length(client_id) BETWEEN 1 AND 256),
+                    operations_json TEXT NOT NULL CHECK(
+                        json_valid(operations_json)
+                        AND json_type(operations_json) = 'array'
+                        AND length(operations_json) <= 2097152
+                    ),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(canvas_id, sequence),
+                    UNIQUE(canvas_id, op_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_spatial_canvas_events_replay
+                    ON spatial_canvas_events(canvas_id, sequence ASC);
+                "#,
+            )?;
+            canvas_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (79)",
+                [],
+            )?;
+            canvas_tx.commit()?;
+        }
+
+        // Migration 80: crash-reconcilable Canvas resource creation intents,
+        // including detach-generation CAS for Bound resources whose external
+        // runtime cannot be proven after restart.
+        if current_version < 80 {
+            info!("Running migration 80: canvas resource create intent ledger");
+            let resource_tx =
+                Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+                    .context("acquiring canvas resource intent migration lock")?;
+            resource_tx.execute_batch(
+                r#"
+                CREATE TABLE IF NOT EXISTS spatial_canvas_resource_creates (
+                    canvas_id TEXT NOT NULL
+                        REFERENCES spatial_canvases(id) ON DELETE CASCADE,
+                    owner_user_id TEXT,
+                    create_op_id TEXT NOT NULL
+                        CHECK(length(create_op_id) BETWEEN 1 AND 192),
+                    bind_op_id TEXT NOT NULL
+                        CHECK(length(bind_op_id) BETWEEN 1 AND 256),
+                    client_id TEXT NOT NULL
+                        CHECK(length(client_id) BETWEEN 1 AND 256),
+                    node_id TEXT NOT NULL
+                        CHECK(length(node_id) BETWEEN 1 AND 64),
+                    resource_kind TEXT NOT NULL
+                        CHECK(resource_kind IN ('agent', 'terminal', 'browser')),
+                    request_json TEXT NOT NULL CHECK(
+                        json_valid(request_json)
+                        AND json_type(request_json) = 'object'
+                        AND length(request_json) <= 65536
+                    ),
+                    request_fingerprint TEXT NOT NULL
+                        CHECK(length(request_fingerprint) BETWEEN 1 AND 128),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'reserved', 'provisioning', 'provisioned', 'bound',
+                        'failed', 'ambiguous', 'cleaning', 'cleaned', 'abandoned'
+                    )),
+                    executor_id TEXT CHECK(
+                        executor_id IS NULL OR length(executor_id) BETWEEN 1 AND 128
+                    ),
+                    claim_token TEXT CHECK(
+                        claim_token IS NULL OR length(claim_token) BETWEEN 1 AND 128
+                    ),
+                    result_json TEXT CHECK(
+                        result_json IS NULL OR (
+                            json_valid(result_json)
+                            AND json_type(result_json) = 'object'
+                            AND length(result_json) <= 65536
+                        )
+                    ),
+                    last_error TEXT CHECK(
+                        last_error IS NULL OR length(last_error) <= 8192
+                    ),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    detach_generation INTEGER NOT NULL DEFAULT 0
+                        CHECK(detach_generation >= 0),
+                    PRIMARY KEY(canvas_id, create_op_id),
+                    UNIQUE(canvas_id, bind_op_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_spatial_canvas_resource_creates_pending
+                    ON spatial_canvas_resource_creates(canvas_id, status, updated_at ASC)
+                    WHERE status NOT IN ('bound', 'cleaned', 'abandoned');
+                "#,
+            )?;
+            resource_tx.execute(
+                "INSERT OR IGNORE INTO schema_version (version) VALUES (80)",
+                [],
+            )?;
+            resource_tx.commit()?;
+        }
+
         if privacy_cleanup_requested {
             self.restore_normal_locking_after_privacy_migration()?;
         }
@@ -9005,7 +9163,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate preview database");
-        assert_eq!(database.get_schema_version(), 78);
+        assert_eq!(database.get_schema_version(), 80);
         database
             .conn()
             .execute(
@@ -9086,7 +9244,7 @@ mod delegation_event_migration_tests {
         drop(fixture);
 
         let database = Database::new(&db_path).expect("migrate synthetic database");
-        assert_eq!(database.get_schema_version(), 78);
+        assert_eq!(database.get_schema_version(), 80);
         let create_sql: String = database
             .conn()
             .query_row(

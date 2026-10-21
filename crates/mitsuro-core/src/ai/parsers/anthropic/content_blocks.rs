@@ -109,6 +109,20 @@ impl AnthropicParser {
             let delta_type = delta.get("type").and_then(|t| t.as_str());
 
             match delta_type {
+                Some("citations_delta") => {
+                    let citations = delta
+                        .get("citation")
+                        .map(|citation| self.parse_citations(std::slice::from_ref(citation)))
+                        .unwrap_or_default();
+                    return Ok(if citations.is_empty() {
+                        SseEvent::Skip
+                    } else {
+                        SseEvent::TextDeltaWithCitations {
+                            text: String::new(),
+                            citations,
+                        }
+                    });
+                }
                 Some("text_delta") => {
                     let text = delta
                         .get("text")
@@ -222,5 +236,32 @@ impl AnthropicParser {
         }
 
         Ok(SseEvent::Skip)
+    }
+}
+
+#[cfg(test)]
+mod citation_tests {
+    use super::*;
+    use crate::ai::sse::SseParser;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn separate_citation_delta_preserves_annotation_without_inventing_text() {
+        let event = AnthropicParser::new().parse_event(&json!({
+            "type": "content_block_delta", "index": 1,
+            "delta": {"type": "citations_delta", "citation": {
+                "type": "web_search_result_location", "url": "https://example.org/source",
+                "title": "Source", "cited_text": "A cited fact", "encrypted_index": "opaque-provider-reference"
+            }}
+        })).await.unwrap();
+        match event {
+            SseEvent::TextDeltaWithCitations { text, citations } => {
+                assert!(text.is_empty());
+                assert_eq!(citations.len(), 1);
+                assert_eq!(citations[0].url, "https://example.org/source");
+                assert_eq!(citations[0].cited_text, "A cited fact");
+            }
+            _ => panic!("expected a normalized citation event"),
+        }
     }
 }

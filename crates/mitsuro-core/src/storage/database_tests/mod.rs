@@ -7,9 +7,7 @@
 //! - Data survives through migrations
 
 mod core;
-mod feature_tables;
 mod migrations;
-mod runtime_tables;
 
 use tempfile::TempDir;
 

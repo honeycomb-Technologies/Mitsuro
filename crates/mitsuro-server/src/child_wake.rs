@@ -2363,6 +2363,10 @@ mod tests {
             session_locks: Arc::new(RwLock::new(HashMap::new())),
             session_inputs: Arc::new(RwLock::new(HashMap::new())),
             session_presence: Arc::new(RwLock::new(HashMap::new())),
+            session_control_leases: Arc::new(RwLock::new(
+                crate::control_leases::SessionControlLeaseRegistry::default(),
+            )),
+            agent_streams: Arc::new(RwLock::new(crate::agent_streams::AgentStreamHub::default())),
             delegated_state: Arc::new(RwLock::new(HashMap::new())),
             remote_access: Arc::new(RwLock::new(crate::remote_access::RemoteAccessConfig {
                 enabled: true,
@@ -2451,9 +2455,9 @@ mod tests {
             .expect("delegated run should finalize");
 
         let pending_id = format!("child-wake-{delegated_run_id}");
-        let content = vec![Content::Text {
-            text: "[CHILD AGENT COMPLETE]\nsummary:\ndone".into(),
-        }];
+        let content = vec![Content::text(
+            "[CHILD AGENT COMPLETE]\nsummary:\ndone".into(),
+        )];
         let content_json = serde_json::to_string(&content).expect("content should serialize");
         assert!(SessionManager::new(
             Database::new(&state.db_path).expect("queue database should open")

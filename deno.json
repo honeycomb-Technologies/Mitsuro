@@ -8,6 +8,7 @@
   "nodeModulesDir": "auto",
   "tasks": {
     "check:state": "deno check --unstable-sloppy-imports packages/state/src/index.ts packages/state/test/*.test.ts",
-    "test:state": "deno test --unstable-sloppy-imports --allow-env=NODE_ENV packages/state/test"
+    "test:state": "deno test --unstable-sloppy-imports --allow-env=NODE_ENV packages/state/test",
+    "test:mobile": "deno test --unstable-sloppy-imports --allow-read --allow-env=NODE_ENV apps/mobile/test"
   }
 }

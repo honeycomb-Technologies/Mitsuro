@@ -13,7 +13,7 @@ use crate::storage::{CredentialStore, Preferences, SessionManager};
 use crate::tools::ToolRegistry;
 use mitsuro_core::skills::SkillsManager;
 
-use super::utils::{McpStatusUpdate, OAuthStatusUpdate};
+use super::utils::OAuthStatusUpdate;
 
 /// Application services and external systems shared by the terminal runtime.
 pub struct AppServices {
@@ -30,6 +30,5 @@ pub struct AppServices {
     pub plugin_manager: Option<Arc<PluginManager>>,
     pub skills_manager: Arc<RwLock<SkillsManager>>,
     pub mcp_manager: Arc<mitsuro_core::mcp::McpManager>,
-    pub mcp_status_tx: tokio::sync::mpsc::UnboundedSender<McpStatusUpdate>,
     pub oauth_status_tx: tokio::sync::mpsc::UnboundedSender<OAuthStatusUpdate>,
 }

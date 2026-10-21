@@ -5,7 +5,7 @@
 //! and composer click-to-caret.
 
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
-use ratatui::layout::{Position, Rect};
+use ratatui::layout::Position;
 
 use crate::tui_v2::{
     app::reducer::UiAction,
@@ -289,10 +289,6 @@ fn hover_link(snapshot: &LayoutSnapshot, position: Position) -> Option<String> {
             InteractionIntent::OpenLink(url) => Some(url.clone()),
             _ => None,
         })
-}
-
-pub fn contains_point(area: Rect, column: u16, row: u16) -> bool {
-    area.contains(Position::new(column, row))
 }
 
 #[cfg(test)]

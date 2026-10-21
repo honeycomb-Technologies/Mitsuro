@@ -1,5 +1,3 @@
-import type { ChatMessage } from "@mitsuro/api";
-
 export interface AssistantRenderSegment {
   id: string;
   content: string;
@@ -21,41 +19,6 @@ const TRIM_CACHE_TO = 96;
 const segmentCache = new Map<string, SegmentCacheEntry>();
 const accessOrder: string[] = [];
 
-export function assistantMessageRevision(message: ChatMessage): string {
-  const toolSignature =
-    message.toolCalls
-      ?.map((toolCall) =>
-        [
-          toolCall.id,
-          toolCall.status,
-          toolCall.output?.length ?? 0,
-          toolCall.delegated?.thinking?.length ?? 0,
-        ].join(":"),
-      )
-      .join("|") ?? "";
-  const renderPartSignature =
-    message.renderParts
-      ?.map((part) => {
-        if (part.type === "tool") {
-          return `${part.type}:${part.toolCallId}`;
-        }
-        if (part.type === "attachments") {
-          return part.type;
-        }
-        return `${part.type}:${part.content.length}`;
-      })
-      .join("|") ?? "";
-
-  return [
-    message.id,
-    message.content.length,
-    message.thinking?.length ?? 0,
-    message.kind ?? "steady",
-    toolSignature,
-    renderPartSignature,
-  ].join("::");
-}
-
 export function assistantRenderSegments(
   messageId: string,
   text: string,
@@ -75,11 +38,6 @@ export function assistantRenderSegments(
 
 export function shouldSegmentAssistantContent(isStreaming: boolean): boolean {
   return isStreaming;
-}
-
-export function resetAssistantRenderSegments() {
-  segmentCache.clear();
-  accessOrder.splice(0, accessOrder.length);
 }
 
 function makeCacheEntry(
@@ -271,7 +229,6 @@ function coalesceTrailingPunctuation(blocks: string[]): string[] {
   }
   return blocks;
 }
-
 
 function touch(messageId: string) {
   const existingIndex = accessOrder.indexOf(messageId);

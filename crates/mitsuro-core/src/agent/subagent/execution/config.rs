@@ -9,6 +9,8 @@ use super::super::build_context::SharedBuildContext;
 use super::super::tools::BuilderTools;
 use super::super::types::{AgentProgress, SubAgentTask};
 
+const READ_ONLY_CHILD_CONTRACT: &str = "\nThis child has no workspace-write authority. Shell execution is for inspection and requested validation only; do not run export, generate, install, clean, format, fix, sync, or similar project targets that intentionally modify workspace files. Request a write-capable child if such work is required.\n";
+
 const DELEGATED_HANDOFF_CONTRACT: &str = r#"End with a short human summary followed by exactly one machine-readable handoff. The handoff must be the final block in your response:
 <delegated_handoff>{"status":"complete|degraded|blocked|failed","summary":"truthful outcome","acceptance_checks":[{"id":"check name","status":"passed|failed|not_applicable","evidence":"bounded evidence"}],"remaining_work":[],"blockers":[],"generated_artifacts":[{"path":"relative/output/path","purpose":"why a dependent task or final product needs it"}]}</delegated_handoff>
 Use complete only when the assigned objective and every required validation actually passed. Put unfinished work in remaining_work and use degraded or blocked rather than claiming success.
@@ -140,6 +142,19 @@ impl BuilderConfig {
 impl AgentConfig for BuilderConfig {
     fn system_prompt(&self, _turn: usize) -> String {
         let mut prompt = builder_system_prompt(&self.task.working_dir);
+        prompt.push('\n');
+        prompt.push_str(&super::delegated_execution_context(
+            &self.task,
+            self.task.project_context.clone(),
+        ));
+        if self
+            .task
+            .delegation_policy
+            .as_ref()
+            .is_none_or(|policy| policy.read_only_only)
+        {
+            prompt.push_str(READ_ONLY_CHILD_CONTRACT);
+        }
         if self
             .get_ai_tools()
             .iter()
@@ -256,9 +271,7 @@ follow the parent instructions exactly.\n\n\
         prompt.push_str(DELEGATED_HANDOFF_CONTRACT);
 
         if self.policy.read_only_only {
-            prompt.push_str(
-                "\n7. This child has no workspace-write authority. Shell execution is for inspection and requested validation only; do not run export, generate, install, clean, format, fix, sync, or similar project targets that intentionally modify workspace files. Request a write-capable child if such work is required.\n",
-            );
+            prompt.push_str(READ_ONLY_CHILD_CONTRACT);
         }
 
         if self
@@ -324,7 +337,8 @@ The browser_check tool is authorized for this delegated task. Use it directly fo
 /// Generate write-capable child system prompt with context injection.
 fn builder_system_prompt(working_dir: &std::path::Path) -> String {
     format!(
-        r#"You are a delegated child agent of the parent Agent in Mitsuro with write access.
+        r#"You are a delegated child agent of the parent Agent in Mitsuro.
+Your inherited capability policy and available tool schemas define your read, write, and execution authority.
 Complete only the task the parent assigned. You are not a fixed specialty — follow the parent instructions exactly.
 
 ## Working Directory
@@ -343,8 +357,8 @@ Complete only the task the parent assigned. You are not a fixed specialty — fo
 
 ## Process
 1. Locate relevant files (glob/grep/read)
-2. Make the assigned changes (write/edit)
-3. Lightly validate when the parent asked for it
+2. Perform the assigned investigation or authorized changes
+3. Complete the validation required by the assignment and repository instructions
 4. Return a concise report to the parent
 
 ## Report
@@ -361,6 +375,64 @@ mod tests {
     use crate::tools::register_all_tools;
     use crate::tools::registry::PermissionMode;
     use std::collections::HashSet;
+
+    #[tokio::test]
+    async fn single_and_graph_children_assemble_the_same_project_contract_at_system_authority() {
+        use crate::agent::context::{
+            build_subagent_project_context, build_subagent_project_instructions,
+        };
+        use crate::ai::model_profile::build_system_prompt_sections;
+        use crate::ai::models::ApiFormat;
+        use crate::ai::providers::ProviderId;
+
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("source");
+        let nested = project.join("component");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(project.join("AGENTS.md"), "SHARED-ROOT-CONTRACT").unwrap();
+        std::fs::write(nested.join("AGENTS.md"), "CHILD-SCOPE-CONTRACT").unwrap();
+        let instructions = build_subagent_project_instructions(&nested, Some(&project));
+        let isolated = temp.path().join("isolated").join("component");
+        let policy = DelegationPolicy::for_subagent_verify(PermissionMode::Autonomous, Some(7));
+        let task = SubAgentTask::new("child", "Inspect the component")
+            .with_working_dir(isolated.clone())
+            .with_sandbox_root(temp.path().join("isolated"))
+            .with_project_context(instructions.clone())
+            .with_delegation_policy(policy.clone());
+        assert!(!task.prompt.contains("SHARED-ROOT-CONTRACT"));
+        let builder = BuilderConfig::new(task, Arc::new(SharedBuildContext::new()));
+        let single = SingleChildConfig::new(
+            Arc::new(ToolRegistry::new()),
+            policy,
+            build_subagent_project_context(&nested, Some(&project)),
+        )
+        .await;
+        for prompt in [builder.system_prompt(1), single.system_prompt(1)] {
+            let sections = build_system_prompt_sections(
+                ProviderId::OpenAI,
+                ApiFormat::OpenAIResponses,
+                "gpt-5.5",
+                &[],
+                Some(&prompt),
+                &[],
+            );
+            assert!(sections.base_prompt.contains("SHARED-ROOT-CONTRACT"));
+            assert!(sections.base_prompt.contains("CHILD-SCOPE-CONTRACT"));
+            assert!(sections
+                .base_prompt
+                .contains("no workspace-write authority"));
+            assert!(sections.base_prompt.contains("<delegated_handoff>"));
+            assert!(sections
+                .base_prompt
+                .contains("Do NOT spawn further sub-agents"));
+        }
+        let graph_prompt = builder.system_prompt(1);
+        assert!(graph_prompt.contains(&format!(
+            "Current working directory: {}",
+            isolated.display()
+        )));
+        assert!(!graph_prompt.contains(&format!("Execution directory: {}", nested.display())));
+    }
 
     #[test]
     fn builder_schema_intersects_with_exact_parent_execution_scope() {

@@ -1,19 +1,16 @@
 use super::PushSubscriptionStore;
 use crate::storage::database::Database;
+use tempfile::TempDir;
 
-fn test_db() -> Database {
-    let temp_dir = std::env::temp_dir().join(format!(
-        "mitsuro-push-subscriptions-{}",
-        uuid::Uuid::new_v4()
-    ));
-    std::fs::create_dir_all(&temp_dir).expect("temp dir should exist");
-    let db_path = temp_dir.join("test.db");
-    Database::new(&db_path).expect("database should initialize")
+fn test_db() -> (TempDir, Database) {
+    let temp = TempDir::new().expect("temp dir should exist");
+    let db = Database::new(&temp.path().join("test.db")).expect("database should initialize");
+    (temp, db)
 }
 
 #[test]
 fn remove_by_endpoint_for_user_respects_multi_tenant_ownership() {
-    let db = test_db();
+    let (_temp, db) = test_db();
     let store = PushSubscriptionStore::new(&db);
     let endpoint = "https://push.example.test/subscription";
 
@@ -41,7 +38,7 @@ fn remove_by_endpoint_for_user_respects_multi_tenant_ownership() {
 
 #[test]
 fn remove_by_endpoint_for_user_scopes_single_tenant_rows_to_null_owner() {
-    let db = test_db();
+    let (_temp, db) = test_db();
     let store = PushSubscriptionStore::new(&db);
     let endpoint = "https://push.example.test/local";
 

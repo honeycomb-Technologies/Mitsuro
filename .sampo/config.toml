@@ -39,9 +39,7 @@ fixed = [
     "cargo/mitsuro-core",
     "cargo/mitsuro-server",
     "cargo/mitsuro-client",
-    "cargo/mitsuro-client-state",
-    "cargo/mitsuro-desktop-backend",
-    "cargo/mitsuro-gpui-desktop",
+    "cargo/mitsuro-canvas",
   ],
   [
     "cargo/mitsuro-hive",

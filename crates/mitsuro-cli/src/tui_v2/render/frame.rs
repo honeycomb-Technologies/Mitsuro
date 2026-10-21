@@ -21,11 +21,8 @@ use crate::tui_v2::{
         home::render as render_home,
         model_picker::render as render_model_picker,
         primitive::{
-            action_footer::ActionFooter,
-            input_field::InputField,
-            overlay_chrome::OverlayChrome,
-            surface::{BorderMode, Surface, SurfaceLevel},
-            working_edge::render_working_edge,
+            action_footer::ActionFooter, input_field::InputField, overlay_chrome::OverlayChrome,
+            surface::Surface, working_edge::render_working_edge,
         },
         service_inspector::{
             render_appearance, render_extensions, render_plan, render_processes,
@@ -270,11 +267,7 @@ fn render_composer(
     // Filled field like Grok Build: subtle surface + border (not hollow on canvas).
     // `area` is ComposerField (already narrowed by 1 when a scrollbar is reserved).
     let inner = Surface {
-        level: SurfaceLevel::Subtle,
-        border: BorderMode::Full,
         focused: state.focus.is_composer() && (!setup || credential),
-        title: None,
-        footer: None,
     }
     .render(frame, area, theme, capability);
 

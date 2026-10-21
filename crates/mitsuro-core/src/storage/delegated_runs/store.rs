@@ -981,6 +981,24 @@ impl DelegatedRunStore {
             .map_err(Into::into)
     }
 
+    /// Whether this parent has a live child that owns a durable completion
+    /// wake. Query lifecycle columns directly so long terminal histories and
+    /// large report payloads cannot hide or slow this execution decision.
+    pub fn has_active_parent_wake(&self, session_id: &str) -> Result<bool> {
+        self.db
+            .conn()
+            .query_row(
+                "SELECT EXISTS (
+                    SELECT 1 FROM delegated_runs
+                     WHERE parent_session_id = ?1 AND wake_parent = 1
+                       AND stage IN ('created', 'running', 'synthesizing')
+                 )",
+                [session_id],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
+    }
+
     pub fn list_runs_for_session(
         &self,
         session_id: &str,

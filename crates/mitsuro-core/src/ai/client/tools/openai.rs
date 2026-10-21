@@ -4,8 +4,9 @@ use std::time::Instant;
 use tracing::{error, info};
 
 use super::super::config::{
-    normalized_prompt_cache_key, openai_prompt_cache_options, openai_prompt_cache_retention,
-    CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
+    apply_parallel_tool_call_policy, normalized_prompt_cache_key, openai_prompt_cache_options,
+    openai_prompt_cache_retention, CallOptions, CodexReasoningEffort, OpenAiPromptCacheMode,
+    ParallelToolCallTransport,
 };
 use super::super::core::AiClient;
 use crate::ai::format::openai::responses_input::convert_openai_tool_message_for_request;
@@ -92,6 +93,13 @@ fn build_openai_tool_request_body(
         }
     }
 
+    if responses_format {
+        apply_parallel_tool_call_policy(
+            &mut body,
+            call_options,
+            ParallelToolCallTransport::Responses,
+        );
+    }
     body
 }
 
@@ -159,12 +167,7 @@ impl AiClient {
         let thinking_enabled = options.thinking.is_some();
 
         // Check if we're using ChatGPT Codex API (OAuth)
-        let is_chatgpt_codex = self
-            .config()
-            .base_url
-            .as_ref()
-            .map(|url| url.contains("chatgpt.com"))
-            .unwrap_or(false);
+        let is_chatgpt_codex = self.config().uses_chatgpt_codex_format();
 
         if is_chatgpt_codex {
             return self
@@ -376,6 +379,34 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read");
         assert!(body["tools"][0].get("function").is_none());
+        assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn responses_tool_request_honors_explicit_parallel_off() {
+        let options = CallOptions {
+            parallel_tool_calls: Some(false),
+            codex_parallel_tool_calls: true,
+            ..Default::default()
+        };
+        let body = build_openai_tool_request_body(
+            "grok-4.6",
+            ApiFormat::OpenAIResponses,
+            128,
+            None,
+            vec![],
+            vec![json!({"name":"read","input_schema":{"type":"object"}})],
+            None,
+            None,
+            Some(&options),
+        );
+        let body = crate::ai::transform::apply_request_body_transform(
+            body,
+            crate::ai::providers::ProviderId::Grok,
+            ApiFormat::OpenAIResponses,
+            "grok-4.6",
+        );
+        assert_eq!(body["parallel_tool_calls"], false);
     }
 
     #[test]

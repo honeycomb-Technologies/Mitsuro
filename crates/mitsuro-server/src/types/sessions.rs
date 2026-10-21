@@ -297,6 +297,9 @@ pub struct SessionStateResponse {
     pub delegation_event_cursor: Option<i64>,
     /// Latest persisted runtime trace sequence observed for this session.
     pub last_event_sequence: Option<i64>,
+    /// Cursor for the process-local canonical Code Agent live/replay stream.
+    pub agent_stream_generation: u64,
+    pub agent_stream_sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -697,6 +700,49 @@ pub struct SessionPresenceResponse {
     pub active_controllers: usize,
     pub stale_clients: usize,
     pub clients: Vec<SessionPresenceClientResponse>,
+}
+
+/// Public identity for the client currently controlling a Code Agent. The
+/// bearer-like lease token is intentionally excluded.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SessionControlLeaseSummary {
+    pub client_id: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SessionControlStateResponse {
+    pub session_id: String,
+    pub controller: Option<SessionControlLeaseSummary>,
+    pub ttl_seconds: u64,
+}
+
+/// Private mutation authority returned only to the client that takes control.
+/// Route code must never include this structure in public summaries or logs.
+#[derive(Clone, Serialize, PartialEq, Eq)]
+pub struct SessionControlLease {
+    pub resource_id: String,
+    pub client_id: String,
+    pub lease_token: String,
+    pub expires_at: String,
+}
+
+#[derive(Deserialize)]
+pub struct TakeSessionControlRequest {
+    pub client_id: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Serialize)]
+pub struct TakeSessionControlResponse {
+    pub lease: SessionControlLease,
+}
+
+#[derive(Deserialize)]
+pub struct HeartbeatSessionControlRequest {
+    pub client_id: String,
+    pub lease_token: String,
 }
 
 #[derive(Serialize)]

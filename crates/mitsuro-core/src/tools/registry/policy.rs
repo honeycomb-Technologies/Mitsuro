@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use crate::ai::providers::ProviderId;
 use crate::ai::types::AiTool;
+use crate::storage::WorkMode;
 
 /// Default tool execution timeout (2 minutes)
 pub(crate) const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -749,6 +750,31 @@ pub fn tool_category(name: &str) -> ToolCategory {
 /// This extends the name-only policy with argument-aware intent detection for
 /// polymorphic tools. In particular, `agent(agent_type = "build")` is
 /// write-capable even though other agent subtypes are read-only delegations.
+/// Canonical direct Code tool surface for an effective work mode.
+///
+/// Single source shared by the agent loop's mode transitions and the HTTP
+/// session/mode-override routes so per-turn allowlist validation never runs
+/// against stale or divergent schemas.
+pub fn filter_code_tools_for_mode(
+    tools: Vec<AiTool>,
+    permission_mode: PermissionMode,
+    work_mode: WorkMode,
+    has_active_plan: bool,
+    disabled_tools: &[String],
+    provider: ProviderId,
+    model: &str,
+) -> Vec<AiTool> {
+    ToolRequestPolicy::code(
+        permission_mode,
+        work_mode == WorkMode::Plan,
+        has_active_plan,
+        true,
+        disabled_tools,
+    )
+    .with_mutation_surface(MutationToolSurface::for_model(provider, model))
+    .filter(tools)
+}
+
 pub fn tool_policy_for_call(name: &str, params: &Value) -> ToolPolicy {
     match name {
         "agent" => agent_tool_policy(params),
@@ -960,6 +986,7 @@ pub fn tool_policy(name: &str) -> ToolPolicy {
         | "web_fetch"
         | "skill"
         | "tool_search"
+        | "workflow_read"
         | "mcp__list_resources"
         | "mcp__list_resource_templates"
         | "mcp__read_resource"

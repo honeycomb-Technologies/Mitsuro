@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.mitsuro.canvas</id>
+  <name>Mitsuro Canvas Alpha</name>
+  <summary>Native spatial Code workspace for Mitsuro</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.mitsuro">
+    <name>Honeycomb Technologies</name>
+  </developer>
+  <description>
+    <p>
+      Mitsuro Canvas is the Linux alpha of a native, project-bound spatial Code
+      workspace. It connects to an authoritative Mitsuro server for Agents,
+      terminals, browsers, files, changes, and collaborative canvas state.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.mitsuro.canvas.desktop</launchable>
+  <url type="homepage">https://github.com/honeycomb-Technologies/Mitsuro</url>
+  <provides>
+    <binary>mitsuro-canvas</binary>
+  </provides>
+  <categories>
+    <category>Development</category>
+  </categories>
+  <releases>
+    <release version="0.10.1" date="2026-08-30" type="development">
+      <description>
+        <p>Initial Linux and Wayland alpha of the native Canvas workspace.</p>
+      </description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

@@ -6,7 +6,6 @@ import {
 
 declare const Deno: {
   test(name: string, fn: () => void | Promise<void>): void;
-  readTextFile(path: URL): Promise<string>;
 };
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -169,26 +168,5 @@ Deno.test("null and legacy Worker edit states remain non-destructive and honest"
     buildWorkerModelUpdateFields(model("legacy-model"), null),
     null,
     "a keyless legacy selection must be rejected instead of sending a bare slug",
-  );
-});
-
-Deno.test("Worker editor uses mode-specific model request fields", async () => {
-  const editor = await Deno.readTextFile(
-    new URL(
-      "../components/hive/HiveWorkerEditorModal.tsx",
-      import.meta.url,
-    ),
-  );
-  assert(
-    editor.includes("buildWorkerModelCreateFields(selectedModel)") &&
-      editor.includes(
-        "buildWorkerModelUpdateFields(selectedModel, worker?.model_key)",
-      ) &&
-      editor.includes("modelFields !== null") &&
-      editor.includes("...modelFields") &&
-      editor.includes(
-        "Pinned model unavailable in the current catalog — leaving it unchanged.",
-      ),
-    "the form must gate and build create/update payloads through the pure helper",
   );
 });

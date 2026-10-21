@@ -65,11 +65,11 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert!(matches!(
             parsed[0].content.first(),
-            Some(Content::Text { text }) if text == "hello"
+            Some(Content::Text { text, .. }) if text == "hello"
         ));
         assert!(matches!(
             parsed[1].content.first(),
-            Some(Content::Text { text }) if text == "world"
+            Some(Content::Text { text, .. }) if text == "world"
         ));
     }
 
@@ -90,7 +90,7 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert!(matches!(
             parsed[0].content.first(),
-            Some(Content::Text { text }) if text == "keep me"
+            Some(Content::Text { text, .. }) if text == "keep me"
         ));
     }
 }

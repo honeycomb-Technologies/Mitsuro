@@ -4,15 +4,7 @@
 
 mod channels;
 pub mod clipboard;
-pub mod edit_diff;
 mod syntax;
-mod text;
-mod title;
 
-pub use channels::{
-    AsyncChannels, CompactionUpdate, DeviceCodeInfo, DynamicModelUpdate, ExtensionCommandUpdate,
-    InitExplorationResult, McpStatusUpdate, OAuthStatusUpdate, TitleUpdate,
-};
+pub use channels::{DeviceCodeInfo, OAuthStatusUpdate};
 pub use syntax::highlight_code;
-pub use text::{count_wrapped_lines, truncate_ellipsis, wrap_line, wrap_text};
-pub use title::{TitleAction, TitleEditor};

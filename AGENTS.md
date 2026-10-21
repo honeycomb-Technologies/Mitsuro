@@ -24,7 +24,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 ## Core Architecture
 - `crates/mitsuro-cli`: Terminal client and TUI runtime. Entry point with command parsing.
   - `src/main.rs`: CLI entry point, parses commands, starts ACP server or TUI with logging/setup.
-  - `src/tui/`: Terminal UI module with blocks, handlers, state, themes, plugins.
+  - `src/tui_v2/`: Terminal UI; `src/tui_support/` supplies shared rendering and services.
 - `crates/mitsuro-core`: Shared runtime library.
   - `src/ai/`: AI provider layer with multi-provider clients, streaming support.
   - `src/agent/`: Agent system with event handling, hooks, sub-agents, in-place compaction.
@@ -39,15 +39,22 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
   - `src/auth/`: OAuth/auth flows and token storage helpers.
   - `src/updater/`: Auto-updater for dev/release modes.
 - `crates/mitsuro-server`: Self-host API plus embedded web bundle for external clients.
+- `crates/mitsuro-hive`: Independently supervised Hive scheduler and execution service.
+- `crates/mitsuro-hive-protocol`: Authenticated local IPC between Hive and its control clients.
+- `crates/mitsuro-client`: Rust server API client used by Canvas.
+- `crates/grok-auth`: Provider authentication library used by core.
 - `apps/mobile`: Expo app that serves as the primary mobile client and React-based web surface.
-- `apps/desktop/shell`: Tauri wrapper around the Expo web build.
-- `apps/desktop/gpui`: Experimental native GPUI client. It may implement native presentation
-  independently, but must use shared Mitsuro client/server contracts and keep backend-specific
-  behavior behind explicit capabilities.
+- `apps/desktop/canvas`: Primary desktop GUI, using shared Mitsuro contracts.
+- `apps/website`: Static SvelteKit product website and plugin catalog, separate from the Expo web client.
+- `packages/api`, `packages/state`, `packages/ui`: Shared TypeScript transport, client state, and theme tokens for Expo.
+- Retired GPUI mobile/client-state, GPUI desktop, Tauri, Expo desktop UI, and desktop-backend implementations are
+  preserved in Git history; do not restore them as parallel product targets.
+- Interfaces: Canvas desktop, Expo mobile/web, CLI/TUI terminal; ACP for editors.
+- See [the module inventory](docs/architecture/overview.md) for current boundaries and source links.
 
 ## Design Patterns
 - **Event Bus**: AgentEventBus as central dispatcher.
-- **Registry**: ToolRegistry, ThemeRegistry for centralized management.
+- **Registry**: ToolRegistry for centralized tool management.
 - **Plugin Architecture**: Trait-based plugins (e.g., StreamBlock trait for renderable blocks).
 - **Strategy/Polymorphism via traits**: Different providers, tool implementations.
 - **Manager Pattern**: McpManager, PlanManager, SkillsManager, SessionManager.
@@ -163,7 +170,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Push endpoints (`/push/*`) must stay aligned with mobile/web diagnostics and test-send flows.
 - Port proxy endpoints (`/ports/*`) must remain localhost-scoped and deny recursive self-proxy loops.
 
-### TUI (`crates/mitsuro-cli/src/tui/`)
+### TUI (`crates/mitsuro-cli/src/tui_v2/`)
 - Protect frame-time performance and input responsiveness. Avoid heavy allocations in render/event hot paths.
 - Keep streaming updates idempotent and visually stable.
 - Keep stream backpressure policy, queue telemetry, and interruption recovery messaging explicit in shared TUI state/handlers.
@@ -172,7 +179,7 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 - Plan/task UI state must come from persisted plan lifecycle or explicit loop events, not heuristic parsing of assistant prose.
 - Keep contrast/readability strong in both dense and sparse views. Theme additions must update registry wiring and defaults intentionally. Avoid hardcoding colors outside theme primitives.
 
-### TUI Handlers (`crates/mitsuro-cli/src/tui/handlers/`)
+### TUI Handlers (`crates/mitsuro-cli/src/tui_v2/app/`)
 - Keep keyboard/mouse/render handling deterministic.
 - Keep session/tool side effects explicit and traceable.
 - Keep model selection and quick-toggle flows on a shared handler path so persistence, auth rebinds, and recent-model state do not drift.
@@ -193,15 +200,13 @@ This is the **only** AGENTS file in the repository. All module-specific invarian
 ### Apps (`apps/`)
 - Preserve strict separation between app surfaces and core runtime internals.
 - Do not duplicate business logic that already exists in `mitsuro-core` or `mitsuro-server`.
-- Keep desktop and Expo web behavior aligned where features overlap.
+- Keep Canvas and Expo behavior aligned through shared server contracts where features overlap.
 - Keep model-speed and reasoning controls driven by shared client state or server contracts rather than ad-hoc component-local mappings.
 - Notification and Live Activity actions that mutate session state must carry explicit session context; never assume the currently focused chat is the correct target.
 - Keep knowledge surfaces server-backed and shared across modes; reports and memories should behave like one project knowledge substrate rather than separate client-local feature stacks.
-- The shipped Tauri desktop shell remains a host for the Expo web build. The experimental GPUI
-  client is an explicitly approved alternate native surface; keep business logic in shared
-  crates, make unsupported backend capabilities honest, and do not imply that it has replaced
-  the shipped shell without an explicit migration decision.
-- Treat Tauri permissions, deep links, and updater config as security-sensitive.
+- Canvas uses `mitsuro-client` and shared core/server logic. Keep Expo independent of abandoned desktop packages.
+- Preserve installed data, compatibility readers, and service artifacts during retirement.
+- Canvas still requires GUI acceptance and deployment validation; see `docs/frontends/desktop-transition.md`.
 
 ### Mobile and Shared Client Performance (`apps/mobile`, `packages/state`, `packages/ui`)
 - Keep the interaction path independent from background synchronization. Navigation, opening the composer, switching modes, and creating an optimistic chat shell must not await full catalogs, session lists, or transcript hydration.

@@ -68,6 +68,9 @@ enum Commands {
         /// Port to listen on
         #[arg(short, long, default_value_t = 3000)]
         port: u16,
+        /// Run as the persistent loopback companion for native desktop clients
+        #[arg(long)]
+        desktop_managed: bool,
     },
 
     /// Check for or apply a Mitsuro release update
@@ -1146,10 +1149,14 @@ async fn main() -> Result<()> {
 
     // Serve mode has its own logging (stdout), skip TUI logging setup
     if matches!(cli.command, Some(Commands::Serve { .. })) {
-        if let Some(Commands::Serve { port }) = cli.command {
+        if let Some(Commands::Serve {
+            port,
+            desktop_managed,
+        }) = cli.command
+        {
             mitsuro_core::identity::require_startup_identity()
                 .context("validating Mitsuro configuration authority")?;
-            return serve::run(port).await;
+            return serve::run(port, desktop_managed).await;
         }
     }
 
@@ -1276,6 +1283,21 @@ mod cli_contract_tests {
             version.to_string().trim(),
             format!("mitsuro {}", env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    #[test]
+    fn serve_accepts_explicit_desktop_managed_mode() {
+        let parsed =
+            Cli::try_parse_from(["mitsuro", "serve", "--desktop-managed", "--port", "4123"])
+                .expect("desktop-managed serve arguments");
+
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::Serve {
+                port: 4123,
+                desktop_managed: true,
+            })
+        ));
     }
 
     #[test]

@@ -48,6 +48,6 @@ pub use skill::{Skill, SkillInfo, SkillPermission, SkillSource};
 
 // Re-export loader functions for direct use
 pub use loader::{
-    load_skill, load_skill_file, load_skills_from_dir, load_skills_from_root, scaffold_skill,
-    SkillDiagnostic, SkillDiagnosticSeverity, SkillLoadOptions, SkillLoadReport,
+    load_skill, load_skill_file, load_skills_from_dir, load_skills_from_root, SkillDiagnostic,
+    SkillDiagnosticSeverity, SkillLoadOptions, SkillLoadReport,
 };

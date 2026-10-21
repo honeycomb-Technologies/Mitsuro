@@ -2,7 +2,10 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use reqwest::RequestBuilder;
+use serde::de::DeserializeOwned;
+use tracing::debug;
 
 use crate::auth::{
     resolve_anthropic_auth, resolve_grok_auth, resolve_openai_auth, AnthropicAuthType,
@@ -14,6 +17,62 @@ use super::models::ModelMetadata;
 use super::providers::{get_provider, ProviderId};
 
 pub(crate) const MAX_CATALOG_PAGES: usize = 100;
+
+/// A provider model-catalog page: raw entries plus the cursor contract.
+pub(crate) trait CatalogPage {
+    type Entry;
+    fn entries(self) -> Vec<Self::Entry>;
+    fn has_more(&self) -> bool;
+    fn last_id(&self) -> Option<&str>;
+}
+
+/// Fetch every page of a cursor-paginated provider model catalog.
+///
+/// Shared by providers whose `/models` endpoints share the same page contract
+/// (`data` + `has_more` + `last_id`). A partial catalog is unsafe to publish
+/// because it would replace the last-known-good snapshot, so any pagination
+/// failure aborts the whole refresh.
+pub(crate) async fn fetch_catalog_pages<P, F>(
+    provider: &'static str,
+    mut build_request: impl FnMut(Option<&str>) -> RequestBuilder,
+    mut parse_entry: F,
+) -> Result<Vec<ModelMetadata>>
+where
+    P: DeserializeOwned + CatalogPage,
+    F: FnMut(P::Entry) -> Option<ModelMetadata>,
+{
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+    let mut models = Vec::new();
+    let mut page_count = 0usize;
+    loop {
+        page_count += 1;
+        if page_count > MAX_CATALOG_PAGES {
+            bail!("{provider} model catalog exceeded {MAX_CATALOG_PAGES} pages");
+        }
+        let response = build_request(cursor.as_deref()).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            bail!("{provider} models API error: {status} - {detail}");
+        }
+
+        let page = response.json::<P>().await?;
+        let next_cursor =
+            next_catalog_cursor(provider, page.has_more(), page.last_id(), &mut seen_cursors)?;
+        models.extend(page.entries().into_iter().filter_map(&mut parse_entry));
+
+        match next_cursor {
+            Some(next_cursor) => cursor = Some(next_cursor),
+            None => break,
+        }
+    }
+
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models.dedup_by(|left, right| left.id == right.id);
+    debug!(count = models.len(), "Fetched {provider} model catalog");
+    Ok(models)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogAuthKind {
@@ -106,17 +165,6 @@ pub fn credentials_for_dynamic_models(
     credentials: &CredentialStore,
 ) -> Vec<CatalogCredential> {
     credentials_for_dynamic_models_with_env(provider, credentials, env_credential)
-}
-
-/// Backwards-compatible single catalog identity for callers that only need to
-/// decide whether a refresh is possible.
-pub fn credential_for_dynamic_models(
-    provider: ProviderId,
-    credentials: &CredentialStore,
-) -> Option<CatalogCredential> {
-    credentials_for_dynamic_models(provider, credentials)
-        .into_iter()
-        .next()
 }
 
 fn credentials_for_dynamic_models_with_env(

@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Mitsuro Canvas Alpha
+GenericName=Spatial AI Coding Workspace
+Comment=Native spatial Code workspace for Mitsuro
+Exec=mitsuro-canvas
+TryExec=mitsuro-canvas
+Icon=io.mitsuro.canvas
+Terminal=false
+Categories=Development;
+Keywords=AI;Mitsuro;Canvas;Developer;
+StartupNotify=true
+StartupWMClass=io.mitsuro.canvas
